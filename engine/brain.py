@@ -1,7 +1,7 @@
 from engine.decision_engine import DecisionEngine
 from engine.prompt_builder import construir_prompt_sistema, construir_prompt_usuario
 from ai.model import generar_respuesta
-
+from engine.query_classifier import clasificar_consulta
 
 class Brain:
     def __init__(self):
