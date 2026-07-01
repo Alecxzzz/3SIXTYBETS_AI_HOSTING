@@ -21,7 +21,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://site--threesixtybetssz--qytms2wflqbs.code.run"
+        "https://threesixtybets-chat.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
