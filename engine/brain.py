@@ -1,7 +1,8 @@
 from engine.decision_engine import DecisionEngine
 from engine.prompt_builder import construir_prompt_sistema, construir_prompt_usuario
-from ai.model import generar_respuesta
 from engine.query_classifier import clasificar_consulta
+from ai.model import generar_respuesta
+
 
 class Brain:
     def __init__(self):
@@ -27,7 +28,6 @@ class Brain:
 
     def reforzar_decision(self, data_engine: dict, mensaje_usuario: str) -> str:
         prompt_sistema = construir_prompt_sistema()
-
         prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
 
         prompt_usuario += """
@@ -52,27 +52,27 @@ Si el nivel de evidencia es BAJA:
 
         return generar_respuesta(prompt_sistema, prompt_usuario)
 
-def procesar(self, mensaje_usuario: str) -> str:
-    tipo = clasificar_consulta(mensaje_usuario)
+    def procesar(self, mensaje_usuario: str) -> str:
+        tipo = clasificar_consulta(mensaje_usuario)
 
-    if tipo != "SPORTS_MATCH":
-        return (
-            "Escribe un partido o evento deportivo para analizar.\n\n"
-            "Ejemplos:\n"
-            "- Yankees vs Red Sox\n"
-            "- Lakers vs Celtics\n"
-            "- Real Madrid vs PSG\n"
-            "- Djokovic vs Sinner"
-        )
+        if tipo != "SPORTS_MATCH":
+            return (
+                "Escribe un partido o evento deportivo para analizar.\n\n"
+                "Ejemplos:\n"
+                "- Yankees vs Red Sox\n"
+                "- Lakers vs Celtics\n"
+                "- Real Madrid vs PSG\n"
+                "- Djokovic vs Sinner"
+            )
 
-    data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
+        data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
 
-    prompt_sistema = construir_prompt_sistema()
-    prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
+        prompt_sistema = construir_prompt_sistema()
+        prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
 
-    respuesta = generar_respuesta(prompt_sistema, prompt_usuario)
+        respuesta = generar_respuesta(prompt_sistema, prompt_usuario)
 
-    if self.respuesta_invalida(respuesta):
-        respuesta = self.reforzar_decision(data_engine, mensaje_usuario)
+        if self.respuesta_invalida(respuesta):
+            respuesta = self.reforzar_decision(data_engine, mensaje_usuario)
 
-    return respuesta
+        return respuesta
