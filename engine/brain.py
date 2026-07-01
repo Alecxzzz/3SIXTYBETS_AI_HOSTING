@@ -52,45 +52,17 @@ Si el nivel de evidencia es BAJA:
 
         return generar_respuesta(prompt_sistema, prompt_usuario)
 
-    def procesar(self, mensaje_usuario: str) -> str:
-        data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
-
-        prompt_sistema = construir_prompt_sistema()
-        prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
-
-        respuesta = generar_respuesta(prompt_sistema, prompt_usuario)
-
-        if self.respuesta_invalida(respuesta):
-            respuesta = self.reforzar_decision(data_engine, mensaje_usuario)
-
-        return respuesta
 def procesar(self, mensaje_usuario: str) -> str:
     tipo = clasificar_consulta(mensaje_usuario)
 
-    if tipo == "GENERAL_CHAT":
+    if tipo != "SPORTS_MATCH":
         return (
-            "Hola. Soy 3SIXTYBETS AI.\n\n"
             "Escribe un partido o evento deportivo para analizar.\n\n"
             "Ejemplos:\n"
             "- Yankees vs Red Sox\n"
             "- Lakers vs Celtics\n"
-            "- Real Madrid vs PSG"
-        )
-
-    if tipo == "SPORTS_QUESTION":
-        return (
-            "Puedo responder preguntas deportivas, pero mi función principal aquí es analizar partidos.\n\n"
-            "Escribe un partido específico, por ejemplo:\n"
-            "- Dodgers vs Yankees\n"
-            "- Celtics vs Lakers\n"
-            "- Alcaraz vs Sinner"
-        )
-
-    if tipo == "INVALID":
-        return (
-            "No pude entender la consulta.\n\n"
-            "Escribe un partido en este formato:\n"
-            "Equipo A vs Equipo B"
+            "- Real Madrid vs PSG\n"
+            "- Djokovic vs Sinner"
         )
 
     data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
