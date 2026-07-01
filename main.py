@@ -1,7 +1,8 @@
+
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-
+from fastapi.middleware.cors import CORSMiddleware
 from engine.brain import Brain
 
 
@@ -11,6 +12,21 @@ app = FastAPI(
     version="3.0"
 )
 
+app = FastAPI(
+    title="3SIXTYBETS AI WORKSPOT",
+    description="...",
+    version="2.0"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://site--threesixtybetssz--qytms2wflqbs.code.run"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 brain = Brain()
 
