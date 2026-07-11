@@ -26,7 +26,29 @@ class Brain:
 
         return any(frase in t for frase in frases_malas)
 
-    def reforzar_decision(self, data_engine: dict, mensaje_usuario: str) -> str:
+    def responder_conversacion(self, mensaje_usuario: str, tipo: str, modelo: str = "groq") -> str:
+        prompt_sistema = """
+Eres 3SIXTYBETS AI WORKSPOT.
+
+Responde de forma natural, clara y util.
+Mantente siempre dentro del tema deportivo, apuestas, analisis, mercados, estrategia o uso de la IA.
+No inventes estadisticas, cuotas, lesiones ni noticias.
+Si el usuario saluda, responde breve y ofrece ayudar con un partido, una pregunta deportiva o una estrategia de apuesta.
+Si el usuario hace una pregunta deportiva general, explica con criterio practico y pide el partido/mercado si necesitas mas contexto.
+No uses el formato EDGE DETECTADO salvo que el usuario haya dado un partido o enfrentamiento concreto.
+"""
+
+        prompt_usuario = f"""
+Tipo detectado: {tipo}
+Mensaje del usuario:
+{mensaje_usuario}
+
+Responde en espanol, directo y con tono de asistente deportivo.
+"""
+
+        return generar_respuesta(prompt_sistema, prompt_usuario, modelo)
+
+    def reforzar_decision(self, data_engine: dict, mensaje_usuario: str, modelo: str = "groq") -> str:
         prompt_sistema = construir_prompt_sistema()
         prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
 
@@ -48,21 +70,22 @@ Si el nivel de evidencia es MEDIA o ALTA:
 Si el nivel de evidencia es BAJA:
 - Puedes bajar la confianza.
 - Pero intenta dar una oportunidad conservadora si hay alguna tendencia útil.
+
+REGLA: TODO TIENE QUE SER INFORMACION DEPORTIVA DEL MES QUE ESTAMOS EN EL AÑO 2026
 """
 
-        return generar_respuesta(prompt_sistema, prompt_usuario)
+        return generar_respuesta(prompt_sistema, prompt_usuario, modelo)
 
-    def procesar(self, mensaje_usuario: str) -> str:
-        tipo = clasificar_consulta(mensaje_usuario)
+    def procesar(self, mensaje_usuario: str, modelo: str = "groq") -> str:
+        tipo = clasificar_consulta(mensaje_usuario, modelo)
 
-        if tipo != "SPORTS_MATCH":
+        if tipo in ["GENERAL_CHAT", "SPORTS_QUESTION"]:
+            return self.responder_conversacion(mensaje_usuario, tipo, modelo)
+
+        if tipo == "INVALID":
             return (
-                "Escribe un partido o evento deportivo para analizar.\n\n"
-                "Ejemplos:\n"
-                "- Yankees vs Red Sox\n"
-                "- Lakers vs Celtics\n"
-                "- Real Madrid vs PSG\n"
-                "- Djokovic vs Sinner"
+                "No pude entender bien el mensaje. Mandame un partido, una liga, "
+                "un jugador o una pregunta deportiva y lo analizamos."
             )
 
         data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
@@ -70,9 +93,9 @@ Si el nivel de evidencia es BAJA:
         prompt_sistema = construir_prompt_sistema()
         prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
 
-        respuesta = generar_respuesta(prompt_sistema, prompt_usuario)
+        respuesta = generar_respuesta(prompt_sistema, prompt_usuario, modelo)
 
         if self.respuesta_invalida(respuesta):
-            respuesta = self.reforzar_decision(data_engine, mensaje_usuario)
+            respuesta = self.reforzar_decision(data_engine, mensaje_usuario, modelo)
 
         return respuesta

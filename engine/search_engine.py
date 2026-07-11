@@ -107,9 +107,9 @@ class SearchEngine:
 
             partido,
 
-            partido + " odds",
+            partido + " odds, cuotass",
 
-            partido + " injuries",
+            partido + " injuries, lesiones",
 
             partido + " stats",
 
@@ -129,9 +129,9 @@ class SearchEngine:
 
             consultas2 = [
 
-                partido + " betting preview",
+                partido + " stake.com odds",
 
-                partido + " probable lineup",
+                partido + " probable lineup sofascore",
 
                 partido + " flashscore",
 

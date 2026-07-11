@@ -186,11 +186,11 @@ Contenido: {r.get("body", "Sin contenido")}
         if nivel == "BAJA":
             consultas_extra = [
                 f"{partido} oddsportal",
-                f"{partido} sofascore",
+                f"{partido} sofascore 2026",
                 f"{partido} flashscore",
-                f"{partido} espn injuries",
-                f"{partido} betting picks today",
-                f"{partido} statmuse last 10"
+                f"{partido} espn injuries 2026",
+                f"{partido} betting picks today 2026",
+                f"{partido} statmuse last 10 2026"
             ]
 
             for consulta in consultas_extra:
