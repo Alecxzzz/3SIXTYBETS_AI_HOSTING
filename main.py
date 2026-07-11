@@ -1,4 +1,5 @@
 
+import os
 import sqlite3
 
 from fastapi import FastAPI, Header, HTTPException
@@ -26,12 +27,18 @@ app = FastAPI(
     description="IA deportiva con motor de decisión, búsqueda web y análisis de apuestas.",
     version="3.0"
 )
+frontend_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://localhost:5173,https://threesixtybets-chat.vercel.app",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://threesixtybets-chat.vercel.app"
-    ],
+    allow_origins=frontend_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

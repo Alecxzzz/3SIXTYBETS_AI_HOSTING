@@ -88,7 +88,7 @@ REGLA: TODO TIENE QUE SER INFORMACION DEPORTIVA DEL MES QUE ESTAMOS EN EL AÑO 2
                 "un jugador o una pregunta deportiva y lo analizamos."
             )
 
-        data_engine = self.decision_engine.construir_contexto(mensaje_usuario)
+        data_engine = self.decision_engine.construir_contexto(mensaje_usuario, modelo)
 
         prompt_sistema = construir_prompt_sistema()
         prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)

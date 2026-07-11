@@ -168,7 +168,8 @@ Contenido: {r.get("body", "Sin contenido")}
 
         return "\n".join(bloques)
 
-    def construir_contexto(self, partido):
+    def construir_contexto(self, partido, modelo="groq"):
+        proveedor_busqueda = "you" if modelo == "you" else "ddgs"
 
         deporte_inicial = self.detectar_deporte(partido)
 
@@ -178,7 +179,11 @@ Contenido: {r.get("body", "Sin contenido")}
 
         for consulta in consultas:
             resultados.extend(
-                self.search_engine.buscar(consulta, cantidad=3)
+                self.search_engine.buscar(
+                    consulta,
+                    cantidad=3,
+                    proveedor=proveedor_busqueda
+                )
             )
 
         score, nivel = self.evaluar_evidencia(resultados)
@@ -195,7 +200,11 @@ Contenido: {r.get("body", "Sin contenido")}
 
             for consulta in consultas_extra:
                 resultados.extend(
-                    self.search_engine.buscar(consulta, cantidad=3)
+                    self.search_engine.buscar(
+                        consulta,
+                        cantidad=3,
+                        proveedor=proveedor_busqueda
+                    )
                 )
 
             score, nivel = self.evaluar_evidencia(resultados)
@@ -217,6 +226,9 @@ Score de evidencia:
 
 Resultados web recolectados:
 {self.resultados_a_texto(resultados)}
+
+Proveedor de busqueda:
+{proveedor_busqueda}
 """
 
         return {
@@ -224,5 +236,6 @@ Resultados web recolectados:
             "deporte": deporte_inicial,
             "nivel_evidencia": nivel,
             "score": score,
-            "contexto": contexto
+            "contexto": contexto,
+            "proveedor_busqueda": proveedor_busqueda
         }
