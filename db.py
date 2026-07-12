@@ -2,65 +2,149 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
-DB_PATH = os.getenv("DATABASE_PATH", "threesixtybets.db")
+import mysql.connector
 
 
-def get_connection():
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+def now_utc():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+
+def get_mysql_config():
+    database_url = os.getenv("DATABASE_URL", "").strip()
+
+    if database_url:
+        parsed = urlparse(database_url)
+        return {
+            "host": parsed.hostname,
+            "port": parsed.port or 3306,
+            "user": parsed.username,
+            "password": parsed.password,
+            "database": parsed.path.lstrip("/"),
+        }
+
+    return {
+        "host": os.getenv("MYSQL_HOST", "mysql-threesixtybetzzx.alwaysdata.net"),
+        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "user": os.getenv("MYSQL_USER", "threesixtybetzzx"),
+        "password": os.getenv("MYSQL_PASSWORD", ""),
+        "database": os.getenv("MYSQL_DATABASE", "threesixtybetzzx_test"),
+    }
+
+
+def get_connection(autocommit=True):
+    config = get_mysql_config()
+    return mysql.connector.connect(
+        host=config["host"],
+        port=config["port"],
+        user=config["user"],
+        password=config["password"],
+        database=config["database"],
+        autocommit=autocommit,
+        connection_timeout=20,
+        consume_results=True,
+        use_pure=True,
+        ssl_disabled=True,
+    )
+
+
+def run_query(query, params=None, fetchone=False):
+    for _ in range(5):
+        conn = None
+        cur = None
+        try:
+            conn = get_connection(autocommit=True)
+
+            if not conn.is_connected():
+                conn.reconnect(attempts=3, delay=2)
+
+            cur = conn.cursor(dictionary=True)
+            cur.execute(query, params or ())
+
+            if query.strip().upper().startswith("SELECT"):
+                return cur.fetchone() if fetchone else cur.fetchall()
+
+            conn.commit()
+            return True
+        except mysql.connector.Error as error:
+            print("MySQL error:", error)
+            time.sleep(3)
+        finally:
+            if cur:
+                cur.close()
+            if conn and conn.is_connected():
+                conn.close()
+
+    return None
 
 
 def init_db():
-    with get_connection() as conn:
-        conn.execute(
-            """
-            create table if not exists users (
-                id text primary key,
-                username text not null,
-                email text not null unique,
-                password_hash text not null,
-                created_at text not null
-            )
-            """
+    statements = [
+        """
+        create table if not exists users (
+            id varchar(64) primary key,
+            username varchar(80) not null unique,
+            password_hash varchar(255) not null,
+            role varchar(20) not null default 'user',
+            credits int not null default 0,
+            access_expires_at datetime not null,
+            created_at datetime not null
         )
-        conn.execute(
-            """
-            create table if not exists sessions (
-                token text primary key,
-                user_id text not null references users(id) on delete cascade,
-                created_at text not null
-            )
-            """
+        """,
+        """
+        create table if not exists sessions (
+            token varchar(128) primary key,
+            user_id varchar(64) not null,
+            created_at datetime not null,
+            foreign key (user_id) references users(id) on delete cascade
         )
-        conn.execute(
-            """
-            create table if not exists chat_messages (
-                id text primary key,
-                user_id text not null references users(id) on delete cascade,
-                role text not null check (role in ('user', 'ai')),
-                text text not null,
-                created_at text not null
-            )
-            """
+        """,
+        """
+        create table if not exists redeem_keys (
+            id varchar(64) primary key,
+            code varchar(32) not null unique,
+            duration_days int not null,
+            key_expires_at datetime null,
+            created_by varchar(64) null,
+            claimed_by varchar(64) null,
+            claimed_at datetime null,
+            created_at datetime not null,
+            foreign key (created_by) references users(id) on delete set null,
+            foreign key (claimed_by) references users(id) on delete set null
         )
-        conn.execute(
-            """
-            create index if not exists chat_messages_user_created_idx
-            on chat_messages (user_id, created_at)
-            """
+        """,
+        """
+        create table if not exists chat_messages (
+            id varchar(64) primary key,
+            user_id varchar(64) not null,
+            role varchar(20) not null,
+            text text not null,
+            created_at datetime not null,
+            index chat_messages_user_created_idx (user_id, created_at),
+            foreign key (user_id) references users(id) on delete cascade
         )
+        """,
+        """
+        create table if not exists credit_transactions (
+            id varchar(64) primary key,
+            user_id varchar(64) not null,
+            amount int not null,
+            status varchar(30) not null,
+            provider varchar(40) not null,
+            reference varchar(160) null,
+            created_at datetime not null,
+            foreign key (user_id) references users(id) on delete cascade
+        )
+        """,
+    ]
 
+    for statement in statements:
+        run_query(statement)
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+    ensure_admin_user()
 
 
 def hash_password(password):
@@ -93,90 +177,243 @@ def public_user(row):
     return {
         "id": row["id"],
         "name": row["username"],
-        "email": row["email"],
+        "username": row["username"],
+        "role": row["role"],
+        "credits": row["credits"],
+        "access_expires_at": row["access_expires_at"].isoformat()
+        if row.get("access_expires_at")
+        else None,
     }
 
 
-def create_user(username, email, password):
-    user_id = secrets.token_urlsafe(16)
+def generate_redeem_code():
+    part_a = secrets.token_hex(2).upper()
+    part_b = secrets.token_hex(2).upper()
+    return f"SIXTYBETS-{part_a}-{part_b}"
 
-    with get_connection() as conn:
-        conn.execute(
+
+def create_redeem_key(duration_days, created_by=None, key_expires_at=None):
+    while True:
+        key_id = secrets.token_urlsafe(16)
+        code = generate_redeem_code()
+        ok = run_query(
             """
-            insert into users (id, username, email, password_hash, created_at)
-            values (?, ?, ?, ?, ?)
+            insert into redeem_keys
+            (id, code, duration_days, key_expires_at, created_by, created_at)
+            values (%s, %s, %s, %s, %s, %s)
             """,
-            (user_id, username, email, hash_password(password), now_iso()),
+            (key_id, code, duration_days, key_expires_at, created_by, now_utc()),
         )
-        row = conn.execute("select * from users where id = ?", (user_id,)).fetchone()
+        if ok:
+            return run_query("select * from redeem_keys where id = %s", (key_id,), fetchone=True)
 
-    return public_user(row)
+
+def claim_redeem_key(code, user_id, cur):
+    clean_code = code.strip().upper()
+    cur.execute("select * from redeem_keys where code = %s for update", (clean_code,))
+    key = cur.fetchone()
+
+    if not key:
+        raise ValueError("Codigo de canjeo invalido.")
+
+    if key["claimed_by"]:
+        raise ValueError("Esta key ya fue reclamada.")
+
+    if key["key_expires_at"] and key["key_expires_at"] < now_utc():
+        raise ValueError("Esta key ya expiro.")
+
+    access_expires_at = now_utc() + timedelta(days=key["duration_days"])
+    cur.execute(
+        """
+        update redeem_keys
+        set claimed_by = %s, claimed_at = %s
+        where id = %s and claimed_by is null
+        """,
+        (user_id, now_utc(), key["id"]),
+    )
+
+    if cur.rowcount != 1:
+        raise ValueError("Esta key ya fue reclamada.")
+
+    return access_expires_at
 
 
-def get_user_by_email(email):
-    with get_connection() as conn:
-        return conn.execute("select * from users where email = ?", (email,)).fetchone()
+def create_user(username, password, redeem_code):
+    user_id = secrets.token_urlsafe(16)
+    username = username.strip()
+    conn = None
+    cur = None
+
+    try:
+        conn = get_connection(autocommit=False)
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            insert into users
+            (id, username, password_hash, access_expires_at, created_at)
+            values (%s, %s, %s, %s, %s)
+            """,
+            (user_id, username, hash_password(password), now_utc(), now_utc()),
+        )
+
+        access_expires_at = claim_redeem_key(redeem_code, user_id, cur)
+        cur.execute(
+            "update users set access_expires_at = %s where id = %s",
+            (access_expires_at, user_id),
+        )
+        cur.execute("select * from users where id = %s", (user_id,))
+        user = public_user(cur.fetchone())
+        conn.commit()
+        return user
+    except mysql.connector.IntegrityError:
+        if conn:
+            conn.rollback()
+        raise ValueError("Ya existe una cuenta con ese usuario.") from None
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn and conn.is_connected():
+            conn.close()
+
+
+def ensure_admin_user():
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "").strip()
+    access_days = int(os.getenv("ADMIN_ACCESS_DAYS", "1000"))
+
+    if not username or not password:
+        return
+
+    access_expires_at = now_utc() + timedelta(days=access_days)
+    existing = get_user_by_username(username)
+    if existing:
+        run_query(
+            """
+            update users
+            set password_hash = %s, role = 'admin', access_expires_at = %s
+            where id = %s
+            """,
+            (hash_password(password), access_expires_at, existing["id"]),
+        )
+        return
+
+    run_query(
+        """
+        insert into users
+        (id, username, password_hash, role, access_expires_at, created_at)
+        values (%s, %s, %s, 'admin', %s, %s)
+        """,
+        (
+            secrets.token_urlsafe(16),
+            username,
+            hash_password(password),
+            access_expires_at,
+            now_utc(),
+        ),
+    )
+
+
+def get_user_by_username(username):
+    return run_query("select * from users where username = %s", (username,), fetchone=True)
 
 
 def create_session(user_id):
     token = secrets.token_urlsafe(32)
-
-    with get_connection() as conn:
-        conn.execute(
-            "insert into sessions (token, user_id, created_at) values (?, ?, ?)",
-            (token, user_id, now_iso()),
-        )
-
+    run_query(
+        "insert into sessions (token, user_id, created_at) values (%s, %s, %s)",
+        (token, user_id, now_utc()),
+    )
     return token
 
 
 def delete_session(token):
-    with get_connection() as conn:
-        conn.execute("delete from sessions where token = ?", (token,))
+    run_query("delete from sessions where token = %s", (token,))
 
 
 def get_user_by_token(token):
-    with get_connection() as conn:
-        return conn.execute(
-            """
-            select users.*
-            from sessions
-            join users on users.id = sessions.user_id
-            where sessions.token = ?
-            """,
-            (token,),
-        ).fetchone()
+    return run_query(
+        """
+        select users.*
+        from sessions
+        join users on users.id = sessions.user_id
+        where sessions.token = %s
+        """,
+        (token,),
+        fetchone=True,
+    )
 
 
 def list_messages(user_id):
-    with get_connection() as conn:
-        rows = conn.execute(
-            """
-            select id, role, text, created_at
-            from chat_messages
-            where user_id = ?
-            order by created_at asc
-            """,
-            (user_id,),
-        ).fetchall()
+    rows = run_query(
+        """
+        select id, role, text, created_at
+        from chat_messages
+        where user_id = %s
+        order by created_at asc
+        """,
+        (user_id,),
+    ) or []
 
-    return [dict(row) for row in rows]
+    return [
+        {
+            **row,
+            "created_at": row["created_at"].isoformat()
+            if row.get("created_at")
+            else None,
+        }
+        for row in rows
+    ]
 
 
 def create_message(user_id, role, text):
     message_id = secrets.token_urlsafe(16)
+    run_query(
+        """
+        insert into chat_messages (id, user_id, role, text, created_at)
+        values (%s, %s, %s, %s, %s)
+        """,
+        (message_id, user_id, role, text, now_utc()),
+    )
+    row = run_query(
+        "select id, role, text, created_at from chat_messages where id = %s",
+        (message_id,),
+        fetchone=True,
+    )
+    row["created_at"] = row["created_at"].isoformat()
+    return row
 
-    with get_connection() as conn:
-        conn.execute(
-            """
-            insert into chat_messages (id, user_id, role, text, created_at)
-            values (?, ?, ?, ?, ?)
-            """,
-            (message_id, user_id, role, text, now_iso()),
-        )
-        row = conn.execute(
-            "select id, role, text, created_at from chat_messages where id = ?",
-            (message_id,),
-        ).fetchone()
 
-    return dict(row)
+def list_redeem_keys():
+    rows = run_query(
+        """
+        select code, duration_days, key_expires_at, claimed_by, claimed_at, created_at
+        from redeem_keys
+        order by created_at desc
+        limit 100
+        """
+    ) or []
+
+    return [
+        {
+            **row,
+            "status": "claimed"
+            if row.get("claimed_by")
+            else "expired"
+            if row.get("key_expires_at") and row["key_expires_at"] < now_utc()
+            else "available",
+            "key_expires_at": row["key_expires_at"].isoformat()
+            if row.get("key_expires_at")
+            else None,
+            "claimed_at": row["claimed_at"].isoformat()
+            if row.get("claimed_at")
+            else None,
+            "created_at": row["created_at"].isoformat()
+            if row.get("created_at")
+            else None,
+        }
+        for row in rows
+    ]

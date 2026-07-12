@@ -1,8 +1,6 @@
-import json
 import os
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+import requests
 from ddgs import DDGS
 
 
@@ -10,54 +8,41 @@ class SearchEngine:
     def __init__(self):
         self.ddgs = DDGS()
         self.you_api_key = os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
-        self.you_search_url = os.getenv("YOU_SEARCH_URL", "https://api.ydc-index.io/search")
+        self.you_search_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
 
     def buscar_you(self, consulta, cantidad=4):
         if not self.you_api_key:
             return []
 
-        params = urlencode({
-            "query": consulta,
-            "num_web_results": cantidad,
-        })
-        url = f"{self.you_search_url}?{params}"
-        req = Request(
-            url,
-            headers={
-                "X-API-Key": self.you_api_key,
-                "Accept": "application/json",
-            },
-        )
-
         try:
-            with urlopen(req, timeout=12) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            querystring = {
+                "query": consulta,
+                "count": str(cantidad),
+                "freshness": "day",
+                "language": "ES",
+                "safesearch": "off",
+                "crawl_timeout": "10",
+            }
+            headers = {
+                "X-API-KEY": self.you_api_key,
+                "Accept": "application/json",
+            }
+            response = requests.get(
+                self.you_search_url,
+                headers=headers,
+                params=querystring,
+                timeout=15,
+            )
+            data = response.json()
         except Exception:
             return []
 
-        raw_results = (
-            data.get("hits")
-            or data.get("results")
-            or data.get("web", {}).get("results")
-            or []
-        )
-
         datos = []
-        for item in raw_results[:cantidad]:
-            title = item.get("title") or item.get("name") or ""
-            url = item.get("url") or item.get("link") or item.get("href") or ""
-            body = (
-                item.get("description")
-                or item.get("snippet")
-                or item.get("body")
-                or item.get("summary")
-                or ""
-            )
-
+        for item in data.get("hits", [])[:cantidad]:
             datos.append({
-                "title": title,
-                "url": url,
-                "body": body,
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "body": item.get("snippet") or item.get("description") or "",
                 "source": "you",
             })
 

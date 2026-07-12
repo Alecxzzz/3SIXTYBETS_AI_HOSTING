@@ -1,6 +1,5 @@
 
 import os
-import sqlite3
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -10,12 +9,14 @@ from engine.brain import Brain
 from ai.model import modelos_disponibles
 from db import (
     create_message,
+    create_redeem_key,
     create_session,
     create_user,
     delete_session,
-    get_user_by_email,
+    get_user_by_username,
     get_user_by_token,
     init_db,
+    list_redeem_keys,
     list_messages,
     public_user,
     verify_password,
@@ -55,9 +56,15 @@ class Chat(BaseModel):
 
 
 class AuthRequest(BaseModel):
-    email: str
+    username: str
     password: str
-    name: str | None = None
+    redeem_code: str | None = None
+
+
+class AdminCreateKeyRequest(BaseModel):
+    duration_days: int
+    quantity: int = 1
+    expires_in_days: int | None = None
 
 
 class MessageRequest(BaseModel):
@@ -91,6 +98,19 @@ def current_user(authorization: str | None = Header(default=None)):
     return public_user(user)
 
 
+def require_admin(authorization: str | None = Header(default=None)):
+    token = token_from_header(authorization)
+    user = get_user_by_token(token)
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    return public_user(user)
+
+
 @app.get("/", response_class=PlainTextResponse)
 def inicio():
     return "3SIXTYBETS AI WORKSPOT funcionando. Entra a /docs para probar."
@@ -98,30 +118,30 @@ def inicio():
 
 @app.post("/auth/signup")
 def signup(data: AuthRequest):
-    email = data.email.strip().lower()
-    username = (data.name or "").strip()
+    username = data.username.strip()
+    redeem_code = (data.redeem_code or "").strip()
 
-    if not username or not email or not data.password:
+    if not username or not data.password or not redeem_code:
         raise HTTPException(status_code=400, detail="Completa todos los campos.")
 
     if len(data.password) < 6:
         raise HTTPException(status_code=400, detail="La contrasena debe tener al menos 6 caracteres.")
 
     try:
-        user = create_user(username, email, data.password)
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail="Ya existe una cuenta con ese email.") from None
+        user = create_user(username, data.password, redeem_code)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
     return create_auth_response(user)
 
 
 @app.post("/auth/signin")
 def signin(data: AuthRequest):
-    email = data.email.strip().lower()
-    user_row = get_user_by_email(email)
+    username = data.username.strip()
+    user_row = get_user_by_username(username)
 
     if not user_row or not verify_password(data.password, user_row["password_hash"]):
-        raise HTTPException(status_code=401, detail="Email o contrasena incorrectos.")
+        raise HTTPException(status_code=401, detail="Usuario o contrasena incorrectos.")
 
     return create_auth_response(public_user(user_row))
 
@@ -141,6 +161,40 @@ def me(authorization: str | None = Header(default=None)):
 @app.get("/models")
 def models():
     return modelos_disponibles()
+
+
+@app.post("/admin/keys")
+def admin_create_keys(data: AdminCreateKeyRequest, authorization: str | None = Header(default=None)):
+    admin = require_admin(authorization)
+
+    if data.duration_days <= 0:
+        raise HTTPException(status_code=400, detail="Los dias deben ser mayores a 0.")
+
+    if data.quantity < 1 or data.quantity > 100:
+        raise HTTPException(status_code=400, detail="La cantidad debe estar entre 1 y 100.")
+
+    key_expires_at = None
+    if data.expires_in_days is not None:
+        from db import now_utc
+        from datetime import timedelta
+
+        if data.expires_in_days <= 0:
+            raise HTTPException(status_code=400, detail="La expiracion debe ser mayor a 0 dias.")
+
+        key_expires_at = now_utc() + timedelta(days=data.expires_in_days)
+
+    keys = [
+        create_redeem_key(data.duration_days, admin["id"], key_expires_at)
+        for _ in range(data.quantity)
+    ]
+
+    return {"keys": keys}
+
+
+@app.get("/admin/keys")
+def admin_list_keys(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    return {"keys": list_redeem_keys()}
 
 
 @app.get("/messages")
