@@ -13,6 +13,7 @@ from db import (
     create_session,
     create_user,
     delete_session,
+    ensure_admin_user,
     get_user_by_username,
     get_user_by_token,
     init_db,
@@ -138,6 +139,10 @@ def signup(data: AuthRequest):
 @app.post("/auth/signin")
 def signin(data: AuthRequest):
     username = data.username.strip()
+
+    if username == os.getenv("ADMIN_USERNAME", "").strip():
+        ensure_admin_user()
+
     user_row = get_user_by_username(username)
 
     if not user_row or not verify_password(data.password, user_row["password_hash"]):

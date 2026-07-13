@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import mysql.connector
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 def now_utc():
