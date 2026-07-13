@@ -8,13 +8,13 @@ load_dotenv()
 
 MODEL_CONFIGS = {
     "groq": {
-        "name": "3SIXTYBETS AI",
+        "name": "Walter tipster",
         "api_key": os.getenv("GROQ_API_KEY"),
         "base_url": os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
         "model": os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
     },
     "you": {
-        "name": "You.com",
+        "name": "Demian tipster",
         "api_key": os.getenv("YOU_API_KEY"),
         "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
         "model": os.getenv("YOU_MODEL", "research"),
@@ -23,8 +23,8 @@ MODEL_CONFIGS = {
 
 
 def normalizar_modelo(modelo: str) -> str:
-    modelo = (modelo or "groq").strip().lower()
-    return modelo if modelo in MODEL_CONFIGS else "groq"
+    modelo = (modelo or "you").strip().lower()
+    return modelo if modelo in MODEL_CONFIGS else "you"
 
 
 def modelos_disponibles():
@@ -107,14 +107,17 @@ Solicitud del usuario:
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=60)
+        if not response.ok:
+            return f"ERROR You.com: {response.status_code} - {response.text[:300]}"
+
         data = response.json()
 
         if "output" in data and "content" in data["output"]:
             text = data["output"]["content"]
         else:
             text = str(data)
-    except Exception:
-        text = "Error leyendo respuesta de You.com."
+    except Exception as error:
+        text = f"Error leyendo respuesta de You.com: {error}"
 
     return clean_text(text)
 
@@ -131,13 +134,15 @@ def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "g
         return f"ERROR: Falta la API key para {config['name']} en el backend."
 
     client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-    respuesta = client.chat.completions.create(
-        model=config["model"],
-        messages=[
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
-        ],
-        temperature=0.2,
-    )
-
-    return respuesta.choices[0].message.content
+    try:
+        respuesta = client.chat.completions.create(
+            model=config["model"],
+            messages=[
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": prompt_usuario},
+            ],
+            temperature=0.2,
+        )
+        return respuesta.choices[0].message.content
+    except Exception as error:
+        return f"ERROR {config['name']}: {error}"

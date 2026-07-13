@@ -21,6 +21,7 @@ from db import (
     list_redeem_keys,
     list_messages,
     public_user,
+    redeem_key_for_user,
     verify_password,
 )
 
@@ -54,7 +55,7 @@ init_db()
 class Chat(BaseModel):
     mensaje: str
     buscar: bool = True
-    modelo: str = "groq"
+    modelo: str = "you"
 
 
 class AuthRequest(BaseModel):
@@ -72,6 +73,10 @@ class AdminCreateKeyRequest(BaseModel):
 class MessageRequest(BaseModel):
     role: str
     text: str
+
+
+class RedeemRequest(BaseModel):
+    redeem_code: str
 
 
 def create_auth_response(user):
@@ -212,6 +217,20 @@ def admin_list_keys(authorization: str | None = Header(default=None)):
 def messages(authorization: str | None = Header(default=None)):
     user = current_user(authorization)
     return list_messages(user["id"])
+
+
+@app.post("/redeem")
+def redeem_code(data: RedeemRequest, authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    code = data.redeem_code.strip()
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Escribe un codigo de canjeo.")
+
+    try:
+        return redeem_key_for_user(user["id"], code)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 @app.post("/messages")

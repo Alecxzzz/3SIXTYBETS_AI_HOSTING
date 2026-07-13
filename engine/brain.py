@@ -26,7 +26,7 @@ class Brain:
 
         return any(frase in t for frase in frases_malas)
 
-    def responder_conversacion(self, mensaje_usuario: str, tipo: str, modelo: str = "groq") -> str:
+    def responder_conversacion(self, mensaje_usuario: str, tipo: str, modelo: str = "you") -> str:
         prompt_sistema = """
 Eres 3SIXTYBETS AI WORKSPOT.
 
@@ -48,7 +48,7 @@ Responde en espanol, directo y con tono de asistente deportivo.
 
         return generar_respuesta(prompt_sistema, prompt_usuario, modelo)
 
-    def reforzar_decision(self, data_engine: dict, mensaje_usuario: str, modelo: str = "groq") -> str:
+    def reforzar_decision(self, data_engine: dict, mensaje_usuario: str, modelo: str = "you") -> str:
         prompt_sistema = construir_prompt_sistema()
         prompt_usuario = construir_prompt_usuario(data_engine, mensaje_usuario)
 
@@ -76,7 +76,7 @@ REGLA: TODO TIENE QUE SER INFORMACION DEPORTIVA DEL MES QUE ESTAMOS EN EL AÑO 2
 
         return generar_respuesta(prompt_sistema, prompt_usuario, modelo)
 
-    def procesar(self, mensaje_usuario: str, modelo: str = "groq") -> str:
+    def procesar(self, mensaje_usuario: str, modelo: str = "you") -> str:
         tipo = clasificar_consulta(mensaje_usuario, modelo)
 
         if tipo in ["GENERAL_CHAT", "SPORTS_QUESTION"]:

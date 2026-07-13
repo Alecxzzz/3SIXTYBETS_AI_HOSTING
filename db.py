@@ -242,6 +242,46 @@ def claim_redeem_key(code, user_id, cur):
     return access_expires_at
 
 
+def redeem_key_for_user(user_id, code):
+    conn = None
+    cur = None
+
+    try:
+        conn = get_connection(autocommit=False)
+        cur = conn.cursor(dictionary=True)
+        access_expires_at = claim_redeem_key(code, user_id, cur)
+
+        cur.execute("select access_expires_at from users where id = %s", (user_id,))
+        user = cur.fetchone()
+        current_expires_at = user["access_expires_at"] if user else now_utc()
+        base_date = max(current_expires_at, now_utc())
+        days_added = max(
+            int(((access_expires_at - now_utc()).total_seconds() + 86399) // 86400),
+            1,
+        )
+        next_expires_at = base_date + timedelta(days=days_added)
+
+        cur.execute(
+            "update users set access_expires_at = %s where id = %s",
+            (next_expires_at, user_id),
+        )
+        conn.commit()
+
+        return {
+            "days_added": days_added,
+            "access_expires_at": next_expires_at.isoformat(),
+        }
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn and conn.is_connected():
+            conn.close()
+
+
 def create_user(username, password, redeem_code):
     user_id = secrets.token_urlsafe(16)
     username = username.strip()
@@ -372,9 +412,10 @@ def list_messages(user_id):
         select id, role, text, created_at
         from chat_messages
         where user_id = %s
+        and created_at >= %s
         order by created_at asc
         """,
-        (user_id,),
+        (user_id, now_utc() - timedelta(hours=24)),
     ) or []
 
     return [
