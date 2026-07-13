@@ -102,13 +102,13 @@ Solicitud del usuario:
     }
     payload = {
         "input": full_prompt,
-        "research_effort": "exhaustive",
+        "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response = requests.post(url, headers=headers, json=payload, timeout=35)
         if not response.ok:
-            return f"ERROR You.com: {response.status_code} - {response.text[:300]}"
+            raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
 
         data = response.json()
 
@@ -117,9 +117,42 @@ Solicitud del usuario:
         else:
             text = str(data)
     except Exception as error:
-        text = f"Error leyendo respuesta de You.com: {error}"
+        text = generar_respuesta_con_groq(
+            prompt_sistema,
+            f"""
+Demian tipster no pudo completar la llamada directa a You.com.
+Motivo tecnico: {error}
+
+Usa este contexto web obtenido por You Search y responde al usuario sin mencionar el error tecnico:
+{context}
+
+Solicitud original:
+{prompt_usuario}
+""",
+        )
 
     return clean_text(text)
+
+
+def generar_respuesta_con_groq(prompt_sistema: str, prompt_usuario: str) -> str:
+    config = MODEL_CONFIGS["groq"]
+
+    if not config["api_key"]:
+        return (
+            "Demian tipster no pudo terminar la busqueda en vivo y Walter tipster "
+            "no esta configurado para responder como respaldo."
+        )
+
+    client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
+    respuesta = client.chat.completions.create(
+        model=config["model"],
+        messages=[
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user", "content": prompt_usuario},
+        ],
+        temperature=0.2,
+    )
+    return respuesta.choices[0].message.content
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "groq") -> str:
@@ -133,16 +166,7 @@ def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "g
     if not config["api_key"]:
         return f"ERROR: Falta la API key para {config['name']} en el backend."
 
-    client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
     try:
-        respuesta = client.chat.completions.create(
-            model=config["model"],
-            messages=[
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": prompt_usuario},
-            ],
-            temperature=0.2,
-        )
-        return respuesta.choices[0].message.content
+        return generar_respuesta_con_groq(prompt_sistema, prompt_usuario)
     except Exception as error:
         return f"ERROR {config['name']}: {error}"

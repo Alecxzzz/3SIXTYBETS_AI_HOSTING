@@ -1,3 +1,5 @@
+import re
+
 from ai.model import generar_respuesta
 
 
@@ -6,9 +8,13 @@ VALID_LABELS = ["SPORTS_MATCH", "SPORTS_QUESTION", "GENERAL_CHAT", "INVALID"]
 
 def clasificar_consulta(mensaje: str, modelo: str = "groq") -> str:
     texto = mensaje.strip()
+    texto_normalizado = texto.lower()
 
     if len(texto) < 4:
         return "GENERAL_CHAT"
+
+    if re.search(r"\b(vs|v\.|versus|contra)\b", texto_normalizado):
+        return "SPORTS_MATCH"
 
     prompt_sistema = """
 Clasifica el mensaje del usuario para 3SIXTYBETS AI.
