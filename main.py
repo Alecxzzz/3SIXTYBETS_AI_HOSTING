@@ -16,6 +16,7 @@ from db import (
     ensure_admin_user,
     get_user_by_username,
     get_user_by_token,
+    health_status,
     init_db,
     list_redeem_keys,
     list_messages,
@@ -115,6 +116,11 @@ def require_admin(authorization: str | None = Header(default=None)):
 @app.get("/", response_class=PlainTextResponse)
 def inicio():
     return "3SIXTYBETS AI WORKSPOT funcionando. Entra a /docs para probar."
+
+
+@app.get("/health")
+def health():
+    return health_status()
 
 
 @app.post("/auth/signup")

@@ -325,6 +325,21 @@ def get_user_by_username(username):
     return run_query("select * from users where username = %s", (username,), fetchone=True)
 
 
+def health_status():
+    db_ok = bool(run_query("select 1 as ok", fetchone=True))
+    admin_username = os.getenv("ADMIN_USERNAME", "").strip()
+    admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
+    admin = get_user_by_username(admin_username) if admin_username else None
+
+    return {
+        "db_ok": db_ok,
+        "admin_configured": bool(admin_username and admin_password),
+        "admin_username": admin_username or None,
+        "admin_exists": bool(admin),
+        "admin_role": admin["role"] if admin else None,
+    }
+
+
 def create_session(user_id):
     token = secrets.token_urlsafe(32)
     run_query(
