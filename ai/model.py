@@ -1,10 +1,14 @@
 import os
 
 import requests
-from dotenv import load_dotenv
-from openai import OpenAI
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
 
 MODEL_CONFIGS = {
     "groq": {
@@ -194,21 +198,34 @@ Solicitud del usuario:
 Usa la informacion web como apoyo, pero responde directo, claro y siempre enfocado en apuestas/deportes.
 """
 
-    client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-    respuesta = client.chat.completions.create(
-        model=config["model"],
-        messages=[
+    url = config["base_url"].rstrip("/") + "/chat/completions"
+    payload = {
+        "model": config["model"],
+        "messages": [
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": prompt_con_contexto},
         ],
-        temperature=float(os.getenv("GROQ_TEMPERATURE", "1")),
-        max_completion_tokens=int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "2048")),
-        top_p=float(os.getenv("GROQ_TOP_P", "1")),
-        extra_body={
-            "reasoning_effort": os.getenv("GROQ_REASONING_EFFORT", "medium"),
-        },
+        "temperature": float(os.getenv("GROQ_TEMPERATURE", "1")),
+        "max_completion_tokens": int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "2048")),
+        "top_p": float(os.getenv("GROQ_TOP_P", "1")),
+        "reasoning_effort": os.getenv("GROQ_REASONING_EFFORT", "medium"),
+    }
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    if not response.ok:
+        raise RuntimeError(f"Groq {response.status_code}: {response.text[:300]}")
+
+    data = response.json()
+    return (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
     )
-    return respuesta.choices[0].message.content
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "groq") -> str:
