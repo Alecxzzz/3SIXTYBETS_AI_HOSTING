@@ -117,9 +117,10 @@ Solicitud del usuario:
         else:
             text = str(data)
     except Exception as error:
-        text = generar_respuesta_con_groq(
-            prompt_sistema,
-            f"""
+        try:
+            text = generar_respuesta_con_groq(
+                prompt_sistema,
+                f"""
 Demian tipster no pudo completar la llamada directa a You.com.
 Motivo tecnico: {error}
 
@@ -129,7 +130,14 @@ Usa este contexto web obtenido por You Search y responde al usuario sin menciona
 Solicitud original:
 {prompt_usuario}
 """,
-        )
+            )
+            if text.strip().lower().startswith("error"):
+                raise RuntimeError(text)
+        except Exception:
+            text = (
+                "Demian tipster no pudo completar la busqueda en vivo ahora. "
+                "Revisa que las API keys del backend esten correctas o intenta de nuevo en unos segundos."
+            )
 
     return clean_text(text)
 
@@ -168,5 +176,8 @@ def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "g
 
     try:
         return generar_respuesta_con_groq(prompt_sistema, prompt_usuario)
-    except Exception as error:
-        return f"ERROR {config['name']}: {error}"
+    except Exception:
+        return (
+            f"{config['name']} no pudo responder ahora. "
+            "Revisa que su API key del backend este correcta o intenta de nuevo en unos segundos."
+        )
