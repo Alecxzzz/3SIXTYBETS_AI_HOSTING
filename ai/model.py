@@ -81,12 +81,37 @@ def buscar_contexto_you(question):
 
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
+    context = buscar_contexto_you(prompt_usuario)
+    prompt_con_contexto = f"""
+Informacion web reciente encontrada por Demian tipster:
+{context}
+
+Solicitud del usuario:
+{prompt_usuario}
+
+Responde como Demian tipster. Usa la informacion web como apoyo, pero no inventes datos si el contexto no alcanza.
+"""
+
+    if os.getenv("YOU_USE_RESEARCH", "false").strip().lower() not in ("1", "true", "yes"):
+        try:
+            return clean_text(
+                generar_respuesta_con_groq(
+                    prompt_sistema,
+                    prompt_con_contexto,
+                    usar_busqueda=False,
+                )
+            )
+        except Exception:
+            return (
+                "Demian tipster encontro contexto web, pero no pudo redactar la respuesta ahora. "
+                "Revisa que GROQ_API_KEY este correcta en el backend y reinicia el deploy."
+            )
+
     api_key = os.getenv("YOU_API_KEY")
     if not api_key:
         return "ERROR: Falta la API key para You.com en el backend."
 
     url = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
-    context = buscar_contexto_you(prompt_usuario)
     full_prompt = f"""
 {prompt_sistema}
 
