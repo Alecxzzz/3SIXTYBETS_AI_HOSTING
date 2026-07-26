@@ -42,6 +42,23 @@ def modelos_disponibles():
     ]
 
 
+def env_diagnostics():
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    you_key = os.getenv("YOU_API_KEY", "")
+    you_search_key = os.getenv("YOU_SEARCH_API_KEY", "")
+    return {
+        "groq_configured": bool(groq_key),
+        "groq_key_prefix": groq_key[:7] if groq_key else "",
+        "groq_model": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
+        "groq_base_url": os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+        "you_configured": bool(you_key),
+        "you_key_prefix": you_key[:7] if you_key else "",
+        "you_search_configured": bool(you_search_key),
+        "you_search_key_prefix": you_search_key[:7] if you_search_key else "",
+        "you_use_research": os.getenv("YOU_USE_RESEARCH", "false"),
+    }
+
+
 def clean_text(text):
     return (text or "").strip()
 
@@ -105,10 +122,10 @@ Responde como Demian tipster. Usa la informacion web como apoyo, pero no invente
                     usar_busqueda=False,
                 )
             )
-        except Exception:
+        except Exception as error:
             return (
                 "Demian tipster encontro contexto web, pero no pudo redactar la respuesta ahora. "
-                "Revisa que GROQ_API_KEY este correcta en el backend y reinicia el deploy."
+                f"Error del motor de redaccion: {error}"
             )
 
     api_key = os.getenv("YOU_API_KEY")
@@ -241,8 +258,8 @@ def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "g
 
     try:
         return generar_respuesta_con_groq(prompt_sistema, prompt_usuario)
-    except Exception:
+    except Exception as error:
         return (
             f"{config['name']} no pudo responder ahora. "
-            "Revisa que su API key del backend este correcta o intenta de nuevo en unos segundos."
+            f"Error del proveedor: {error}"
         )
