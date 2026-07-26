@@ -63,6 +63,14 @@ def clean_text(text):
     return (text or "").strip()
 
 
+def trim_text(text: str, limit: int) -> str:
+    text = clean_text(text)
+    if len(text) <= limit:
+        return text
+
+    return text[:limit].rsplit(" ", 1)[0] + "\n\n[Contexto recortado para evitar limite de tokens.]"
+
+
 def buscar_contexto_you(question):
     api_key = os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
     if not api_key:
@@ -91,12 +99,12 @@ def buscar_contexto_you(question):
         data = response.json()
 
         context = ""
-        for item in data.get("hits", [])[:5]:
+        for item in data.get("hits", [])[:3]:
             title = item.get("title", "")
             snippet = item.get("snippet") or item.get("description") or ""
-            context += f"{title}\n{snippet}\n\n"
+            context += f"{trim_text(title, 120)}\n{trim_text(snippet, 450)}\n\n"
 
-        return context or "No se pudo obtener contexto externo."
+        return trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800"))) or "No se pudo obtener contexto externo."
     except Exception:
         return "No se pudo obtener contexto externo."
 
@@ -105,10 +113,10 @@ def generar_respuesta_you(prompt_sistema, prompt_usuario):
     context = buscar_contexto_you(prompt_usuario)
     prompt_con_contexto = f"""
 Informacion web reciente encontrada por Demian tipster:
-{context}
+{trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
 
 Solicitud del usuario:
-{prompt_usuario}
+{trim_text(prompt_usuario, 1200)}
 
 Responde como Demian tipster. Usa la informacion web como apoyo, pero no inventes datos si el contexto no alcanza.
 """
@@ -137,10 +145,10 @@ Responde como Demian tipster. Usa la informacion web como apoyo, pero no invente
 {prompt_sistema}
 
 Informacion reciente encontrada:
-{context}
+{trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
 
 Solicitud del usuario:
-{prompt_usuario}
+{trim_text(prompt_usuario, 1200)}
 """
     headers = {
         "Content-Type": "application/json",
@@ -171,10 +179,10 @@ Demian tipster no pudo completar la llamada directa a You.com.
 Motivo tecnico: {error}
 
 Usa este contexto web obtenido por You Search y responde al usuario sin mencionar el error tecnico:
-{context}
+{trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
 
 Solicitud original:
-{prompt_usuario}
+{trim_text(prompt_usuario, 1200)}
 """,
                 usar_busqueda=False,
             )
@@ -207,10 +215,10 @@ def generar_respuesta_con_groq(
     if contexto:
         prompt_con_contexto = f"""
 Informacion web reciente encontrada:
-{contexto}
+{trim_text(contexto, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
 
 Solicitud del usuario:
-{prompt_usuario}
+{trim_text(prompt_usuario, 1200)}
 
 Usa la informacion web como apoyo, pero responde directo, claro y siempre enfocado en apuestas/deportes.
 """
@@ -223,7 +231,7 @@ Usa la informacion web como apoyo, pero responde directo, claro y siempre enfoca
             {"role": "user", "content": prompt_con_contexto},
         ],
         "temperature": float(os.getenv("GROQ_TEMPERATURE", "1")),
-        "max_completion_tokens": int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "2048")),
+        "max_completion_tokens": int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "1024")),
         "top_p": float(os.getenv("GROQ_TOP_P", "1")),
         "reasoning_effort": os.getenv("GROQ_REASONING_EFFORT", "medium"),
     }

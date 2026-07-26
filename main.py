@@ -1,121 +1,118 @@
-
 import os
-
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-from engine.brain import Brain
-from ai.model import modelos_disponibles
-from db import (
-    create_message,
-    create_redeem_key,
-    create_session,
-    create_user,
-    delete_session,
-    ensure_admin_user,
-    get_user_by_username,
-    get_user_by_token,
-    health_status,
-    init_db,
-    list_redeem_keys,
-    list_messages,
-    public_user,
-    redeem_key_for_user,
-    verify_password,
-)
+from openai import OpenAI
+from ddgs import DDGS
 
+# ==============================
+# CONFIGURACION PARA HOSTING
+# ==============================
+# En Render agrega estas variables:
+# API_KEY = tu API Key de OpenRouter
+# BASE_URL = https://openrouter.ai/api/v1
+# MODEL = cohere/north-mini-code:free
+
+API_KEY = os.getenv("API_KEY", "")
+BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
+MODEL = os.getenv("MODEL", "cohere/north-mini-code:free")
+
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 app = FastAPI(
     title="3SIXTYBETS AI WORKSPOT",
-    description="IA deportiva con motor de decisión, búsqueda web y análisis de apuestas.",
-    version="3.0"
+    description="IA deportiva con busqueda web automatica.",
+    version="2.0"
 )
-frontend_origins = [
-    origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:5173,https://threesixtybets-chat.vercel.app",
-    ).split(",")
-    if origin.strip()
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=frontend_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-brain = Brain()
-init_db()
 
 
 class Chat(BaseModel):
     mensaje: str
     buscar: bool = True
-    modelo: str = "you"
 
 
-class AuthRequest(BaseModel):
-    username: str
-    password: str
-    redeem_code: str | None = None
+def limpiar_consulta(mensaje: str) -> str:
+    texto = mensaje.strip()
+    texto_lower = texto.lower()
+
+    frases = [
+        "analiza el partido",
+        "analiza partido",
+        "analiza",
+        "partido",
+        "juego",
+        "match",
+        "edge",
+        "apuesta",
+        "pronostico",
+        "pronóstico"
+    ]
+
+    for frase in frases:
+        if texto_lower.startswith(frase):
+            texto = texto[len(frase):].strip()
+            texto_lower = texto.lower()
+
+    return texto if texto else mensaje
 
 
-class AdminCreateKeyRequest(BaseModel):
-    duration_days: int
-    quantity: int = 1
-    expires_in_days: int | None = None
+# Limite de seguridad para no exceder el TPM (tokens por minuto) del modelo.
+# Groq free/on_demand tiers suelen tener limites bajos (p.ej. 8000 TPM), asi
+# que recortamos el contexto web ANTES de enviarlo, en vez de dejar que la
+# API rechace la peticion por "Request too large".
+MAX_CHARS_CONTEXTO_WEB = int(os.getenv("MAX_CHARS_CONTEXTO_WEB", "3500"))
+MAX_CHARS_POR_RESULTADO = int(os.getenv("MAX_CHARS_POR_RESULTADO", "220"))
 
 
-class MessageRequest(BaseModel):
-    role: str
-    text: str
+def recortar(texto: str, limite: int) -> str:
+    texto = texto or ""
+    if len(texto) <= limite:
+        return texto
+    return texto[:limite].rstrip() + "..."
 
 
-class RedeemRequest(BaseModel):
-    redeem_code: str
+def buscar_web(mensaje: str, max_resultados: int = 2) -> str:
+    partido = limpiar_consulta(mensaje)
 
+    # Menos consultas y menos resultados por consulta = menos tokens.
+    consultas = [
+        f"{partido} odds betting lines",
+        f"{partido} recent form stats",
+        f"{partido} h2h injuries lineup"
+    ]
 
-def create_auth_response(user):
-    token = create_session(user["id"])
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
-    }
+    resultados = []
 
+    try:
+        with DDGS() as ddgs:
+            for consulta in consultas:
+                resultados.append(f"\n=== BUSQUEDA WEB: {consulta} ===\n")
 
-def token_from_header(authorization: str | None):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing auth token.")
+                for r in ddgs.text(consulta, max_results=max_resultados):
+                    titulo = recortar(r.get("title", "Sin titulo"), 100)
+                    url = r.get("href", "Sin URL")
+                    contenido = recortar(r.get("body", "Sin contenido"), MAX_CHARS_POR_RESULTADO)
 
-    return authorization.split(" ", 1)[1].strip()
+                    resultados.append(
+                        f"""Titulo: {titulo}
+URL: {url}
+Contenido: {contenido}
+"""
+                    )
 
+    except Exception as e:
+        return f"No se pudo buscar en web. Error: {e}"
 
-def current_user(authorization: str | None = Header(default=None)):
-    token = token_from_header(authorization)
-    user = get_user_by_token(token)
+    if not resultados:
+        return "No se encontraron resultados web."
 
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    contexto_final = "\n".join(resultados)
 
-    return public_user(user)
+    # Tope duro global: pase lo que pase, nunca mandamos mas de esto.
+    if len(contexto_final) > MAX_CHARS_CONTEXTO_WEB:
+        contexto_final = contexto_final[:MAX_CHARS_CONTEXTO_WEB].rstrip() + "\n...(contexto recortado por limite de tokens)"
 
-
-def require_admin(authorization: str | None = Header(default=None)):
-    token = token_from_header(authorization)
-    user = get_user_by_token(token)
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired session.")
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required.")
-
-    return public_user(user)
+    return contexto_final
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -123,135 +120,181 @@ def inicio():
     return "3SIXTYBETS AI WORKSPOT funcionando. Entra a /docs para probar."
 
 
-@app.get("/health")
-def health():
-    return health_status()
-
-
-@app.post("/auth/signup")
-def signup(data: AuthRequest):
-    username = data.username.strip()
-    redeem_code = (data.redeem_code or "").strip()
-
-    if not username or not data.password or not redeem_code:
-        raise HTTPException(status_code=400, detail="Completa todos los campos.")
-
-    if len(data.password) < 6:
-        raise HTTPException(status_code=400, detail="La contrasena debe tener al menos 6 caracteres.")
-
-    try:
-        user = create_user(username, data.password, redeem_code)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-    return create_auth_response(user)
-
-
-@app.post("/auth/signin")
-def signin(data: AuthRequest):
-    username = data.username.strip()
-
-    if username == os.getenv("ADMIN_USERNAME", "").strip():
-        ensure_admin_user()
-
-    user_row = get_user_by_username(username)
-
-    if not user_row or not verify_password(data.password, user_row["password_hash"]):
-        raise HTTPException(status_code=401, detail="Usuario o contrasena incorrectos.")
-
-    return create_auth_response(public_user(user_row))
-
-
-@app.post("/auth/signout")
-def signout(authorization: str | None = Header(default=None)):
-    token = token_from_header(authorization)
-    delete_session(token)
-    return {"ok": True}
-
-
-@app.get("/auth/me")
-def me(authorization: str | None = Header(default=None)):
-    return current_user(authorization)
-
-
-@app.get("/models")
-def models():
-    return modelos_disponibles()
-
-
-@app.post("/admin/keys")
-def admin_create_keys(data: AdminCreateKeyRequest, authorization: str | None = Header(default=None)):
-    admin = require_admin(authorization)
-
-    if data.duration_days <= 0:
-        raise HTTPException(status_code=400, detail="Los dias deben ser mayores a 0.")
-
-    if data.quantity < 1 or data.quantity > 100:
-        raise HTTPException(status_code=400, detail="La cantidad debe estar entre 1 y 100.")
-
-    key_expires_at = None
-    if data.expires_in_days is not None:
-        from db import now_utc
-        from datetime import timedelta
-
-        if data.expires_in_days <= 0:
-            raise HTTPException(status_code=400, detail="La expiracion debe ser mayor a 0 dias.")
-
-        key_expires_at = now_utc() + timedelta(days=data.expires_in_days)
-
-    keys = [
-        create_redeem_key(data.duration_days, admin["id"], key_expires_at)
-        for _ in range(data.quantity)
-    ]
-
-    return {"keys": keys}
-
-
-@app.get("/admin/keys")
-def admin_list_keys(authorization: str | None = Header(default=None)):
-    require_admin(authorization)
-    return {"keys": list_redeem_keys()}
-
-
-@app.get("/messages")
-def messages(authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    return list_messages(user["id"])
-
-
-@app.post("/redeem")
-def redeem_code(data: RedeemRequest, authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    code = data.redeem_code.strip()
-
-    if not code:
-        raise HTTPException(status_code=400, detail="Escribe un codigo de canjeo.")
-
-    try:
-        return redeem_key_for_user(user["id"], code)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-
-@app.post("/messages")
-def save_message(data: MessageRequest, authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-
-    if data.role not in ["user", "ai"]:
-        raise HTTPException(status_code=400, detail="Invalid message role.")
-
-    if not data.text.strip():
-        raise HTTPException(status_code=400, detail="Message text is required.")
-
-    return create_message(user["id"], data.role, data.text.strip())
-
-
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
+    if not API_KEY:
+        return (
+            "ERROR: Falta API_KEY.\n"
+            "En Render agrega API_KEY, BASE_URL y MODEL en Environment Variables."
+        )
 
-    if not data.buscar:
-        return "La búsqueda web está desactivada. Activa buscar=true para usar el motor de decisión."
+    if data.buscar:
+        contexto_web = buscar_web(data.mensaje, max_resultados=2)
+    else:
+        contexto_web = "Busqueda web desactivada."
 
-    respuesta = brain.procesar(data.mensaje, data.modelo)
+    reglas = """
+Eres 3SIXTYBETS AI WORKSPOT.
 
-    return respuesta
+ROL:
+Eres un analista cuantitativo profesional especializado en apuestas deportivas con enfoque en Expected Value (+EV).
+
+REGLA CRITICA:
+Cuando el usuario mencione un partido, debes usar la busqueda web incluida.
+No respondas solo con conocimiento general.
+Si la busqueda web no trae datos suficientes, dilo claramente.
+
+OBJETIVO:
+Detectar una ventaja estadistica real basada en:
+- estadisticas recientes
+- cuotas reales si aparecen en las fuentes
+- contexto reciente
+- lesiones o alineaciones si aparecen
+- forma reciente
+- tendencias sostenibles
+- mercados con posible value
+
+NO INVENTAR:
+- cuotas
+- estadisticas
+- lesiones
+- mercados
+- alineaciones
+- fechas
+- competiciones
+
+Si un dato no aparece en la informacion web, escribe:
+"No aparece confirmado en las fuentes consultadas."
+
+DEPORTES SOPORTADOS:
+Futbol, NBA, MLB, Tenis, NHL, UFC/MMA.
+
+REGLAS:
+- Maximo 4 picks por partido.
+- No forzar picks si no hay edge.
+- No repetir picks correlacionados.
+- No abusar de ML, Over 2.5 o BTTS.
+- Priorizar mercados variados: handicaps, corners, props, team totals, tiros, tarjetas, PRA, rebotes, asistencias, sets, aces.
+
+FUTBOL:
+Priorizar doble oportunidad, handicap, gana cualquier mitad, team totals, corners minimo 7.5, tarjetas, tiros a puerta, jugador marca/asiste, over/under goles y BTTS solo con evidencia fuerte.
+
+NBA:
+Priorizar handicap, team totals, PRA bajos, puntos/rebotes/asistencias/triples de jugador, primera mitad, primer cuarto y total partido solo si hay ritmo claro.
+
+MLB:
+Priorizar pitchers, bullpen, hits, runs, strikeouts y splits local/visitante.
+
+TENIS:
+Priorizar handicap juegos, total juegos, ambos ganan set, sets exactos, aces y breaks.
+
+CALCULO:
+Si hay cuota real:
+Probabilidad implicita = 1 / cuota.
+Value = Probabilidad estimada - Probabilidad implicita.
+
+Si no hay cuota real:
+No inventes cuota. Puedes dar probabilidad estimada aproximada y aclarar que falta validar cuota.
+
+FORMATO FINAL OBLIGATORIO:
+
+CONTEXTO DEL EVENTO
+- Deporte:
+- Partido:
+- Competicion:
+- Fecha:
+
+ESTADISTICAS RECIENTES
+- Dato 1:
+- Dato 2:
+- Dato 3:
+
+LECTURA DEL PARTIDO
+- Narrativa principal:
+- Ritmo esperado:
+- Matchup clave:
+
+MERCADO Y CUOTAS
+- Mercado:
+- Linea:
+- Cuota:
+- Casa/Fuente:
+
+MODELO
+- Probabilidad estimada:
+- Probabilidad implicita:
+- Value:
+
+VALUE DETECTADO Y PICKS
+
+1) PICK — cuota
+
+- Implicita:
+- Modelo:
+- Value:
+- Stake:
+
+- Argumento corto:
+
+FUENTES CONSULTADAS:
+- URL 1
+- URL 2
+- URL 3
+"""
+
+    prompt_usuario = f"""
+PREGUNTA DEL USUARIO:
+{data.mensaje}
+
+INFORMACION ENCONTRADA EN WEB:
+{contexto_web}
+
+INSTRUCCIONES:
+Usa la informacion web anterior como fuente principal.
+Si la informacion es insuficiente, dilo.
+No inventes cuotas, estadisticas ni mercados.
+Incluye URLs usadas en FUENTES CONSULTADAS.
+"""
+
+    def llamar_modelo(contenido_usuario: str):
+        return client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": reglas},
+                {"role": "user", "content": contenido_usuario}
+            ],
+            temperature=0.2
+        )
+
+    try:
+        respuesta = llamar_modelo(prompt_usuario)
+        return respuesta.choices[0].message.content
+
+    except Exception as e:
+        error_texto = str(e)
+
+        # Si el proveedor rechaza por tamaño (p.ej. "Request too large",
+        # "too many tokens", error 413), reintentamos una vez con un
+        # contexto web mucho mas pequeno en vez de fallar directamente.
+        if "too large" in error_texto.lower() or "413" in error_texto or "tokens per minute" in error_texto.lower():
+            contexto_reducido = recortar(contexto_web, 1200)
+            prompt_reducido = f"""
+PREGUNTA DEL USUARIO:
+{data.mensaje}
+
+INFORMACION ENCONTRADA EN WEB:
+{contexto_reducido}
+
+INSTRUCCIONES:
+Usa la informacion web anterior como fuente principal.
+Si la informacion es insuficiente, dilo.
+No inventes cuotas, estadisticas ni mercados.
+Incluye URLs usadas en FUENTES CONSULTADAS.
+"""
+            try:
+                respuesta = llamar_modelo(prompt_reducido)
+                return respuesta.choices[0].message.content
+            except Exception as e2:
+                return f"No se pudo generar la respuesta (incluso tras reducir el contexto).\n\nDetalle:\n{str(e2)}"
+
+        return f"No se pudo generar la respuesta.\n\nDetalle:\n{error_texto}"
