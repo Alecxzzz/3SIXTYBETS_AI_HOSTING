@@ -11,7 +11,7 @@ MODEL_CONFIGS = {
         "name": "Walter tipster",
         "api_key": os.getenv("GROQ_API_KEY"),
         "base_url": os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-        "model": os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
     },
     "you": {
         "name": "Demian tipster",
@@ -130,6 +130,7 @@ Usa este contexto web obtenido por You Search y responde al usuario sin menciona
 Solicitud original:
 {prompt_usuario}
 """,
+                usar_busqueda=False,
             )
             if text.strip().lower().startswith("error"):
                 raise RuntimeError(text)
@@ -142,7 +143,11 @@ Solicitud original:
     return clean_text(text)
 
 
-def generar_respuesta_con_groq(prompt_sistema: str, prompt_usuario: str) -> str:
+def generar_respuesta_con_groq(
+    prompt_sistema: str,
+    prompt_usuario: str,
+    usar_busqueda: bool = True,
+) -> str:
     config = MODEL_CONFIGS["groq"]
 
     if not config["api_key"]:
@@ -151,14 +156,32 @@ def generar_respuesta_con_groq(prompt_sistema: str, prompt_usuario: str) -> str:
             "no esta configurado para responder como respaldo."
         )
 
+    contexto = buscar_contexto_you(prompt_usuario) if usar_busqueda else ""
+    prompt_con_contexto = prompt_usuario
+    if contexto:
+        prompt_con_contexto = f"""
+Informacion web reciente encontrada:
+{contexto}
+
+Solicitud del usuario:
+{prompt_usuario}
+
+Usa la informacion web como apoyo, pero responde directo, claro y siempre enfocado en apuestas/deportes.
+"""
+
     client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
     respuesta = client.chat.completions.create(
         model=config["model"],
         messages=[
             {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
+            {"role": "user", "content": prompt_con_contexto},
         ],
-        temperature=0.2,
+        temperature=float(os.getenv("GROQ_TEMPERATURE", "1")),
+        max_completion_tokens=int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "2048")),
+        top_p=float(os.getenv("GROQ_TOP_P", "1")),
+        extra_body={
+            "reasoning_effort": os.getenv("GROQ_REASONING_EFFORT", "medium"),
+        },
     )
     return respuesta.choices[0].message.content
 
