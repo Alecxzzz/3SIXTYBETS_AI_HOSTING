@@ -123,7 +123,7 @@ Contenido: {contenido}
 
 @app.get("/", response_class=PlainTextResponse)
 def inicio():
-    return "3SIXTYBETS AI WORKSPOT funcionando. Entra a /docs para probar."
+    return "Test"
 
 
 @app.post("/chat", response_class=PlainTextResponse)
