@@ -25,6 +25,10 @@ MODEL_CONFIGS = {
     },
 }
 
+GROQ_SYSTEM_PROMPT_MAX_CHARS = int(os.getenv("GROQ_SYSTEM_PROMPT_MAX_CHARS", "2800"))
+GROQ_USER_PROMPT_MAX_CHARS = int(os.getenv("GROQ_USER_PROMPT_MAX_CHARS", "1000"))
+YOU_CONTEXT_MAX_CHARS = int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1200"))
+
 
 def normalizar_modelo(modelo: str) -> str:
     modelo = (modelo or "you").strip().lower()
@@ -113,10 +117,10 @@ def generar_respuesta_you(prompt_sistema, prompt_usuario):
     context = buscar_contexto_you(prompt_usuario)
     prompt_con_contexto = f"""
 Informacion web reciente encontrada por Demian tipster:
-{trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
+{trim_text(context, YOU_CONTEXT_MAX_CHARS)}
 
 Solicitud del usuario:
-{trim_text(prompt_usuario, 1200)}
+{trim_text(prompt_usuario, GROQ_USER_PROMPT_MAX_CHARS)}
 
 Responde como Demian tipster. Usa la informacion web como apoyo, pero no inventes datos si el contexto no alcanza.
 """
@@ -215,10 +219,10 @@ def generar_respuesta_con_groq(
     if contexto:
         prompt_con_contexto = f"""
 Informacion web reciente encontrada:
-{trim_text(contexto, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
+{trim_text(contexto, YOU_CONTEXT_MAX_CHARS)}
 
 Solicitud del usuario:
-{trim_text(prompt_usuario, 1200)}
+{trim_text(prompt_usuario, GROQ_USER_PROMPT_MAX_CHARS)}
 
 Usa la informacion web como apoyo, pero responde directo, claro y siempre enfocado en apuestas/deportes.
 """
