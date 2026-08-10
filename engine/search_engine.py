@@ -1,12 +1,16 @@
 import os
 
 import requests
-from ddgs import DDGS
+
+try:
+    from ddgs import DDGS
+except ImportError:  # pragma: no cover - depends on environment packages
+    DDGS = None
 
 
 class SearchEngine:
     def __init__(self):
-        self.ddgs = DDGS()
+        self.ddgs = DDGS() if DDGS is not None else None
         self.you_api_key = os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
         self.you_search_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
 
@@ -51,6 +55,9 @@ class SearchEngine:
     def buscar_ddgs(self, consulta, cantidad=4):
         datos = []
 
+        if self.ddgs is None:
+            return datos
+
         try:
             for r in self.ddgs.text(consulta, max_results=cantidad):
                 datos.append({
@@ -71,6 +78,67 @@ class SearchEngine:
                 return resultados
 
         return self.buscar_ddgs(consulta, cantidad)
+
+    def ask_you(self, question, system_prompt="", research_effort="medium"):
+        api_key = os.getenv("YOU_API_KEY") or os.getenv("YOU_SEARCH_API_KEY")
+        if not api_key:
+            return "ERROR: Falta la API key para You.com en el backend."
+
+        try:
+            ydc_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
+            querystring = {
+                "query": question,
+                "count": "5",
+                "freshness": "day",
+                "language": "ES",
+                "safesearch": "off",
+                "crawl_timeout": "10",
+            }
+            headers_ydc = {
+                "X-API-KEY": api_key,
+                "Accept": "application/json",
+            }
+            ydc_response = requests.get(ydc_url, headers=headers_ydc, params=querystring, timeout=15)
+            ydc_data = ydc_response.json()
+
+            context = ""
+            for item in ydc_data.get("hits", [])[:5]:
+                title = item.get("title", "")
+                snippet = item.get("snippet") or item.get("description") or ""
+                context += f"{title}\n{snippet}\n\n"
+        except Exception:
+            context = "No se pudo obtener contexto externo."
+
+        url = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        }
+        full_prompt = f"""
+{system_prompt}
+
+Información reciente encontrada:
+{context}
+
+Analiza este evento deportivo:
+{question}
+"""
+        payload = {
+            "input": full_prompt,
+            "research_effort": research_effort,
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=35)
+            response.raise_for_status()
+            data = response.json()
+
+            if "output" in data and "content" in data["output"]:
+                return data["output"]["content"].strip()
+
+            return str(data)
+        except Exception as error:
+            return f"Error leyendo respuesta de You.com: {error}"
 
     def buscar_varias(self, consultas, proveedor="ddgs"):
         resultados = []

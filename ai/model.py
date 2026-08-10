@@ -2,6 +2,8 @@ import os
 
 import requests
 
+from engine.search_engine import SearchEngine
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -114,6 +116,20 @@ def buscar_contexto_you(question):
 
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
+    search_engine = SearchEngine()
+    research_effort = os.getenv("YOU_RESEARCH_EFFORT", "medium")
+
+    try:
+        respuesta = search_engine.ask_you(
+            prompt_usuario,
+            system_prompt=prompt_sistema,
+            research_effort=research_effort,
+        )
+        if respuesta and not str(respuesta).startswith("ERROR:") and not str(respuesta).startswith("Error leyendo respuesta"):
+            return clean_text(respuesta)
+    except Exception:
+        pass
+
     context = buscar_contexto_you(prompt_usuario)
     prompt_con_contexto = f"""
 Informacion web reciente encontrada por Demian tipster:
