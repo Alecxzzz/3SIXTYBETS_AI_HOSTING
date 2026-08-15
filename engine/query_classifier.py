@@ -6,7 +6,7 @@ from ai.model import generar_respuesta
 VALID_LABELS = ["SPORTS_MATCH", "SPORTS_QUESTION", "GENERAL_CHAT", "INVALID"]
 
 
-def clasificar_consulta(mensaje: str, modelo: str = "groq") -> str:
+def clasificar_consulta(mensaje: str, modelo: str = "you") -> str:
     texto = mensaje.strip()
     texto_normalizado = texto.lower()
 

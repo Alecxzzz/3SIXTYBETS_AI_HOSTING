@@ -17,7 +17,6 @@ API_KEY = (
     os.getenv("API_KEY")
     or os.getenv("OPENAI_API_KEY")
     or os.getenv("OPENAI_ADMIN_KEY")
-    or os.getenv("GROQ_API_KEY")
     or ""
 )
 BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")

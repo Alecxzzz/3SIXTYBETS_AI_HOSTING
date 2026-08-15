@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from ai.model import generar_respuesta_you
+from ai.model import generar_respuesta_you, normalizar_modelo
 from engine.search_engine import SearchEngine
 
 
@@ -47,6 +47,10 @@ class YouIntegrationTests(unittest.TestCase):
             system_prompt="Sistema de prueba",
             research_effort="medium",
         )
+
+    def test_normalizar_modelo_groq_uses_you(self):
+        self.assertEqual(normalizar_modelo("groq"), "you")
+        self.assertEqual(normalizar_modelo("GROQ"), "you")
 
 
 if __name__ == "__main__":

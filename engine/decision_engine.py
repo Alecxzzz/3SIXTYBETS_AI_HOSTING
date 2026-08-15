@@ -168,7 +168,7 @@ Contenido: {r.get("body", "Sin contenido")}
 
         return "\n".join(bloques)
 
-    def construir_contexto(self, partido, modelo="groq"):
+    def construir_contexto(self, partido, modelo="you"):
         proveedor_busqueda = "you" if modelo == "you" else "ddgs"
 
         deporte_inicial = self.detectar_deporte(partido)
