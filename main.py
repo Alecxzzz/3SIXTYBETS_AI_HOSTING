@@ -2,27 +2,17 @@ import os
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from openai import OpenAI
-from ddgs import DDGS
+
+from engine.search_engine import SearchEngine
 
 # ==============================
 # CONFIGURACION PARA HOSTING
 # ==============================
-# En Render agrega estas variables:
-# API_KEY = tu API Key de OpenRouter
-# BASE_URL = https://openrouter.ai/api/v1
-# MODEL = cohere/north-mini-code:free
+# Este backend solo soporta You.com.
+# No inicializa OpenAI ni Groq en el arranque.
 
-API_KEY = (
-    os.getenv("API_KEY")
-    or os.getenv("OPENAI_API_KEY")
-    or os.getenv("OPENAI_ADMIN_KEY")
-    or ""
-)
-BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
-MODEL = os.getenv("MODEL", "cohere/north-mini-code:free")
-
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+YOU_API_KEY = os.getenv("YOU_API_KEY") or os.getenv("YOU_SEARCH_API_KEY") or ""
+YOU_BASE_URL = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
 
 app = FastAPI(
     title="3SIXTYBETS AI WORKSPOT",
@@ -127,16 +117,11 @@ def inicio():
 
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
-    if not API_KEY:
+    if not YOU_API_KEY:
         return (
-            "ERROR: Falta API_KEY.\n"
-            "En Render agrega API_KEY, BASE_URL y MODEL en Environment Variables."
+            "ERROR: Falta YOU_API_KEY o YOU_SEARCH_API_KEY.\n"
+            "En Render agrega la clave de You.com y la variable YOU_BASE_URL."
         )
-
-    if data.buscar:
-        contexto_web = buscar_web(data.mensaje, max_resultados=2)
-    else:
-        contexto_web = "Busqueda web desactivada."
 
     reglas = """
 Eres 3SIXTYBETS AI WORKSPOT.
@@ -169,137 +154,13 @@ NO INVENTAR:
 - competiciones
 
 Si un dato no aparece en la informacion web, escribe:
-"No aparece confirmado en las fuentes consultadas."
+\"No aparece confirmado en las fuentes consultadas.\"
 
 DEPORTES SOPORTADOS:
 Futbol, NBA, MLB, Tenis, NHL, UFC/MMA.
 
-REGLAS:
-- Maximo 4 picks por partido.
-- No forzar picks si no hay edge.
-- No repetir picks correlacionados.
-- No abusar de ML, Over 2.5 o BTTS.
-- Priorizar mercados variados: handicaps, corners, props, team totals, tiros, tarjetas, PRA, rebotes, asistencias, sets, aces.
-
-FUTBOL:
-Priorizar doble oportunidad, handicap, gana cualquier mitad, team totals, corners minimo 7.5, tarjetas, tiros a puerta, jugador marca/asiste, over/under goles y BTTS solo con evidencia fuerte.
-
-NBA:
-Priorizar handicap, team totals, PRA bajos, puntos/rebotes/asistencias/triples de jugador, primera mitad, primer cuarto y total partido solo si hay ritmo claro.
-
-MLB:
-Priorizar pitchers, bullpen, hits, runs, strikeouts y splits local/visitante.
-
-TENIS:
-Priorizar handicap juegos, total juegos, ambos ganan set, sets exactos, aces y breaks.
-
-CALCULO:
-Si hay cuota real:
-Probabilidad implicita = 1 / cuota.
-Value = Probabilidad estimada - Probabilidad implicita.
-
-Si no hay cuota real:
-No inventes cuota. Puedes dar probabilidad estimada aproximada y aclarar que falta validar cuota.
-
-FORMATO FINAL OBLIGATORIO:
-
-CONTEXTO DEL EVENTO
-- Deporte:
-- Partido:
-- Competicion:
-- Fecha:
-
-ESTADISTICAS RECIENTES
-- Dato 1:
-- Dato 2:
-- Dato 3:
-
-LECTURA DEL PARTIDO
-- Narrativa principal:
-- Ritmo esperado:
-- Matchup clave:
-
-MERCADO Y CUOTAS
-- Mercado:
-- Linea:
-- Cuota:
-- Casa/Fuente:
-
-MODELO
-- Probabilidad estimada:
-- Probabilidad implicita:
-- Value:
-
-VALUE DETECTADO Y PICKS
-
-1) PICK — cuota
-
-- Implicita:
-- Modelo:
-- Value:
-- Stake:
-
-- Argumento corto:
-
-FUENTES CONSULTADAS:
-- URL 1
-- URL 2
-- URL 3
+RESPONDE SIEMPRE CON You.com como proveedor principal.
+No uses ni Groq ni OpenAI ni rutas alternativas.
 """
 
-    prompt_usuario = f"""
-PREGUNTA DEL USUARIO:
-{data.mensaje}
-
-INFORMACION ENCONTRADA EN WEB:
-{contexto_web}
-
-INSTRUCCIONES:
-Usa la informacion web anterior como fuente principal.
-Si la informacion es insuficiente, dilo.
-No inventes cuotas, estadisticas ni mercados.
-Incluye URLs usadas en FUENTES CONSULTADAS.
-"""
-
-    def llamar_modelo(contenido_usuario: str):
-        return client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": reglas},
-                {"role": "user", "content": contenido_usuario}
-            ],
-            temperature=0.2
-        )
-
-    try:
-        respuesta = llamar_modelo(prompt_usuario)
-        return respuesta.choices[0].message.content
-
-    except Exception as e:
-        error_texto = str(e)
-
-        # Si el proveedor rechaza por tamaño (p.ej. "Request too large",
-        # "too many tokens", error 413), reintentamos una vez con un
-        # contexto web mucho mas pequeno en vez de fallar directamente.
-        if "too large" in error_texto.lower() or "413" in error_texto or "tokens per minute" in error_texto.lower():
-            contexto_reducido = recortar(contexto_web, 1200)
-            prompt_reducido = f"""
-PREGUNTA DEL USUARIO:
-{data.mensaje}
-
-INFORMACION ENCONTRADA EN WEB:
-{contexto_reducido}
-
-INSTRUCCIONES:
-Usa la informacion web anterior como fuente principal.
-Si la informacion es insuficiente, dilo.
-No inventes cuotas, estadisticas ni mercados.
-Incluye URLs usadas en FUENTES CONSULTADAS.
-"""
-            try:
-                respuesta = llamar_modelo(prompt_reducido)
-                return respuesta.choices[0].message.content
-            except Exception as e2:
-                return f"No se pudo generar la respuesta (incluso tras reducir el contexto).\n\nDetalle:\n{str(e2)}"
-
-        return f"No se pudo generar la respuesta.\n\nDetalle:\n{error_texto}"
+    return SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
