@@ -123,22 +123,46 @@ Información reciente encontrada:
 Analiza este evento deportivo:
 {question}
 """
-        payload = {
-            "input": full_prompt,
-            "research_effort": research_effort,
-        }
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=35)
-            response.raise_for_status()
-            data = response.json()
+        payloads = [
+            {
+                "query": full_prompt,
+                "research_effort": research_effort,
+                "background": False,
+            },
+            {
+                "input": full_prompt,
+                "research_effort": research_effort,
+                "background": False,
+            },
+        ]
 
-            if "output" in data and "content" in data["output"]:
-                return data["output"]["content"].strip()
+        last_error = None
+        for payload in payloads:
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=35)
+                response.raise_for_status()
+                data = response.json()
 
-            return str(data)
-        except Exception as error:
-            return f"Error leyendo respuesta de You.com: {error}"
+                if isinstance(data, dict):
+                    if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
+                        return data["output"]["content"].strip()
+                    for key in ("answer", "content", "text", "result"):
+                        if key in data and isinstance(data[key], str):
+                            return data[key].strip()
+                    if "output" in data and isinstance(data["output"], str):
+                        return data["output"].strip()
+
+                return str(data)
+            except requests.HTTPError as error:
+                last_error = error
+                if response is not None and getattr(response, "status_code", None) != 422:
+                    break
+            except Exception as error:
+                last_error = error
+                break
+
+        return f"Error leyendo respuesta de You.com: {last_error}"
 
     def buscar_varias(self, consultas, proveedor="ddgs"):
         resultados = []

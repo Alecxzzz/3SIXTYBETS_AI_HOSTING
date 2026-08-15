@@ -31,8 +31,8 @@ class YouIntegrationTests(unittest.TestCase):
         self.assertEqual(search_args.kwargs["params"]["query"], "Analiza Uruguay vs España")
 
         post_kwargs = mock_post.call_args.kwargs
-        self.assertIn("Sistema de prueba", post_kwargs["json"]["input"])
-        self.assertIn("Analiza Uruguay vs España", post_kwargs["json"]["input"])
+        self.assertIn("Sistema de prueba", post_kwargs["json"]["query"])
+        self.assertIn("Analiza Uruguay vs España", post_kwargs["json"]["query"])
 
     @patch("ai.model.SearchEngine.ask_you")
     def test_generar_respuesta_you_uses_search_engine(self, mock_ask_you):

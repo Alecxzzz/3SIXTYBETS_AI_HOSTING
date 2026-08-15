@@ -135,27 +135,49 @@ Solicitud del usuario:
         "Content-Type": "application/json",
         "X-API-Key": api_key,
     }
-    payload = {
-        "input": full_prompt,
-        "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
-    }
+    payloads = [
+        {
+            "query": full_prompt,
+            "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
+            "background": False,
+        },
+        {
+            "input": full_prompt,
+            "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
+            "background": False,
+        },
+    ]
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=35)
-        if not response.ok:
-            raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
+    last_error = None
+    for payload in payloads:
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=35)
+            if not response.ok:
+                if response.status_code != 422:
+                    raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
+                last_error = RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
+                continue
 
-        data = response.json()
+            data = response.json()
 
-        if "output" in data and "content" in data["output"]:
-            return clean_text(data["output"]["content"])
+            if isinstance(data, dict):
+                if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
+                    return clean_text(data["output"]["content"])
+                for key in ("answer", "content", "text", "result"):
+                    if key in data and isinstance(data[key], str):
+                        return clean_text(data[key])
+                if "output" in data and isinstance(data["output"], str):
+                    return clean_text(data["output"])
 
-        return clean_text(str(data))
-    except Exception as error:
-        return (
-            "Demian tipster no pudo completar la busqueda en vivo ahora. "
-            f"Motivo tecnico: {error}"
-        )
+            return clean_text(str(data))
+        except Exception as error:
+            last_error = error
+            break
+
+    return (
+        "Demian tipster no pudo completar la busqueda en vivo ahora. "
+        f"Motivo tecnico: {last_error}"
+    )
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "you") -> str:
