@@ -8,6 +8,36 @@ except ImportError:  # pragma: no cover - depends on environment packages
     DDGS = None
 
 
+VALID_YOU_RESEARCH_EFFORTS = {"lite", "standard", "deep", "exhaustive", "frontier"}
+
+
+def normalizar_research_effort(value):
+    if value is None:
+        return "standard"
+
+    v = str(value).strip().lower()
+    if not v:
+        return "standard"
+
+    aliases = {
+        "medium": "standard",
+        "normal": "standard",
+        "default": "standard",
+        "quick": "lite",
+        "low": "lite",
+        "fast": "lite",
+        "high": "deep",
+        "max": "exhaustive",
+        "heavy": "deep",
+        "very_deep": "deep",
+    }
+
+    if v in VALID_YOU_RESEARCH_EFFORTS:
+        return v
+
+    return aliases.get(v, "standard")
+
+
 class SearchEngine:
     def __init__(self):
         self.ddgs = DDGS() if DDGS is not None else None
@@ -79,10 +109,18 @@ class SearchEngine:
 
         return self.buscar_ddgs(consulta, cantidad)
 
-    def ask_you(self, question, system_prompt="", research_effort="medium"):
+    def ask_you(self, question, system_prompt="", research_effort="standard"):
+        research_effort = normalizar_research_effort(research_effort)
         api_key = os.getenv("YOU_API_KEY") or os.getenv("YOU_SEARCH_API_KEY")
         if not api_key:
             return "ERROR: Falta la API key para You.com en el backend."
+
+        # research_effort="frontier" SIEMPRE requiere background=true.
+        # Este backend no implementa polling (GET /v1/research/{task_id}),
+        # así que si llega "frontier" lo bajamos a "exhaustive" para evitar
+        # un 422 garantizado en cada llamada síncrona.
+        if research_effort == "frontier":
+            research_effort = "exhaustive"
 
         try:
             ydc_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
@@ -105,6 +143,9 @@ class SearchEngine:
             for item in ydc_data.get("hits", [])[:5]:
                 title = item.get("title", "")
                 snippet = item.get("snippet") or item.get("description") or ""
+                # Recortamos cada snippet para que 5 resultados nunca puedan
+                # inflar el prompt hasta el límite de 40,000 caracteres de "input".
+                snippet = snippet[:600]
                 context += f"{title}\n{snippet}\n\n"
         except Exception:
             context = "No se pudo obtener contexto externo."
@@ -124,45 +165,45 @@ Analiza este evento deportivo:
 {question}
 """
 
-        payloads = [
-            {
-                "query": full_prompt,
-                "research_effort": research_effort,
-                "background": False,
-            },
-            {
-                "input": full_prompt,
-                "research_effort": research_effort,
-                "background": False,
-            },
-        ]
+        # Límite duro documentado por You.com para "input": 40,000 caracteres.
+        # Dejamos margen de seguridad.
+        LIMITE_INPUT = 39000
+        if len(full_prompt) > LIMITE_INPUT:
+            full_prompt = full_prompt[:LIMITE_INPUT].rstrip() + "\n...(recortado por límite de caracteres de You.com)"
 
-        last_error = None
-        for payload in payloads:
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=35)
-                response.raise_for_status()
-                data = response.json()
+        payload = {
+            "input": full_prompt,
+            "research_effort": research_effort,
+            "background": False,
+        }
 
-                if isinstance(data, dict):
-                    if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
-                        return data["output"]["content"].strip()
-                    for key in ("answer", "content", "text", "result"):
-                        if key in data and isinstance(data[key], str):
-                            return data[key].strip()
-                    if "output" in data and isinstance(data["output"], str):
-                        return data["output"].strip()
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=35)
+            if not response.ok:
+                # Antes esto se perdía: raise_for_status() solo da el texto
+                # genérico "422 Client Error...", sin el detalle real que
+                # You.com manda en el body explicando qué campo falló.
+                try:
+                    detalle = response.json()
+                except Exception:
+                    detalle = response.text[:800]
+                return (
+                    f"Error de You.com ({response.status_code}): {detalle}"
+                )
+            data = response.json()
 
-                return str(data)
-            except requests.HTTPError as error:
-                last_error = error
-                if response is not None and getattr(response, "status_code", None) != 422:
-                    break
-            except Exception as error:
-                last_error = error
-                break
+            if isinstance(data, dict):
+                if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
+                    return data["output"]["content"].strip()
+                for key in ("answer", "content", "text", "result"):
+                    if key in data and isinstance(data[key], str):
+                        return data[key].strip()
+                if "output" in data and isinstance(data["output"], str):
+                    return data["output"].strip()
 
-        return f"Error leyendo respuesta de You.com: {last_error}"
+            return str(data)
+        except Exception as error:
+            return f"Error leyendo respuesta de You.com: {error}"
 
     def buscar_varias(self, consultas, proveedor="ddgs"):
         resultados = []

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from ai.model import generar_respuesta_you, normalizar_modelo
-from engine.search_engine import SearchEngine
+from engine.search_engine import SearchEngine, normalizar_research_effort
 
 
 class YouIntegrationTests(unittest.TestCase):
@@ -31,8 +31,8 @@ class YouIntegrationTests(unittest.TestCase):
         self.assertEqual(search_args.kwargs["params"]["query"], "Analiza Uruguay vs España")
 
         post_kwargs = mock_post.call_args.kwargs
-        self.assertIn("Sistema de prueba", post_kwargs["json"]["query"])
-        self.assertIn("Analiza Uruguay vs España", post_kwargs["json"]["query"])
+        self.assertIn("Sistema de prueba", post_kwargs["json"]["input"])
+        self.assertIn("Analiza Uruguay vs España", post_kwargs["json"]["input"])
 
     @patch("ai.model.SearchEngine.ask_you")
     def test_generar_respuesta_you_uses_search_engine(self, mock_ask_you):
@@ -45,12 +45,18 @@ class YouIntegrationTests(unittest.TestCase):
         mock_ask_you.assert_called_once_with(
             "Pregunta deportiva",
             system_prompt="Sistema de prueba",
-            research_effort="medium",
+            research_effort="standard",
         )
 
     def test_normalizar_modelo_groq_uses_you(self):
         self.assertEqual(normalizar_modelo("groq"), "you")
         self.assertEqual(normalizar_modelo("GROQ"), "you")
+
+    def test_normalizar_research_effort_uses_valid_enum(self):
+        self.assertEqual(normalizar_research_effort("medium"), "standard")
+        self.assertEqual(normalizar_research_effort("high"), "deep")
+        self.assertEqual(normalizar_research_effort("deep"), "deep")
+        self.assertEqual(normalizar_research_effort(""), "standard")
 
 
 if __name__ == "__main__":

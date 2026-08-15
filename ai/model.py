@@ -2,7 +2,7 @@ import os
 
 import requests
 
-from engine.search_engine import SearchEngine
+from engine.search_engine import SearchEngine, normalizar_research_effort
 
 try:
     from dotenv import load_dotenv
@@ -103,7 +103,7 @@ def buscar_contexto_you(question):
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
     search_engine = SearchEngine()
-    research_effort = os.getenv("YOU_RESEARCH_EFFORT", "medium")
+    research_effort = normalizar_research_effort(os.getenv("YOU_RESEARCH_EFFORT", "standard"))
 
     try:
         respuesta = search_engine.ask_you(
@@ -135,49 +135,34 @@ Solicitud del usuario:
         "Content-Type": "application/json",
         "X-API-Key": api_key,
     }
-    payloads = [
-        {
-            "query": full_prompt,
-            "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
-            "background": False,
-        },
-        {
-            "input": full_prompt,
-            "research_effort": os.getenv("YOU_RESEARCH_EFFORT", "medium"),
-            "background": False,
-        },
-    ]
+    payload = {
+        "input": full_prompt,
+        "research_effort": normalizar_research_effort(os.getenv("YOU_RESEARCH_EFFORT", "standard")),
+        "background": False,
+    }
 
-    last_error = None
-    for payload in payloads:
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=35)
-            if not response.ok:
-                if response.status_code != 422:
-                    raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
-                last_error = RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
-                continue
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=35)
+        if not response.ok:
+            raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
 
-            data = response.json()
+        data = response.json()
 
-            if isinstance(data, dict):
-                if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
-                    return clean_text(data["output"]["content"])
-                for key in ("answer", "content", "text", "result"):
-                    if key in data and isinstance(data[key], str):
-                        return clean_text(data[key])
-                if "output" in data and isinstance(data["output"], str):
-                    return clean_text(data["output"])
+        if isinstance(data, dict):
+            if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
+                return clean_text(data["output"]["content"])
+            for key in ("answer", "content", "text", "result"):
+                if key in data and isinstance(data[key], str):
+                    return clean_text(data[key])
+            if "output" in data and isinstance(data["output"], str):
+                return clean_text(data["output"])
 
-            return clean_text(str(data))
-        except Exception as error:
-            last_error = error
-            break
-
-    return (
-        "Demian tipster no pudo completar la busqueda en vivo ahora. "
-        f"Motivo tecnico: {last_error}"
-    )
+        return clean_text(str(data))
+    except Exception as error:
+        return (
+            "Demian tipster no pudo completar la busqueda en vivo ahora. "
+            f"Motivo tecnico: {error}"
+        )
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "you") -> str:
