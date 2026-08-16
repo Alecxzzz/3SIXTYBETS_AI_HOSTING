@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
@@ -18,6 +19,20 @@ app = FastAPI(
     title="3SIXTYBETS AI WORKSPOT",
     description="IA deportiva con busqueda web automatica.",
     version="2.0"
+)
+
+# CORS: permitir el frontend
+frontend_origins = os.getenv(
+    "FRONTEND_ORIGINS",
+    "http://localhost:5173,https://threesixtybets-chat.vercel.app"
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in frontend_origins],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
