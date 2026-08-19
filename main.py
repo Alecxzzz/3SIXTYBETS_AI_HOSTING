@@ -1,7 +1,10 @@
 import os
-from fastapi import FastAPI
+import re
+from urllib.parse import urljoin, quote
+import requests as http_requests
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from engine.search_engine import SearchEngine
@@ -10,6 +13,7 @@ try:
     from ddgs import DDGS
 except ImportError:
     DDGS = None
+
 
 # ==============================
 # CONFIGURACION PARA HOSTING
@@ -256,3 +260,157 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         reglas = reglas + f"\n\nCONTEXTO DE BUSQUEDA WEB OBTENIDO:\n{contexto_web}"
 
     return SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
+
+
+# ==============================
+# PROXY HLS
+# ==============================
+# En desarrollo Vite lo sirve con el plugin /vite-plugins/hls-proxy.js.
+# En producción (build estático) el browser no puede pedir streams
+# http:// desde https:// (mixed content) ni pasar el CORS de los servidores
+# IPTV.  Este endpoint las resuelve: el browser habla con nosotros por https
+# (mismo origen del API) y Python re-encamina el stream al servidor real.
+
+HLS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# Cabeceras que no deben retransmitirse al cliente
+_HOP = {
+    "connection", "keep-alive", "transfer-encoding", "upgrade",
+    "proxy-authenticate", "proxy-authorization", "te", "trailer",
+    "content-encoding", "content-length",
+}
+
+
+def _proxy_base(request: Request) -> str:
+    """URL canónica del propio endpoint /hls-proxy (para reescritura de manifests)."""
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    host = request.headers.get("host", request.url.netloc)
+    return f"{scheme}://{host}/hls-proxy"
+
+
+def _wrap(abs_url: str, proxy_base: str, referer: str | None = None) -> str:
+    """Construye una URL *hacia nuestro proxy* a partir de una URL absoluta."""
+    out = f"{proxy_base}?url={quote(abs_url, safe='')}"
+    if referer:
+        out += f"&referer={quote(referer, safe='')}"
+    return out
+
+
+def _is_manifest(path: str, content_type: str = "") -> bool:
+    low = path.lower()
+    return (
+        low.endswith(".m3u8")
+        or low.endswith(".m3u")
+        or "mpegurl" in content_type
+        or "x-mpegurl" in content_type
+        or "vnd.apple.mpegurl" in content_type
+    )
+
+
+def _rewrite_manifest(text: str, base_url: str, proxy_base: str, referer: str | None) -> str:
+    """
+    Reescribe todas las URLs del m3u8 para que pasen por nuestro proxy.
+    No toca etiquetas que no contengan URI.
+    """
+    out_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            out_lines.append(line)
+            continue
+
+        if stripped.startswith("#"):
+            # #EXT-X-KEY:URI="..."  #EXT-X-MAP:URI="..." etc.
+            def _repl(m):
+                uri = m.group(1)
+                if not uri:
+                    return m.group(0)
+                try:
+                    abs_url = urljoin(base_url, uri)
+                    return f'URI="{_wrap(abs_url, proxy_base, referer)}"'
+                except Exception:
+                    return m.group(0)
+
+            line = re.sub(r'URI="([^"]+)"', _repl, line)
+            out_lines.append(line)
+        else:
+            try:
+                abs_url = urljoin(base_url, stripped)
+                out_lines.append(_wrap(abs_url, proxy_base, referer))
+            except Exception:
+                out_lines.append(line)
+
+    return "\n".join(out_lines)
+
+
+@app.get("/hls-proxy")
+def hls_proxy(request: Request, url: str, referer: str = None):
+    """Proxy transparente para streams HLS (.m3u8, .ts, .key, .aac)."""
+    if not url or not re.match(r"^https?://", url.strip()):
+        from fastapi import HTTPException
+        raise HTTPException(400, "Parámetro ?url= inválido o ausente")
+
+    target = url.strip()
+
+    headers = {"User-Agent": HLS_USER_AGENT}
+    if referer:
+        headers["Referer"] = referer
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+
+    try:
+        resp = http_requests.get(
+            target, headers=headers, stream=True, timeout=(5, 30)
+        )
+    except http_requests.RequestException as exc:
+        from fastapi import HTTPException
+        raise HTTPException(502, f"Error contacting upstream: {exc}")
+
+    content_type = resp.headers.get("content-type", "")
+    final_url = resp.url  # refleja redirects -> base correcta para rewrite
+    proxy_base = _proxy_base(request)
+
+    # --- Manifest reescrito ---
+    if _is_manifest(final_url, content_type) and resp.status_code == 200:
+        text = resp.text
+        rewritten = _rewrite_manifest(text, final_url, proxy_base, referer)
+        return PlainTextResponse(
+            rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # --- Segmentos / llaves: passthrough en streaming ---
+    # Forward del código de estado
+    if not resp.ok:
+        body = resp.text[:500] if resp.text else ""
+        return PlainTextResponse(
+            f"Upstream {resp.status_code}: {body}",
+            status_code=resp.status_code,
+            media_type="text/plain",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    out_headers = {}
+    for key, val in resp.headers.items():
+        if key.lower() not in _HOP:
+            out_headers[key] = val
+    if not content_type:
+        out_headers["Content-Type"] = "video/mp2t"
+
+    def _stream():
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type=out_headers.get("Content-Type", "application/octet-stream"),
+        headers=out_headers,
+    )
+
+
