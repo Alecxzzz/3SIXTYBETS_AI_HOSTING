@@ -31,11 +31,11 @@ def get_mysql_config():
         }
 
     return {
-        "host": os.getenv("MYSQL_HOST", "mysql-threesixtybetzzx.alwaysdata.net"),
+        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
         "port": int(os.getenv("MYSQL_PORT", "3306")),
-        "user": os.getenv("MYSQL_USER", "threesixtybetzzx"),
-        "password": os.getenv("MYSQL_PASSWORD", ""),
-        "database": os.getenv("MYSQL_DATABASE", "threesixtybetzzx_test"),
+        "user": os.getenv("MYSQL_USER", "admin"),
+        "password": os.getenv("MYSQL_PASSWORD", "bryannie"),
+        "database": os.getenv("MYSQL_DATABASE", "sixtydb"),
     }
 
 
