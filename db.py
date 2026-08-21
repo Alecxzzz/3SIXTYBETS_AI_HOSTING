@@ -332,7 +332,10 @@ def ensure_admin_user():
     if not username or not password:
         return
 
-    access_expires_at = now_utc() + timedelta(days=access_days)
+    # El admin/propietario tiene acceso ILIMITADO: nunca expira.
+    # Usamos una fecha muy lejana (año 9999) en vez de NULL para
+    # mantener compatibilidad con el esquema actual (columna NOT NULL).
+    access_expires_at = datetime(9999, 12, 31, 23, 59, 59)
     existing = get_user_by_username(username)
     if existing:
         run_query(
