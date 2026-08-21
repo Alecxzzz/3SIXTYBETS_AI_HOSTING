@@ -1,13 +1,16 @@
 import os
 import re
+from datetime import timedelta
 from urllib.parse import urljoin, quote
 import requests as http_requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
+import db
 from engine.search_engine import SearchEngine
+
 
 try:
     from ddgs import DDGS
@@ -260,6 +263,152 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         reglas = reglas + f"\n\nCONTEXTO DE BUSQUEDA WEB OBTENIDO:\n{contexto_web}"
 
     return SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
+
+
+# ==============================
+# AUTH + DB ENDPOINTS
+# ==============================
+# Conecta MySQL (db.py) al backend: registro, login, keys, mensajes, health.
+
+@app.on_event("startup")
+def _init_database():
+    try:
+        db.init_db()
+    except Exception as exc:
+        print(f"[startup] DB init fallido (no fatal): {exc}")
+
+
+# ---- Pydantic models ----
+class AuthSignup(BaseModel):
+    username: str
+    password: str
+    redeem_code: str
+
+
+class AuthSignin(BaseModel):
+    username: str
+    password: str
+
+
+class MessageIn(BaseModel):
+    role: str
+    text: str
+
+
+class RedeemIn(BaseModel):
+    redeem_code: str
+
+
+class AdminKeyIn(BaseModel):
+    duration_days: int
+    quantity: int = 1
+    expires_in_days: int | None = None
+
+
+# ---- Auth dependency ----
+def get_current_user(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Necesitas iniciar sesion.")
+    token = authorization[7:].strip()
+    user = db.get_user_by_token(token)
+    if not user:
+        raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
+    return user
+
+
+def get_admin(user=Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Acceso restringido a administradores.")
+    return user
+
+
+# ---- Endpoints ----
+
+@app.get("/health")
+def health():
+    """Estado del backend y la base de datos."""
+    return db.health_status()
+
+
+@app.post("/auth/signup")
+def auth_signup(data: AuthSignup):
+    try:
+        user = db.create_user(data.username, data.password, data.redeem_code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    token = db.create_session(user["id"])
+    return {"access_token": token, "user": user}
+
+
+@app.post("/auth/signin")
+def auth_signin(data: AuthSignin):
+    user = db.get_user_by_username(data.username)
+    if not user or not db.verify_password(data.password, user["password_hash"]):
+        raise HTTPException(401, "Usuario o contrasena incorrecta.")
+    token = db.create_session(user["id"])
+    return {"access_token": token, "user": db.public_user(user)}
+
+
+@app.post("/auth/signout")
+def auth_signout(request: Request, user=Depends(get_current_user)):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        db.delete_session(token)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def auth_me(user=Depends(get_current_user)):
+    return db.public_user(user)
+
+
+@app.get("/messages")
+def get_messages(user=Depends(get_current_user)):
+    messages = db.list_messages(user["id"])
+    return {"messages": messages}
+
+
+@app.post("/messages")
+def post_message(data: MessageIn, user=Depends(get_current_user)):
+    msg = db.create_message(user["id"], data.role, data.text)
+    return msg
+
+
+@app.post("/redeem")
+def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
+    try:
+        result = db.redeem_key_for_user(user["id"], data.redeem_code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return result
+
+
+@app.get("/admin/keys")
+def admin_list_keys(user=Depends(get_admin)):
+    keys = db.list_redeem_keys()
+    return {"keys": keys}
+
+
+@app.post("/admin/keys")
+def admin_create_keys(data: AdminKeyIn, user=Depends(get_admin)):
+    key_expires_at = None
+    if data.expires_in_days:
+        key_expires_at = db.now_utc() + timedelta(days=data.expires_in_days)
+    created = []
+    for _ in range(max(1, data.quantity)):
+        key = db.create_redeem_key(
+            duration_days=data.duration_days,
+            created_by=user["id"],
+            key_expires_at=key_expires_at,
+        )
+        created.append({
+            "code": key["code"],
+            "duration_days": key["duration_days"],
+            "status": "available",
+            "expires_at": key["key_expires_at"].isoformat() if key.get("key_expires_at") else None,
+        })
+    return {"keys": created}
 
 
 # ==============================
