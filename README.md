@@ -21,18 +21,19 @@ YOU_MODEL=you
 YOU_SEARCH_API_KEY=tu_you_key
 YOU_SEARCH_URL=https://api.ydc-index.io/search
 
-DATABASE_URL=mysql://usuario:password@host:3306/threesixtybets
-# O usa MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE
+# Aiven PostgreSQL (SSL requerido)
+DATABASE_URL=postgres://usuario:password@host:puerto/database?sslmode=require
+# O usa PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE / PGSSLMODE
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=cambia_esta_contrasena
 FRONTEND_ORIGINS=http://localhost:5173,https://threesixtybets-chat.vercel.app
 ```
 
-`DATABASE_URL` conecta el backend con MySQL. Si tu hosting no usa URL, configura `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` y `MYSQL_DATABASE`.
+`DATABASE_URL` conecta el backend con PostgreSQL. Si tu hosting no usa URL, configura `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` y `PGSSLMODE`.
 
 ## Auth y base de datos
 
-El backend crea automaticamente tablas MySQL con:
+El backend crea automaticamente tablas PostgreSQL con:
 - `users`
 - `sessions`
 - `chat_messages`

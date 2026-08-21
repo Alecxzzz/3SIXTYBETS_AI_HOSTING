@@ -4,9 +4,10 @@ import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
-import mysql.connector
+import psycopg2
+import psycopg2.extras
 from dotenv import load_dotenv
 
 
@@ -17,41 +18,45 @@ def now_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def get_mysql_config():
+def get_postgres_config():
     database_url = os.getenv("DATABASE_URL", "").strip()
 
     if database_url:
         parsed = urlparse(database_url)
+        query_params = parse_qs(parsed.query)
+
+        # Extraer sslmode del query string (ej: ?sslmode=require)
+        sslmode = query_params.get("sslmode", ["require"])[0]
+
         return {
             "host": parsed.hostname,
-            "port": parsed.port or 3306,
+            "port": parsed.port or 5432,
             "user": parsed.username,
             "password": parsed.password,
             "database": parsed.path.lstrip("/"),
+            "sslmode": sslmode,
         }
 
     return {
-        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
-        "port": int(os.getenv("MYSQL_PORT", "3306")),
-        "user": os.getenv("MYSQL_USER", "admin"),
-        "password": os.getenv("MYSQL_PASSWORD", "bryannie"),
-        "database": os.getenv("MYSQL_DATABASE", "sixtydb"),
+        "host": os.getenv("PGHOST", "127.0.0.1"),
+        "port": int(os.getenv("PGPORT", "5432")),
+        "user": os.getenv("PGUSER", "postgres"),
+        "password": os.getenv("PGPASSWORD", ""),
+        "database": os.getenv("PGDATABASE", "sixtybets"),
+        "sslmode": os.getenv("PGSSLMODE", "require"),
     }
 
 
 def get_connection(autocommit=True):
-    config = get_mysql_config()
-    return mysql.connector.connect(
+    config = get_postgres_config()
+    return psycopg2.connect(
         host=config["host"],
         port=config["port"],
         user=config["user"],
         password=config["password"],
-        database=config["database"],
-        autocommit=autocommit,
-        connection_timeout=20,
-        consume_results=True,
-        use_pure=True,
-        ssl_disabled=True,
+        dbname=config["database"],
+        sslmode=config["sslmode"],
+        connect_timeout=20,
     )
 
 
@@ -61,25 +66,22 @@ def run_query(query, params=None, fetchone=False):
         cur = None
         try:
             conn = get_connection(autocommit=True)
-
-            if not conn.is_connected():
-                conn.reconnect(attempts=3, delay=2)
-
-            cur = conn.cursor(dictionary=True)
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(query, params or ())
-
-            if query.strip().upper().startswith("SELECT"):
-                return cur.fetchone() if fetchone else cur.fetchall()
-
             conn.commit()
+
+            if query.strip().upper().startswith("SELECT") or query.strip().upper().startswith("RETURNING") or query.strip().upper().startswith("WITH"):
+                result = cur.fetchone() if fetchone else cur.fetchall()
+                return list(result) if isinstance(result, list) else result
+
             return True
-        except mysql.connector.Error as error:
-            print("MySQL error:", error)
+        except psycopg2.Error as error:
+            print("PostgreSQL error:", error)
             time.sleep(3)
         finally:
             if cur:
                 cur.close()
-            if conn and conn.is_connected():
+            if conn:
                 conn.close()
 
     return None
@@ -93,16 +95,16 @@ def init_db():
             username varchar(80) not null unique,
             password_hash varchar(255) not null,
             role varchar(20) not null default 'user',
-            credits int not null default 0,
-            access_expires_at datetime not null,
-            created_at datetime not null
+            credits integer not null default 0,
+            access_expires_at timestamp not null,
+            created_at timestamp not null
         )
         """,
         """
         create table if not exists sessions (
             token varchar(128) primary key,
             user_id varchar(64) not null,
-            created_at datetime not null,
+            created_at timestamp not null,
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
@@ -110,12 +112,12 @@ def init_db():
         create table if not exists redeem_keys (
             id varchar(64) primary key,
             code varchar(32) not null unique,
-            duration_days int not null,
-            key_expires_at datetime null,
+            duration_days integer not null,
+            key_expires_at timestamp null,
             created_by varchar(64) null,
             claimed_by varchar(64) null,
-            claimed_at datetime null,
-            created_at datetime not null,
+            claimed_at timestamp null,
+            created_at timestamp not null,
             foreign key (created_by) references users(id) on delete set null,
             foreign key (claimed_by) references users(id) on delete set null
         )
@@ -126,20 +128,23 @@ def init_db():
             user_id varchar(64) not null,
             role varchar(20) not null,
             text text not null,
-            created_at datetime not null,
-            index chat_messages_user_created_idx (user_id, created_at),
+            created_at timestamp not null,
             foreign key (user_id) references users(id) on delete cascade
         )
+        """,
+        """
+        create index if not exists chat_messages_user_created_idx
+        on chat_messages (user_id, created_at)
         """,
         """
         create table if not exists credit_transactions (
             id varchar(64) primary key,
             user_id varchar(64) not null,
-            amount int not null,
+            amount integer not null,
             status varchar(30) not null,
             provider varchar(40) not null,
             reference varchar(160) null,
-            created_at datetime not null,
+            created_at timestamp not null,
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
@@ -248,7 +253,7 @@ def redeem_key_for_user(user_id, code):
 
     try:
         conn = get_connection(autocommit=False)
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         access_expires_at = claim_redeem_key(code, user_id, cur)
 
         cur.execute("select access_expires_at from users where id = %s", (user_id,))
@@ -278,7 +283,7 @@ def redeem_key_for_user(user_id, code):
     finally:
         if cur:
             cur.close()
-        if conn and conn.is_connected():
+        if conn:
             conn.close()
 
 
@@ -290,7 +295,7 @@ def create_user(username, password, redeem_code):
 
     try:
         conn = get_connection(autocommit=False)
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
             insert into users
@@ -309,7 +314,7 @@ def create_user(username, password, redeem_code):
         user = public_user(cur.fetchone())
         conn.commit()
         return user
-    except mysql.connector.IntegrityError:
+    except psycopg2.IntegrityError:
         if conn:
             conn.rollback()
         raise ValueError("Ya existe una cuenta con ese usuario.") from None
@@ -320,21 +325,19 @@ def create_user(username, password, redeem_code):
     finally:
         if cur:
             cur.close()
-        if conn and conn.is_connected():
+        if conn:
             conn.close()
 
 
 def ensure_admin_user():
     username = os.getenv("ADMIN_USERNAME", "").strip()
     password = os.getenv("ADMIN_PASSWORD", "").strip()
-    access_days = int(os.getenv("ADMIN_ACCESS_DAYS", "1000"))
 
     if not username or not password:
         return
 
     # El admin/propietario tiene acceso ILIMITADO: nunca expira.
-    # Usamos una fecha muy lejana (año 9999) en vez de NULL para
-    # mantener compatibilidad con el esquema actual (columna NOT NULL).
+    # Usamos una fecha muy lejana (anio 9999) en vez de NULL.
     access_expires_at = datetime(9999, 12, 31, 23, 59, 59)
     existing = get_user_by_username(username)
     if existing:

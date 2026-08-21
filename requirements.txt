@@ -4,5 +4,5 @@ openai
 ddgs
 python-dotenv
 dotenv
-mysql-connector-python
+psycopg2-binary
 requests
