@@ -1,4 +1,3 @@
-+
 import os
 import re
 from datetime import timedelta
@@ -273,10 +272,49 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
 
 @app.on_event("startup")
 def _init_database():
-    try:
-        db.init_db()
-    except Exception as exc:
-        print(f"[startup] DB init fallido (no fatal): {exc}")
+    """Inicializa la BD, crea admin y una key por defecto si hace falta.
+
+    Reintenta 3 veces con delay (en producción el DB puede tardar en estar ready).
+    Si tras 3 intentos no hay DB, la app arranca de todos modos y los endpoints
+    fallarán con 500 al hacer query.
+    """
+    import time
+
+    for attempt in range(1, 4):
+        try:
+            db.init_db()  # crea tablas + admin user (ensure_admin_user internamente)
+
+            # Verificar conectividad real con un ping
+            ok = db.run_query("SELECT 1 AS ok", fetchone=True)
+            if not ok:
+                raise Exception("DB query returned None")
+
+            # Crear una key por defecto si no hay ninguna disponible
+            existing = db.run_query(
+                "SELECT COUNT(*) AS cnt FROM redeem_keys "
+                "WHERE claimed_by IS NULL "
+                "AND (key_expires_at IS NULL OR key_expires_at > NOW())"
+            )
+            count = existing[0]["cnt"] if existing else 0
+
+            if count == 0:
+                key = db.create_redeem_key(duration_days=30)
+                if key:
+                    print(f"[startup] Created default redeem key: {key['code']}", flush=True)
+                else:
+                    print("[startup] Failed to create default key", flush=True)
+            else:
+                print(f"[startup] DB ready, {count} available key(s)", flush=True)
+
+            print("[startup] Database initialized successfully", flush=True)
+            break
+
+        except Exception as exc:
+            print(f"[startup] DB init attempt {attempt}/3 failed: {exc}", flush=True)
+            if attempt < 3:
+                time.sleep(5)
+            else:
+                print("[startup] DB not available — app continues without DB", flush=True)
 
 
 # ---- Pydantic models ----
