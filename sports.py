@@ -37,6 +37,123 @@ SPORTS = {
 
 CACHE_TTL_SECONDS = 60
 DETAIL_CACHE_TTL_SECONDS = 30
+
+# Traduccion de nombres de estadisticas a espanol
+STAT_TRANSLATIONS = {
+    # Futbol
+    "foulsCommitted": "Faltas",
+    "yellowCards": "Tarjetas amarillas",
+    "redCards": "Tarjetas rojas",
+    "offsides": "Fueras de juego",
+    "wonCorners": "Corners",
+    "saves": "Atajadas",
+    "possessionPct": "Posesion %",
+    "totalShots": "Tiros totales",
+    "shotsOnTarget": "Tiros a puerta",
+    "shotPct": "% de tiro",
+    "penaltyKickGoals": "Goles de penal",
+    "penaltyKickShots": "Tiros de penal",
+    "accuratePasses": "Pases precisos",
+    "totalPasses": "Pases totales",
+    "passPct": "% de pase",
+    "accurateCrosses": "Centros precisos",
+    "totalCrosses": "Centros totales",
+    "crossPct": "% de centro",
+    "tacklesWon": "Entradas ganadas",
+    "totalTackles": "Entradas totales",
+    "interceptions": "Intercepciones",
+    "clearances": "Despejes",
+    "aerialsWon": "Duelos aereos ganados",
+    "goals": "Goles",
+    "assists": "Asistencias",
+    "ownGoals": "Autogoles",
+    "conceded": "Goles recibidos",
+    # NBA
+    "fieldGoalsMade": "Tiros de campo anotados",
+    "fieldGoalsAttempted": "Tiros de campo intentados",
+    "fieldGoalPct": "% tiros de campo",
+    "threePointFieldGoalsMade": "Triples anotados",
+    "threePointFieldGoalsAttempted": "Triples intentados",
+    "threePointFieldGoalPct": "% triples",
+    "freeThrowsMade": "Tiros libres anotados",
+    "freeThrowsAttempted": "Tiros libres intentados",
+    "freeThrowPct": "% tiros libres",
+    "rebounds": "Rebotes",
+    "offensiveRebounds": "Rebotes ofensivos",
+    "defensiveRebounds": "Rebotes defensivos",
+    "steals": "Robos",
+    "blocks": "Bloqueos",
+    "turnovers": "Perdidas",
+    "personalFouls": "Faltas personales",
+    "fastBreakPoints": "Puntos de contragolpe",
+    "pointsInThePaint": "Puntos en la pintura",
+    "secondChancePoints": "Puntos de segunda oportunidad",
+    "biggestLead": "Mayor ventaja",
+    "benchPoints": "Puntos del banquillo",
+    "leadChanges": "Cambios de liderato",
+    "timesTied": "Veces empatadas",
+    # NFL
+    "totalYards": "Yardas totales",
+    "netPassingYards": "Yardas por pase",
+    "rushingYards": "Yardas terrestres",
+    "firstDowns": "Primeros downs",
+    "thirdDownEff": "Eficiencia 3er down",
+    "fourthDownEff": "Eficiencia 4to down",
+    "totalDrives": "Drives totales",
+    "possessionTime": "Posesion",
+    "timeOfPossession": "Posesion",
+    "sacks": "Capturas (sacks)",
+    "interceptionsThrown": "Intercepciones lanzadas",
+    "fumbles": "Balones sueltos",
+    "punts": "Despejes (punts)",
+    "penalties": "Penalizaciones",
+    "penaltyYards": "Yardas por penalizacion",
+    "touchdowns": "Touchdowns",
+    "completionAttempts": "Pases completados/intentados",
+    "yardsPerPass": "Yardas por pase",
+    "yardsPerRushAttempt": "Yardas por acarreo",
+    # MLB
+    "atBats": "Turnos al bate",
+    "runs": "Carreras",
+    "hits": "Hits",
+    "runsBattedIn": "Carreras impulsadas",
+    "homeRuns": "Home runs",
+    "baseOnBalls": "Bases por bolas",
+    "strikeouts": "Ponches",
+    "stolenBases": "Bases robadas",
+    "battingAverage": "Promedio de bateo",
+    "obp": "OBP",
+    "slg": "SLG",
+    "ops": "OPS",
+    "inningsPitched": "Entradas lanzadas",
+    "earnedRunAverage": "Promedio de carreras limpias",
+    "gamesPlayed": "Juegos jugados",
+    "teamGamesPlayed": "Juegos del equipo",
+    "doubles": "Dobles",
+    "triples": "Triples",
+    "hitByPitch": "Golpeado por lanzamiento",
+    "sacrificeHits": "Toques de sacrificio",
+    "groundBalls": "Rodados",
+    "RBIs": "Carreras impulsadas",
+    "leftOnBase": "Corredores dejados en base",
+    "battingAverage": "Promedio de bateo",
+    "pitchingStrikeouts": "Ponches (pitching)",
+    "pitchingHits": "Hits permitidos",
+    "pitchingRuns": "Carreras permitidas",
+    "pitchingEarnedRuns": "Carreras limpias",
+    "pitchingBaseOnBalls": "Bases por bolas permitidas",
+    "pitchingHomeRuns": "Home runs permitidos",
+    "battersFaced": "Bateadores enfrentados",
+    "era": "PCL (ERA)",
+    "whip": "WHIP",
+    "fieldingPct": "% fildeo",
+    "errors": "Errores",
+    "assists": "Asistencias",
+    "putouts": "Ponches defensivos",
+    "doublePlays": "Doble matanza",
+    "triplePlays": "Triple matanza",
+}
+
 _cache = {}  # clave -> {"data": ..., "ts": epoch}
 _cache_lock = threading.Lock()
 
@@ -310,6 +427,9 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     # Dos formatos segun deporte:
     #  - Plano (NBA/NFL): {name, displayValue}
     #  - Por categoria (MLB): {name: "batting", stats: [{name, displayName, displayValue}]}
+    def _translate(name):
+        return STAT_TRANSLATIONS.get(name, name)
+
     def _flatten_stats(items):
         out = []
         for s in items or []:
@@ -319,15 +439,22 @@ def get_game_detail(sport: str, event_id: str) -> dict:
                 category = s.get("displayName") or s.get("name") or ""
                 for sub in s["stats"] or []:
                     if sub:
-                        label = sub.get("displayName") or sub.get("shortDisplayName") or sub.get("name") or ""
-                        prefix = f"{category} - {label}" if category else label
+                        # Traducir por el name interno (ej: "gamesPlayed" -> "Juegos jugados")
+                        key = sub.get("name") or ""
+                        translated = _translate(key) if key in STAT_TRANSLATIONS else (
+                            sub.get("displayName") or sub.get("shortDisplayName") or key or ""
+                        )
+                        prefix = f"{category} - {translated}" if category else translated
                         out.append({
                             "name": prefix,
                             "label": sub.get("displayValue", ""),
                         })
             else:
+                key = s.get("name") or ""
                 out.append({
-                    "name": s.get("displayName") or s.get("name") or s.get("abbreviation") or "",
+                    "name": _translate(key) if key in STAT_TRANSLATIONS else (
+                        s.get("displayName") or s.get("shortDisplayName") or key or s.get("abbreviation") or ""
+                    ),
                     "label": s.get("displayValue", ""),
                 })
         return out
@@ -340,6 +467,21 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     for t in teams_out:
         t["statistics"] = stats_by_team.get(str(t["id"]), [])
 
+    # Situacion en vivo (MLB): inning, outs, bases
+    situation = None
+    sit = comp.get("situation")
+    if sit:
+        situation = {
+            "isTop": sit.get("isTop"),
+            "inning": sit.get("inning"),
+            "outs": sit.get("outs"),
+            "onFirst": bool(sit.get("onFirst")),
+            "onSecond": bool(sit.get("onSecond")),
+            "onThird": bool(sit.get("onThird")),
+            "strikes": sit.get("strikes"),
+            "balls": sit.get("balls"),
+        }
+
     result = {
         "sport": sport,
         "label": label,
@@ -348,6 +490,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         "status": type_info.get("shortDetail", ""),
         "clock": status.get("displayClock", ""),
         "period": status.get("period"),
+        "situation": situation,
         "teams": teams_out,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
