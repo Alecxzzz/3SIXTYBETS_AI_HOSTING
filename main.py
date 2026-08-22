@@ -263,7 +263,11 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         # Agregar contexto de búsqueda al prompt del sistema
         reglas = reglas + f"\n\nCONTEXTO DE BUSQUEDA WEB OBTENIDO:\n{contexto_web}"
 
-    return SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
+    respuesta = SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
+    # Limpiar asteriscos de formato markdown
+    if respuesta:
+        respuesta = respuesta.replace("*", "").replace("#", "")
+    return respuesta
 
 
 # ==============================
