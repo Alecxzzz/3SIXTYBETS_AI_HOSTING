@@ -446,6 +446,17 @@ def stats_live(sport: str = "soccer", user=Depends(get_current_user)):
         raise HTTPException(400, str(exc))
 
 
+@app.get("/stats/game")
+def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
+    """Detalle de un partido: marcador, linescores y estadisticas por equipo."""
+    try:
+        return sports.get_game_detail(sport, event_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Error obteniendo detalle del partido: {exc}")
+
+
 @app.get("/admin/keys")
 def admin_list_keys(user=Depends(get_admin)):
     keys = db.list_redeem_keys()

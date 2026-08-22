@@ -36,14 +36,15 @@ SPORTS = {
 }
 
 CACHE_TTL_SECONDS = 60
+DETAIL_CACHE_TTL_SECONDS = 30
 _cache = {}  # clave -> {"data": ..., "ts": epoch}
 _cache_lock = threading.Lock()
 
 
-def _cache_get(key):
+def _cache_get(key, ttl=CACHE_TTL_SECONDS):
     with _cache_lock:
         entry = _cache.get(key)
-        if entry and time.time() - entry["ts"] < CACHE_TTL_SECONDS:
+        if entry and time.time() - entry["ts"] < ttl:
             return entry["data"]
     return None
 
@@ -64,50 +65,72 @@ def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
     return resp.json()
 
 
+def _parse_number(value):
+    """Convierte '2', 2.0, '87.5' a numero cuando tiene sentido."""
+    if value in (None, ""):
+        return None
+    try:
+        num = float(value)
+        return int(num) if num == int(num) else num
+    except (TypeError, ValueError):
+        return value
+
+
 def _parse_team(team: dict) -> dict:
     """Normaliza un equipo de la respuesta de ESPN."""
-    score = None
-    for item in team.get("score", []) if isinstance(team.get("score"), list) else []:
-        pass
-    # ESPN a veces manda score como string, a veces como lista
     raw_score = team.get("score")
     if isinstance(raw_score, list):
         raw_score = raw_score[0].get("value") if raw_score else None
-    if raw_score not in (None, ""):
-        try:
-            score = int(float(raw_score))
-        except (TypeError, ValueError):
-            score = raw_score
+
+    logo = team.get("logo")
+    if isinstance(logo, list):
+        logo = logo[0] if logo else None
 
     return {
         "id": team.get("id"),
         "name": team.get("displayName", team.get("name", "?")),
         "abbr": team.get("abbreviation", ""),
-        "logo": (team.get("logo") or [None])[0] if isinstance(team.get("logo"), list) else team.get("logo"),
-        "score": score,
+        "logo": logo,
+        "score": _parse_number(raw_score),
         "winner": team.get("winner"),
     }
 
 
-def _parse_event(event: dict, league_label: str) -> dict:
+def _linescores(competitor: dict) -> list:
+    """Scores por periodo: innings (MLB), cuartos (NBA/NFL), etc."""
+    out = []
+    for ls in competitor.get("linescores") or []:
+        if ls:
+            out.append(str(ls.get("displayValue", ls.get("value", ""))))
+    return out
+
+
+def _parse_event(event: dict, league_label: str, league_code: str | None) -> dict:
     comp = (event.get("competitions") or [{}])[0]
 
     home, away = {}, {}
+    home_linescores, away_linescores = [], []
     for competitor in comp.get("competitors", []):
         parsed = _parse_team(competitor.get("team", {}))
-        parsed["record"] = (competitor.get("records") or [{}])[0].get("summary")
+        # Fallback: a veces el score viene en el competitor y no en team
+        if parsed["score"] is None:
+            parsed["score"] = _parse_number(competitor.get("score"))
+        recs = [r for r in (competitor.get("records") or []) if r]
+        parsed["record"] = recs[0].get("summary") if recs else None
+        lines = _linescores(competitor)
         if competitor.get("homeAway") == "home":
             home = parsed
+            home_linescores = lines
         else:
             away = parsed
+            away_linescores = lines
 
     status = event.get("status", {})
     type_info = status.get("type", {})
     state = type_info.get("state")  # pre | in | post
 
-    # Detalle del reloj / periodo
-    display_clock = status.get("displayClock") or type_info.get("shortDetail") or ""
-    period = status.get("period")
+    display_clock = status.get("displayClock") or ""
+    short_detail = type_info.get("shortDetail", "")
 
     # Cuotas si ESPN las trae
     odds = None
@@ -124,14 +147,18 @@ def _parse_event(event: dict, league_label: str) -> dict:
 
     return {
         "id": event.get("id"),
+        "sport_path": None,  # se llena en get_sport_games
+        "league_code": league_code,
         "league": league_label,
         "date": event.get("date"),
         "state": state,  # pre = proximo, in = en vivo, post = finalizado
-        "status": type_info.get("shortDetail", ""),
+        "status": short_detail,
         "clock": display_clock,
-        "period": period,
+        "period": status.get("period"),
         "home": home,
         "away": away,
+        "home_linescores": home_linescores,
+        "away_linescores": away_linescores,
         "odds": odds,
         "summary": event.get("links", [{}])[0].get("href"),
     }
@@ -141,7 +168,6 @@ def _parse_tennis(events: list) -> list:
     """El tenis de ESPN tiene estructura distinta: competitions anidadas por grupo."""
     out = []
     for event in events:
-        league_label = "Tenis"
         for comp in event.get("competitions", []):
             competitors = comp.get("competitors", [])
             if len(competitors) < 2:
@@ -152,7 +178,9 @@ def _parse_tennis(events: list) -> list:
             type_info = status.get("type", {})
             out.append({
                 "id": event.get("id"),
-                "league": league_label,
+                "sport_path": None,
+                "league_code": None,
+                "league": "Tenis",
                 "date": event.get("date"),
                 "state": type_info.get("state"),
                 "status": type_info.get("shortDetail", ""),
@@ -160,6 +188,8 @@ def _parse_tennis(events: list) -> list:
                 "period": None,
                 "home": home,
                 "away": away,
+                "home_linescores": [],
+                "away_linescores": [],
                 "odds": None,
                 "summary": None,
             })
@@ -184,7 +214,7 @@ def get_sport_games(sport: str) -> dict:
                 try:
                     data = _fetch_scoreboard(path, league=league_code)
                     for event in data.get("events", []):
-                        games.append(_parse_event(event, league_name))
+                        games.append(_parse_event(event, league_name, league_code))
                 except Exception:
                     continue  # una liga que falla no tira todo el deporte
         elif sport == "tennis":
@@ -193,7 +223,10 @@ def get_sport_games(sport: str) -> dict:
         else:
             data = _fetch_scoreboard(path)
             for event in data.get("events", []):
-                games.append(_parse_event(event, label))
+                games.append(_parse_event(event, label, None))
+
+        for g in games:
+            g["sport_path"] = path
     except Exception as exc:
         return {"sport": sport, "label": label, "games": [], "error": str(exc),
                 "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -210,6 +243,115 @@ def get_sport_games(sport: str) -> dict:
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache_set(f"sport:{sport}", result)
+    return result
+
+
+# ==============================
+# DETALLE DE UN PARTIDO
+# ==============================
+
+def get_game_detail(sport: str, event_id: str) -> dict:
+    """Estadisticas completas de un partido via /summary de ESPN.
+
+    Devuelve marcador, estado, linescores y estadisticas comparadas por equipo.
+    """
+    if sport not in SPORTS:
+        raise ValueError(f"Deporte no soportado: {sport}")
+
+    cache_key = f"detail:{sport}:{event_id}"
+    cached = _cache_get(cache_key, ttl=DETAIL_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
+    path, label = SPORTS[sport]
+
+    # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
+    league_code = None
+    if sport == "soccer":
+        games_data = get_sport_games(sport)
+        for g in games_data.get("games", []):
+            if str(g.get("id")) == str(event_id):
+                league_code = g.get("league_code")
+                break
+        if not league_code:
+            return {"error": "Partido no encontrado", "games": []}
+
+    url = (
+        f"{ESPN_BASE}/{path}/{league_code}/summary?event={event_id}"
+        if league_code
+        else f"{ESPN_BASE}/{path}/summary?event={event_id}"
+    )
+    resp = http_requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+
+    header = data.get("header", {})
+    comps = header.get("competitions") or [{}]
+    comp = comps[0] if comps else {}
+    status = comp.get("status", {})
+    type_info = status.get("type", {})
+
+    teams_out = []
+    for competitor in comp.get("competitors", []):
+        team = competitor.get("team", {})
+        teams_out.append({
+            "id": team.get("id"),
+            "name": team.get("displayName", "?"),
+            "abbr": team.get("abbreviation", ""),
+            "logo": (team.get("logo") or [None])[0] if isinstance(team.get("logo"), list) else team.get("logo"),
+            "score": _parse_number(competitor.get("score")),
+            "winner": competitor.get("winner"),
+            "homeAway": competitor.get("homeAway"),
+            "linescores": _linescores(competitor),
+            "records": [r.get("summary") for r in (competitor.get("records") or []) if r],
+        })
+
+    # Estadisticas comparadas desde boxscore.teams[].statistics[]
+    # Dos formatos segun deporte:
+    #  - Plano (NBA/NFL): {name, displayValue}
+    #  - Por categoria (MLB): {name: "batting", stats: [{name, displayName, displayValue}]}
+    def _flatten_stats(items):
+        out = []
+        for s in items or []:
+            if not s:
+                continue
+            if "stats" in s:
+                category = s.get("displayName") or s.get("name") or ""
+                for sub in s["stats"] or []:
+                    if sub:
+                        label = sub.get("displayName") or sub.get("shortDisplayName") or sub.get("name") or ""
+                        prefix = f"{category} - {label}" if category else label
+                        out.append({
+                            "name": prefix,
+                            "label": sub.get("displayValue", ""),
+                        })
+            else:
+                out.append({
+                    "name": s.get("displayName") or s.get("name") or s.get("abbreviation") or "",
+                    "label": s.get("displayValue", ""),
+                })
+        return out
+
+    stats_by_team = {}
+    for box_team in data.get("boxscore", {}).get("teams", []):
+        team_id = str((box_team.get("team") or {}).get("id"))
+        stats_by_team[team_id] = _flatten_stats(box_team.get("statistics"))
+
+    for t in teams_out:
+        t["statistics"] = stats_by_team.get(str(t["id"]), [])
+
+    result = {
+        "sport": sport,
+        "label": label,
+        "event_id": event_id,
+        "state": type_info.get("state"),
+        "status": type_info.get("shortDetail", ""),
+        "clock": status.get("displayClock", ""),
+        "period": status.get("period"),
+        "teams": teams_out,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache_set(cache_key, result)
     return result
 
 
