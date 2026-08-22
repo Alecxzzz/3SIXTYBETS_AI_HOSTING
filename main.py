@@ -434,27 +434,126 @@ def stats_summary(user=Depends(get_current_user)):
     return sports.get_all_sports_summary()
 
 
+@app.get("/stats/leagues")
+def stats_leagues(user=Depends(get_current_user)):
+    """Lista de ligas disponibles para el selector."""
+    return sports.get_available_leagues()
+
+
 @app.get("/stats/live")
-def stats_live(sport: str = "soccer", user=Depends(get_current_user)):
+def stats_live(sport: str = "soccer", league: str = None, user=Depends(get_current_user)):
     """Partidos de un deporte: en vivo, proximos y finalizados.
 
     Deportes: soccer, nba, mlb, nfl, tennis
+    Para soccer se puede filtrar por liga con ?league=esp.1
     """
     try:
-        return sports.get_sport_games(sport)
+        return sports.get_sport_games(sport, league=league)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
 
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
-    """Detalle de un partido: marcador, linescores y estadisticas por equipo."""
+    """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
     try:
         return sports.get_game_detail(sport, event_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
         raise HTTPException(502, f"Error obteniendo detalle del partido: {exc}")
+
+
+@app.get("/stats/ai-analysis")
+def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user)):
+    """Analisis de IA del partido: tendencias, jugador destacado y prediccion."""
+    try:
+        detail = sports.get_game_detail(sport, event_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Error obteniendo detalle: {exc}")
+
+    # Construir contexto para la IA
+    teams = detail.get("teams", [])
+    away = next((t for t in teams if t.get("homeAway") != "home"), teams[0] if teams else {})
+    home = next((t for t in teams if t.get("homeAway") == "home"), teams[1] if len(teams) > 1 else {})
+
+    context_parts = [
+        f"Deporte: {detail.get('label', sport)}",
+        f"Estado: {detail.get('status', 'N/A')}",
+        f"Partido: {away.get('name', '?')} ({away.get('score', '-')}) vs {home.get('name', '?')} ({home.get('score', '-')})",
+    ]
+
+    # Records
+    if away.get("records"):
+        context_parts.append(f"Racha {away.get('name')}: {away['records'][0]}")
+    if home.get("records"):
+        context_parts.append(f"Racha {home.get('name')}: {home['records'][0]}")
+
+    # H2H
+    h2h = detail.get("head_to_head", [])
+    if h2h:
+        context_parts.append("\nHistorial H2H (ultimos enfrentamientos):")
+        for h in h2h[:5]:
+            ha = h.get("away", {})
+            hh = h.get("home", {})
+            context_parts.append(
+                f"  {ha.get('name','?')} {ha.get('score','-')} - {hh.get('score','-')} {hh.get('name','?')} ({h.get('status','')})"
+            )
+
+    # Ultimos partidos
+    for t in [away, home]:
+        recent = t.get("recent_games", [])
+        if recent:
+            context_parts.append(f"\nUltimos partidos de {t.get('name','?')}:")
+            for r in recent[:3]:
+                ra = r.get("away", {})
+                rh = r.get("home", {})
+                context_parts.append(
+                    f"  {ra.get('name','?')} {ra.get('score','-')} - {rh.get('score','-')} {rh.get('name','?')} ({r.get('status','')})"
+                )
+
+    # Jugadores destacados
+    key_players = detail.get("key_players", [])
+    if key_players:
+        context_parts.append("\nJugadores destacados:")
+        for p in key_players[:4]:
+            stats_str = ", ".join(f"{s['name']}: {s['value']}" for s in p.get("stats", [])[:3])
+            context_parts.append(f"  {p.get('name','?')} - {stats_str}")
+
+    # Estadisticas del equipo
+    for t in [away, home]:
+        stats = t.get("statistics", [])
+        if stats:
+            context_parts.append(f"\nEstadisticas {t.get('name','?')}:")
+            for s in stats[:8]:
+                context_parts.append(f"  {s['name']}: {s['label']}")
+
+    contexto = "\n".join(context_parts)
+
+    prompt = f"""Eres 3SIXTYBETS AI - analista deportivo. Analiza este partido y da:
+1. Tendencia del partido (quien domina, momento del juego)
+2. Jugador destacado (si hay datos) y por que
+3. Pronostico/edge si aplica
+
+DATOS DEL PARTIDO:
+{contexto}
+
+Responde en espanol, conciso (max 200 palabras), formato:
+🧠 Analisis IA:
+[jugada a jugada]
+⭐ Jugador destacado:
+[nombre y razon]
+🎯 Tendencia:
+[pronostico]"""
+
+    try:
+        from engine.search_engine import SearchEngine
+        respuesta = SearchEngine().ask_you(prompt)
+        return {"analysis": respuesta, "context": contexto}
+    except Exception as exc:
+        return {"analysis": f"No se pudo generar analisis: {exc}", "context": contexto}
 
 
 @app.get("/admin/keys")

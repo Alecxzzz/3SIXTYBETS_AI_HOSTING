@@ -14,16 +14,29 @@ import requests as http_requests
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
-# Ligas de futbol que seguimos (codigo ESPN -> nombre legible)
+# Ligas de futbol por pais/region (codigo ESPN -> nombre legible)
 SOCCER_LEAGUES = {
-    "eng.1": "Premier League",
-    "esp.1": "LaLiga",
-    "ita.1": "Serie A",
-    "ger.1": "Bundesliga",
-    "fra.1": "Ligue 1",
+    # Europa
+    "eng.1": "Premier League (Inglaterra)",
+    "esp.1": "LaLiga (Espana)",
+    "ita.1": "Serie A (Italia)",
+    "ger.1": "Bundesliga (Alemania)",
+    "fra.1": "Ligue 1 (Francia)",
+    "por.1": "Primeira Liga (Portugal)",
+    "ned.1": "Eredivisie (Holanda)",
     "uefa.champions": "Champions League",
-    "mex.1": "Liga MX",
-    "usa.1": "MLS",
+    "uefa.europa": "Europa League",
+    "uefa.europa.conf": "Conference League",
+    # Americas
+    "mex.1": "Liga MX (Mexico)",
+    "usa.1": "MLS (USA)",
+    "arg.1": "Liga Profesional (Argentina)",
+    "bra.1": "Brasileirao (Brasil)",
+    "col.1": "Liga BetPlay (Colombia)",
+    "conmebol.libertadores": "Copa Libertadores",
+    # Asia/Other
+    "sau.1": "Saudi Pro League",
+    "jpn.1": "J-League (Japon)",
 }
 
 # Deportes soportados: clave -> (path ESPN, etiqueta)
@@ -136,7 +149,6 @@ STAT_TRANSLATIONS = {
     "groundBalls": "Rodados",
     "RBIs": "Carreras impulsadas",
     "leftOnBase": "Corredores dejados en base",
-    "battingAverage": "Promedio de bateo",
     "pitchingStrikeouts": "Ponches (pitching)",
     "pitchingHits": "Hits permitidos",
     "pitchingRuns": "Carreras permitidas",
@@ -182,6 +194,12 @@ def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
     return resp.json()
 
 
+def _fetch_json(url: str) -> dict:
+    resp = http_requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _parse_number(value):
     """Convierte '2', 2.0, '87.5' a numero cuando tiene sentido."""
     if value in (None, ""):
@@ -203,11 +221,17 @@ def _parse_team(team: dict) -> dict:
     if isinstance(logo, list):
         logo = logo[0] if logo else None
 
+    color = team.get("color")
+    alt_color = team.get("alternateColor")
+
     return {
         "id": team.get("id"),
         "name": team.get("displayName", team.get("name", "?")),
+        "short_name": team.get("shortDisplayName", team.get("name", "?")),
         "abbr": team.get("abbreviation", ""),
         "logo": logo,
+        "color": f"#{color}" if color else None,
+        "alt_color": f"#{alt_color}" if alt_color else None,
         "score": _parse_number(raw_score),
         "winner": team.get("winner"),
     }
@@ -268,6 +292,7 @@ def _parse_event(event: dict, league_label: str, league_code: str | None) -> dic
         "league_code": league_code,
         "league": league_label,
         "date": event.get("date"),
+        "name": event.get("name", ""),
         "state": state,  # pre = proximo, in = en vivo, post = finalizado
         "status": short_detail,
         "clock": display_clock,
@@ -299,6 +324,7 @@ def _parse_tennis(events: list) -> list:
                 "league_code": None,
                 "league": "Tenis",
                 "date": event.get("date"),
+                "name": event.get("name", ""),
                 "state": type_info.get("state"),
                 "status": type_info.get("shortDetail", ""),
                 "clock": status.get("displayClock", ""),
@@ -313,12 +339,17 @@ def _parse_tennis(events: list) -> list:
     return out
 
 
-def get_sport_games(sport: str) -> dict:
-    """Devuelve los partidos (en vivo, proximos y finalizados) de un deporte."""
+def get_sport_games(sport: str, league: str | None = None) -> dict:
+    """Devuelve los partidos (en vivo, proximos y finalizados) de un deporte.
+
+    Si sport == 'soccer' y se pasa league, filtra solo esa liga.
+    Si no se pasa league, trae todas las ligas de futbol.
+    """
     if sport not in SPORTS:
         raise ValueError(f"Deporte no soportado: {sport}")
 
-    cached = _cache_get(f"sport:{sport}")
+    cache_key = f"sport:{sport}:{league or 'all'}"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -327,7 +358,12 @@ def get_sport_games(sport: str) -> dict:
 
     try:
         if sport == "soccer":
-            for league_code, league_name in SOCCER_LEAGUES.items():
+            leagues_to_fetch = (
+                {league: SOCCER_LEAGUES.get(league, league)}
+                if league and league in SOCCER_LEAGUES
+                else SOCCER_LEAGUES
+            )
+            for league_code, league_name in leagues_to_fetch.items():
                 try:
                     data = _fetch_scoreboard(path, league=league_code)
                     for event in data.get("events", []):
@@ -355,22 +391,204 @@ def get_sport_games(sport: str) -> dict:
     result = {
         "sport": sport,
         "label": label,
+        "league": league,
         "live_count": sum(1 for g in games if g["state"] == "in"),
         "games": games,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    _cache_set(f"sport:{sport}", result)
+    _cache_set(cache_key, result)
     return result
+
+
+def get_available_leagues() -> dict:
+    """Lista de ligas disponibles para el selector del frontend."""
+    return {
+        "soccer": [
+            {"code": code, "name": name} for code, name in SOCCER_LEAGUES.items()
+        ],
+    }
 
 
 # ==============================
 # DETALLE DE UN PARTIDO
 # ==============================
 
+def _parse_head_to_head(data: dict) -> list:
+    """Extrae el historial de enfrentamientos directos (H2H).
+
+    ESPN usa 'headToHead' en algunos deportes y 'seasonseries' en otros (MLB).
+    """
+    h2h = []
+
+    # Formato headToHead (algunos deportes)
+    for item in data.get("headToHead", []) or []:
+        comp = (item.get("competitions") or [{}])[0]
+        teams = {}
+        for c in comp.get("competitors", []):
+            ha = c.get("homeAway")
+            teams[ha] = {
+                "name": (c.get("team") or {}).get("displayName", "?"),
+                "abbr": (c.get("team") or {}).get("abbreviation", ""),
+                "logo": (c.get("team") or {}).get("logo"),
+                "score": _parse_number(c.get("score")),
+                "winner": c.get("winner"),
+            }
+        status = comp.get("status", {})
+        h2h.append({
+            "date": comp.get("date"),
+            "status": status.get("type", {}).get("shortDetail", ""),
+            "home": teams.get("home", {}),
+            "away": teams.get("away", {}),
+        })
+
+    # Formato seasonseries (MLB y otros)
+    for series in data.get("seasonseries", []) or []:
+        for event in series.get("events", []) or []:
+            teams = {}
+            for c in event.get("competitors", []):
+                ha = c.get("homeAway")
+                teams[ha] = {
+                    "name": (c.get("team") or {}).get("displayName", "?"),
+                    "abbr": (c.get("team") or {}).get("abbreviation", ""),
+                    "logo": (c.get("team") or {}).get("logo"),
+                    "score": _parse_number(c.get("score")),
+                    "winner": c.get("winner"),
+                }
+            h2h.append({
+                "date": event.get("date"),
+                "status": (event.get("statusType") or {}).get("shortDetail", ""),
+                "home": teams.get("home", {}),
+                "away": teams.get("away", {}),
+            })
+
+    return h2h
+
+
+def _parse_recent_games(data: dict) -> dict:
+    """Extrae los ultimos partidos de cada equipo."""
+    result = {}
+    for team_entry in data.get("teams", []) or []:
+        team_id = str((team_entry.get("team") or {}).get("id"))
+        team_name = (team_entry.get("team") or {}).get("displayName", "?")
+        recent = []
+        for event in team_entry.get("events", []) or []:
+            comp = (event.get("competitions") or [{}])[0]
+            teams = {}
+            for c in comp.get("competitors", []):
+                ha = c.get("homeAway")
+                teams[ha] = {
+                    "name": (c.get("team") or {}).get("displayName", "?"),
+                    "score": _parse_number(c.get("score")),
+                    "winner": c.get("winner"),
+                }
+            recent.append({
+                "date": comp.get("date"),
+                "status": comp.get("status", {}).get("type", {}).get("shortDetail", ""),
+                "home": teams.get("home", {}),
+                "away": teams.get("away", {}),
+            })
+        result[team_id] = {"name": team_name, "recent": recent[:5]}
+    return result
+
+
+def _parse_key_players(data: dict) -> list:
+    """Extrae jugadores destacados del partido.
+
+    ESPN usa 'keyPlayers' en algunos deportes y 'rosters' en otros (MLB).
+    """
+    players = []
+
+    # Formato keyPlayers
+    for kp in data.get("keyPlayers", []) or []:
+        for p in kp.get("keyPlayers", []) or []:
+            player = p.get("player", {})
+            stats = []
+            for s in p.get("statistics", []) or []:
+                if s:
+                    key = s.get("name") or ""
+                    stats.append({
+                        "name": STAT_TRANSLATIONS.get(key, s.get("displayName") or s.get("abbreviation") or key),
+                        "value": s.get("displayValue", ""),
+                    })
+            players.append({
+                "id": player.get("id"),
+                "name": player.get("displayName", "?"),
+                "headshot": player.get("headshot"),
+                "team_id": str(p.get("teamId", "")),
+                "stats": stats,
+            })
+
+    # Formato rosters (MLB): extraer jugadores con mejores stats
+    for roster_entry in data.get("rosters", []) or []:
+        team_id = str((roster_entry.get("team") or {}).get("id", ""))
+        for player in roster_entry.get("roster", []) or []:
+            athlete = player.get("athlete") or {}
+            stats = []
+            for s in player.get("stats", []) or []:
+                if s:
+                    key = s.get("name") or ""
+                    stats.append({
+                        "name": STAT_TRANSLATIONS.get(key, s.get("displayName") or s.get("abbreviation") or key),
+                        "value": s.get("displayValue", ""),
+                    })
+            # Solo incluir si tiene stats relevantes
+            if stats:
+                players.append({
+                    "id": athlete.get("id"),
+                    "name": athlete.get("displayName", "?"),
+                    "headshot": athlete.get("headshot"),
+                    "team_id": team_id,
+                    "stats": stats[:5],
+                })
+
+    return players[:8]  # Limitar a 8 jugadores
+
+
+def _parse_team_stats(data: dict) -> dict:
+    """Estadisticas comparadas por equipo desde boxscore."""
+    def _translate(name):
+        return STAT_TRANSLATIONS.get(name, name)
+
+    def _flatten_stats(items):
+        out = []
+        for s in items or []:
+            if not s:
+                continue
+            if "stats" in s:
+                category = s.get("displayName") or s.get("name") or ""
+                for sub in s["stats"] or []:
+                    if sub:
+                        key = sub.get("name") or ""
+                        translated = _translate(key) if key in STAT_TRANSLATIONS else (
+                            sub.get("displayName") or sub.get("shortDisplayName") or key or ""
+                        )
+                        prefix = f"{category} - {translated}" if category else translated
+                        out.append({
+                            "name": prefix,
+                            "label": sub.get("displayValue", ""),
+                        })
+            else:
+                key = s.get("name") or ""
+                out.append({
+                    "name": _translate(key) if key in STAT_TRANSLATIONS else (
+                        s.get("displayName") or s.get("shortDisplayName") or key or s.get("abbreviation") or ""
+                    ),
+                    "label": s.get("displayValue", ""),
+                })
+        return out
+
+    stats_by_team = {}
+    for box_team in data.get("boxscore", {}).get("teams", []):
+        team_id = str((box_team.get("team") or {}).get("id"))
+        stats_by_team[team_id] = _flatten_stats(box_team.get("statistics"))
+    return stats_by_team
+
+
 def get_game_detail(sport: str, event_id: str) -> dict:
     """Estadisticas completas de un partido via /summary de ESPN.
 
-    Devuelve marcador, estado, linescores y estadisticas comparadas por equipo.
+    Devuelve marcador, estado, linescores, estadisticas por equipo,
+    H2H, ultimos partidos y jugadores destacados.
     """
     if sport not in SPORTS:
         raise ValueError(f"Deporte no soportado: {sport}")
@@ -398,9 +616,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         if league_code
         else f"{ESPN_BASE}/{path}/summary?event={event_id}"
     )
-    resp = http_requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    data = _fetch_json(url)
 
     header = data.get("header", {})
     comps = header.get("competitions") or [{}]
@@ -414,8 +630,11 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         teams_out.append({
             "id": team.get("id"),
             "name": team.get("displayName", "?"),
+            "short_name": team.get("shortDisplayName", team.get("name", "?")),
             "abbr": team.get("abbreviation", ""),
             "logo": (team.get("logo") or [None])[0] if isinstance(team.get("logo"), list) else team.get("logo"),
+            "color": f"#{team.get('color')}" if team.get("color") else None,
+            "alt_color": f"#{team.get('alternateColor')}" if team.get("alternateColor") else None,
             "score": _parse_number(competitor.get("score")),
             "winner": competitor.get("winner"),
             "homeAway": competitor.get("homeAway"),
@@ -423,47 +642,8 @@ def get_game_detail(sport: str, event_id: str) -> dict:
             "records": [r.get("summary") for r in (competitor.get("records") or []) if r],
         })
 
-    # Estadisticas comparadas desde boxscore.teams[].statistics[]
-    # Dos formatos segun deporte:
-    #  - Plano (NBA/NFL): {name, displayValue}
-    #  - Por categoria (MLB): {name: "batting", stats: [{name, displayName, displayValue}]}
-    def _translate(name):
-        return STAT_TRANSLATIONS.get(name, name)
-
-    def _flatten_stats(items):
-        out = []
-        for s in items or []:
-            if not s:
-                continue
-            if "stats" in s:
-                category = s.get("displayName") or s.get("name") or ""
-                for sub in s["stats"] or []:
-                    if sub:
-                        # Traducir por el name interno (ej: "gamesPlayed" -> "Juegos jugados")
-                        key = sub.get("name") or ""
-                        translated = _translate(key) if key in STAT_TRANSLATIONS else (
-                            sub.get("displayName") or sub.get("shortDisplayName") or key or ""
-                        )
-                        prefix = f"{category} - {translated}" if category else translated
-                        out.append({
-                            "name": prefix,
-                            "label": sub.get("displayValue", ""),
-                        })
-            else:
-                key = s.get("name") or ""
-                out.append({
-                    "name": _translate(key) if key in STAT_TRANSLATIONS else (
-                        s.get("displayName") or s.get("shortDisplayName") or key or s.get("abbreviation") or ""
-                    ),
-                    "label": s.get("displayValue", ""),
-                })
-        return out
-
-    stats_by_team = {}
-    for box_team in data.get("boxscore", {}).get("teams", []):
-        team_id = str((box_team.get("team") or {}).get("id"))
-        stats_by_team[team_id] = _flatten_stats(box_team.get("statistics"))
-
+    # Estadisticas por equipo
+    stats_by_team = _parse_team_stats(data)
     for t in teams_out:
         t["statistics"] = stats_by_team.get(str(t["id"]), [])
 
@@ -482,16 +662,28 @@ def get_game_detail(sport: str, event_id: str) -> dict:
             "balls": sit.get("balls"),
         }
 
+    # H2H, ultimos partidos, jugadores destacados
+    h2h = _parse_head_to_head(data)
+    recent = _parse_recent_games(data)
+    key_players = _parse_key_players(data)
+
+    # Asignar ultimos partidos a cada equipo
+    for t in teams_out:
+        t["recent_games"] = recent.get(str(t["id"]), {}).get("recent", [])
+
     result = {
         "sport": sport,
         "label": label,
         "event_id": event_id,
+        "league": (SOCCER_LEAGUES.get(league_code) if league_code else label),
         "state": type_info.get("state"),
         "status": type_info.get("shortDetail", ""),
         "clock": status.get("displayClock", ""),
         "period": status.get("period"),
         "situation": situation,
         "teams": teams_out,
+        "head_to_head": h2h,
+        "key_players": key_players,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache_set(cache_key, result)
