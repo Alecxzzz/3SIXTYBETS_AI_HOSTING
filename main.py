@@ -551,6 +551,9 @@ Responde en espanol, conciso (max 200 palabras), formato:
     try:
         from engine.search_engine import SearchEngine
         respuesta = SearchEngine().ask_you(prompt)
+        # Limpiar asteriscos de formato markdown
+        if respuesta:
+            respuesta = respuesta.replace("*", "").replace("#", "")
         return {"analysis": respuesta, "context": contexto}
     except Exception as exc:
         return {"analysis": f"No se pudo generar analisis: {exc}", "context": contexto}
