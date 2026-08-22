@@ -183,13 +183,23 @@ def _cache_set(key, data):
         _cache[key] = {"data": data, "ts": time.time()}
 
 
+def _date_range() -> str:
+    """Rango de fechas hoy+manana para que salgan proximos partidos."""
+    from datetime import timedelta
+    today = datetime.now(timezone.utc)
+    tomorrow = today + timedelta(days=1)
+    return f"{today.strftime('%Y%m%d')}-{tomorrow.strftime('%Y%m%d')}"
+
+
 def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
     # En soccer la liga va en el path (soccer/eng.1/scoreboard), no como query param
     if league and path.startswith("soccer"):
         url = f"{ESPN_BASE}/{path}/{league}/scoreboard"
     else:
         url = f"{ESPN_BASE}/{path}/scoreboard"
-    resp = http_requests.get(url, timeout=10)
+    # Agregar rango de fechas para incluir proximos partidos
+    params = {"dates": _date_range()}
+    resp = http_requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
