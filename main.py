@@ -675,6 +675,31 @@ def _rewrite_manifest(text: str, base_url: str, proxy_base: str, referer: str | 
     return "\n".join(out_lines)
 
 
+def _is_master_playlist(text: str) -> bool:
+    """Detecta si un manifiesto es un master playlist (contiene #EXT-X-STREAM-INF)."""
+    return "#EXT-X-STREAM-INF" in text
+
+
+def _extract_first_variant_url(text: str, base_url: str) -> str | None:
+    """
+    Extrae la URL de la primera variante de un master playlist.
+    Devuelve None si no hay variantes.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#EXT-X-STREAM-INF"):
+            # La siguiente línea no vacía y sin # es la URL de la variante
+            for j in range(i + 1, len(lines)):
+                next_line = lines[j].strip()
+                if next_line and not next_line.startswith("#"):
+                    try:
+                        return urljoin(base_url, next_line)
+                    except Exception:
+                        return None
+    return None
+
+
 @app.get("/hls-proxy")
 def hls_proxy(request: Request, url: str, referer: str = None):
     """Proxy transparente para streams HLS (.m3u8, .ts, .key, .aac)."""
@@ -705,6 +730,32 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     # --- Manifest reescrito ---
     if _is_manifest(final_url, content_type) and resp.status_code == 200:
         text = resp.text
+
+        # Si es un master playlist, resolver la sub-playlist inmediatamente.
+        # Algunos servidores IPTV (como Astra) generan tokens de sesión efímeros
+        # en la URL de la sub-playlist que expiran en segundos. Si hls.js la pide
+        # después, el token ya no es válido (404). Resolviéndola aquí garantizamos
+        # que se pide en el mismo instante.
+        if _is_master_playlist(text):
+            variant_url = _extract_first_variant_url(text, final_url)
+            if variant_url:
+                try:
+                    sub_resp = http_requests.get(
+                        variant_url, headers=headers, stream=True, timeout=(5, 30)
+                    )
+                    if sub_resp.ok:
+                        sub_text = sub_resp.text
+                        sub_final_url = sub_resp.url or variant_url
+                        rewritten = _rewrite_manifest(sub_text, sub_final_url, proxy_base, referer)
+                        return PlainTextResponse(
+                            rewritten,
+                            media_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-store"},
+                        )
+                    print(f"[hls-proxy] sub-playlist {sub_resp.status_code} {variant_url}")
+                except http_requests.RequestException as exc:
+                    print(f"[hls-proxy] sub-playlist error: {exc}")
+
         rewritten = _rewrite_manifest(text, final_url, proxy_base, referer)
         return PlainTextResponse(
             rewritten,
