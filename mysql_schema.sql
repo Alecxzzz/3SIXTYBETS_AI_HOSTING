@@ -1,3 +1,15 @@
+-- ============================================================
+-- SIXTYDB - SCRIPT CORREGIDO Y LISTO PARA USAR
+-- ============================================================
+-- Las secciones marcadas "EJECUTAR DIRECTO" no necesitan cambios.
+-- Las secciones marcadas "REEMPLAZA ANTES DE CORRER" tienen un
+-- valor real de ejemplo, pero debes cambiarlo por el tuyo.
+-- ============================================================
+
+
+-- ============================================================
+-- 1) CREACION DE TABLAS  -- EJECUTAR DIRECTO (ya lo hiciste)
+-- ============================================================
 create table if not exists users (
   id varchar(64) primary key,
   username varchar(80) not null unique,
@@ -49,21 +61,21 @@ create table if not exists credit_transactions (
   foreign key (user_id) references users(id) on delete cascade
 );
 
--- ============================================================
--- QUERY REFERENCE: GESTION DE KEYS (REDEEM KEYS)
--- ============================================================
--- Estas queries son equivalentes a las funciones de db.py.
--- Útiles para revisar o insertar datos directamente en la BD.
 
--- 1) Registrar una key nueva (ej: crear key para 7 dias, sin expiracion de emision)
---    Reemplaza los ? por valores: <code>, <duration_days>, <created_by_user_id>
+-- ============================================================
+-- 2) CREAR UNA KEY NUEVA  -- REEMPLAZA EL CODE ANTES DE CORRER
+-- ============================================================
+-- El 'code' debe ser unico. Cambia 'SIXTYBETS-XXXX-YYYY' cada vez.
 INSERT INTO redeem_keys
   (id, code, duration_days, key_expires_at, created_by, created_at)
 VALUES
-  (UUID(), 'SIXTYBETS-AB12-CD34', 7, NULL,
+  (UUID(), 'SIXTYBETS-XXXX-YYYY', 7, NULL,
    (SELECT id FROM users WHERE username = 'alec'), NOW());
 
--- 2) Listar todas las keys con su estado (available / claimed / expired)
+
+-- ============================================================
+-- 3) LISTAR KEYS CON ESTADO  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT
   code,
   duration_days,
@@ -80,36 +92,51 @@ FROM redeem_keys
 ORDER BY created_at DESC
 LIMIT 100;
 
--- 3) Canjear/recoistrar una key para un usuario (equivalente a redeem_key_for_user)
---    Reemplaza <code> y <user_id> por los valores reales
+
+-- ============================================================
+-- 4) CANJEAR UNA KEY PARA UN USUARIO
+--    REEMPLAZA 'CODIGO_AQUI' y 'USERNAME_AQUI' antes de correr
+-- ============================================================
 START TRANSACTION;
+
   SELECT * FROM redeem_keys
-  WHERE code = UPPER(TRIM('<code>'))
+  WHERE code = UPPER(TRIM('CODIGO_AQUI'))
   FOR UPDATE;
--- Verifica: no debe estar claimed_by ni expirada
+  -- Verifica manualmente: claimed_by debe ser NULL y no debe estar expirada
 
   UPDATE redeem_keys
-  SET claimed_by = '<user_id>',
+  SET claimed_by = (SELECT id FROM users WHERE username = 'USERNAME_AQUI'),
       claimed_at = NOW()
-  WHERE code = UPPER(TRIM('<code>'))
+  WHERE code = UPPER(TRIM('CODIGO_AQUI'))
     AND claimed_by IS NULL
     AND (key_expires_at IS NULL OR key_expires_at > NOW());
+
 COMMIT;
 
--- 4) Extender el acceso de un usuario tras reclamar una key
---    (suma duration_days al access_expires_at existente)
-UPDATE users
-SET access_expires_at = GREATEST(access_expires_at, NOW())
-  + INTERVAL <duration_days> DAY
-WHERE id = '<user_id>';
 
--- 5) Ver keys sin reclamar (disponibles para canjear)
+-- ============================================================
+-- 5) EXTENDER ACCESO DE UN USUARIO (sumar dias)
+--    REEMPLAZA 'alec' y 30 por el usuario/dias que necesites
+--    (version corregida: usa JOIN, no subconsulta sobre la misma tabla)
+-- ============================================================
+UPDATE users u
+JOIN (SELECT id FROM users WHERE username = 'alec') AS target
+  ON u.id = target.id
+SET u.access_expires_at = GREATEST(u.access_expires_at, NOW()) + INTERVAL 30 DAY;
+
+
+-- ============================================================
+-- 6) VER KEYS DISPONIBLES (sin reclamar)  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT code, duration_days, created_at
 FROM redeem_keys
 WHERE claimed_by IS NULL
   AND (key_expires_at IS NULL OR key_expires_at > NOW());
 
--- 6) Estadisticas de keys
+
+-- ============================================================
+-- 7) ESTADISTICAS DE KEYS  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT
   COUNT(*) AS total,
   SUM(CASE WHEN claimed_by IS NULL
@@ -121,16 +148,33 @@ SELECT
       AND claimed_by IS NULL THEN 1 ELSE 0 END) AS expired
 FROM redeem_keys;
 
--- ============================================================
--- QUERY REFERENCE: USUARIOS Y SESIONES
--- ============================================================
 
--- Crear usuario admin directamente
+-- ============================================================
+-- 8) HACER ADMIN A UN USUARIO YA EXISTENTE (ej: alec)
+--    Nota: 'alec' ya existe en tu BD, por eso este es UPDATE,
+--    NO un INSERT (el INSERT original daba error de duplicado).
+-- ============================================================
+UPDATE users
+SET role = 'admin'
+WHERE username = 'alec';
+
+
+-- ============================================================
+-- 9) CREAR UN USUARIO NUEVO (ej: admin adicional)
+--    REEMPLAZA username y password_hash antes de correr.
+--    IMPORTANTE: password_hash NO se escribe a mano aqui.
+--    Debe generarse desde tu app Python con la misma funcion
+--    de hashing que usa tu backend (ej: pbkdf2_hmac), para que
+--    el login funcione. Un valor inventado aqui NO servira.
+-- ============================================================
 INSERT INTO users (id, username, password_hash, role, credits, access_expires_at, created_at)
-VALUES (UUID(), 'admin', '<pbkdf2_hash>', 'admin', 9999,
+VALUES (UUID(), 'NUEVO_USERNAME', 'HASH_GENERADO_DESDE_TU_APP', 'admin', 9999,
         DATE_ADD(NOW(), INTERVAL 10000 DAY), NOW());
 
--- Listar usuarios con su estado de acceso
+
+-- ============================================================
+-- 10) LISTAR USUARIOS CON ESTADO DE ACCESO  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT
   username,
   role,
@@ -143,24 +187,30 @@ SELECT
 FROM users
 ORDER BY created_at DESC;
 
--- Sesiones activas (últimas 24h)
+
+-- ============================================================
+-- 11) SESIONES ACTIVAS (ultimas 24h)  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT s.token, u.username, s.created_at
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR);
 
--- ============================================================
--- QUERY REFERENCE: MENSAJES DE CHAT
--- ============================================================
 
--- Mensajes de un usuario (últimas 24h)
+-- ============================================================
+-- 12) MENSAJES DE CHAT DE UN USUARIO (ultimas 24h)
+--     REEMPLAZA 'USERNAME_AQUI' antes de correr
+-- ============================================================
 SELECT role, text, created_at
 FROM chat_messages
-WHERE user_id = (SELECT id FROM users WHERE username = '<username>')
+WHERE user_id = (SELECT id FROM users WHERE username = 'USERNAME_AQUI')
   AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
 ORDER BY created_at ASC;
 
--- Contar mensajes por usuario (debug)
+
+-- ============================================================
+-- 13) CONTAR MENSAJES POR USUARIO (debug)  -- EJECUTAR DIRECTO
+-- ============================================================
 SELECT u.username, COUNT(m.id) AS msg_count
 FROM users u
 LEFT JOIN chat_messages m ON m.user_id = u.id
