@@ -6,8 +6,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs
 
-import psycopg2
-import psycopg2.extras
+import pymysql
+import pymysql.cursors
+import pymysql.err
 from dotenv import load_dotenv
 
 
@@ -18,46 +19,60 @@ def now_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def get_postgres_config():
-    database_url = os.getenv("DATABASE_URL", "").strip()
+def get_mysql_config():
+    # Soporta tanto una URL completa (MYSQL_URL, formato de Aiven
+    # "mysql://user:pass@host:port/db?ssl-mode=REQUIRED") como variables
+    # sueltas (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD,
+    # MYSQL_DATABASE), que es lo que ya tienes configurado en Northflank.
+    mysql_url = os.getenv("MYSQL_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
 
-    if database_url:
-        parsed = urlparse(database_url)
+    if mysql_url:
+        parsed = urlparse(mysql_url)
         query_params = parse_qs(parsed.query)
-
-        # Extraer sslmode del query string (ej: ?sslmode=require)
-        sslmode = query_params.get("sslmode", ["require"])[0]
+        ssl_mode = query_params.get("ssl-mode", query_params.get("sslmode", ["REQUIRED"]))[0]
 
         return {
             "host": parsed.hostname,
-            "port": parsed.port or 5432,
+            "port": parsed.port or 3306,
             "user": parsed.username,
             "password": parsed.password,
             "database": parsed.path.lstrip("/"),
-            "sslmode": sslmode,
+            "ssl_disabled": ssl_mode.upper() == "DISABLED",
         }
 
+    ssl_disabled_env = os.getenv("MYSQL_SSL_DISABLED", "false").strip().lower()
+
     return {
-        "host": os.getenv("PGHOST", "127.0.0.1"),
-        "port": int(os.getenv("PGPORT", "5432")),
-        "user": os.getenv("PGUSER", "postgres"),
-        "password": os.getenv("PGPASSWORD", ""),
-        "database": os.getenv("PGDATABASE", "sixtybets"),
-        "sslmode": os.getenv("PGSSLMODE", "require"),
+        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "user": os.getenv("MYSQL_USER", "root"),
+        "password": os.getenv("MYSQL_PASSWORD", ""),
+        "database": os.getenv("MYSQL_DATABASE", "sixtybets"),
+        "ssl_disabled": ssl_disabled_env in ("1", "true", "yes"),
     }
 
 
 def get_connection(autocommit=True):
-    config = get_postgres_config()
-    return psycopg2.connect(
+    config = get_mysql_config()
+
+    connect_kwargs = dict(
         host=config["host"],
         port=config["port"],
         user=config["user"],
         password=config["password"],
-        dbname=config["database"],
-        sslmode=config["sslmode"],
+        database=config["database"],
+        cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=20,
+        autocommit=autocommit,
     )
+
+    # Aiven exige TLS. pymysql habilita cifrado pasando un dict "ssl";
+    # no verificamos el certificado contra una CA local para simplificar
+    # (equivalente a sslmode=require de Postgres, no full-verify).
+    if not config["ssl_disabled"]:
+        connect_kwargs["ssl"] = {"ssl": {}}
+
+    return pymysql.connect(**connect_kwargs)
 
 
 def run_query(query, params=None, fetchone=False):
@@ -66,17 +81,17 @@ def run_query(query, params=None, fetchone=False):
         cur = None
         try:
             conn = get_connection(autocommit=True)
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur = conn.cursor()
             cur.execute(query, params or ())
-            conn.commit()
 
-            if query.strip().upper().startswith("SELECT") or query.strip().upper().startswith("RETURNING") or query.strip().upper().startswith("WITH"):
+            stripped = query.strip().upper()
+            if stripped.startswith("SELECT") or stripped.startswith("SHOW") or stripped.startswith("WITH"):
                 result = cur.fetchone() if fetchone else cur.fetchall()
-                return list(result) if isinstance(result, list) else result
+                return result
 
             return True
-        except psycopg2.Error as error:
-            print("PostgreSQL error:", error)
+        except pymysql.MySQLError as error:
+            print("MySQL error:", error)
             time.sleep(3)
         finally:
             if cur:
@@ -95,16 +110,16 @@ def init_db():
             username varchar(80) not null unique,
             password_hash varchar(255) not null,
             role varchar(20) not null default 'user',
-            credits integer not null default 0,
-            access_expires_at timestamp not null,
-            created_at timestamp not null
+            credits int not null default 0,
+            access_expires_at datetime not null,
+            created_at datetime not null
         )
         """,
         """
         create table if not exists sessions (
             token varchar(128) primary key,
             user_id varchar(64) not null,
-            created_at timestamp not null,
+            created_at datetime not null,
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
@@ -112,12 +127,12 @@ def init_db():
         create table if not exists redeem_keys (
             id varchar(64) primary key,
             code varchar(32) not null unique,
-            duration_days integer not null,
-            key_expires_at timestamp null,
+            duration_days int not null,
+            key_expires_at datetime null,
             created_by varchar(64) null,
             claimed_by varchar(64) null,
-            claimed_at timestamp null,
-            created_at timestamp not null,
+            claimed_at datetime null,
+            created_at datetime not null,
             foreign key (created_by) references users(id) on delete set null,
             foreign key (claimed_by) references users(id) on delete set null
         )
@@ -127,24 +142,21 @@ def init_db():
             id varchar(64) primary key,
             user_id varchar(64) not null,
             role varchar(20) not null,
-            text text not null,
-            created_at timestamp not null,
+            `text` text not null,
+            created_at datetime not null,
+            index chat_messages_user_created_idx (user_id, created_at),
             foreign key (user_id) references users(id) on delete cascade
         )
-        """,
-        """
-        create index if not exists chat_messages_user_created_idx
-        on chat_messages (user_id, created_at)
         """,
         """
         create table if not exists credit_transactions (
             id varchar(64) primary key,
             user_id varchar(64) not null,
-            amount integer not null,
+            amount int not null,
             status varchar(30) not null,
             provider varchar(40) not null,
             reference varchar(160) null,
-            created_at timestamp not null,
+            created_at datetime not null,
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
@@ -253,7 +265,7 @@ def redeem_key_for_user(user_id, code):
 
     try:
         conn = get_connection(autocommit=False)
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur = conn.cursor()
         access_expires_at = claim_redeem_key(code, user_id, cur)
 
         cur.execute("select access_expires_at from users where id = %s", (user_id,))
@@ -295,7 +307,7 @@ def create_user(username, password, redeem_code):
 
     try:
         conn = get_connection(autocommit=False)
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur = conn.cursor()
         cur.execute(
             """
             insert into users
@@ -314,7 +326,7 @@ def create_user(username, password, redeem_code):
         user = public_user(cur.fetchone())
         conn.commit()
         return user
-    except psycopg2.IntegrityError:
+    except pymysql.err.IntegrityError:
         if conn:
             conn.rollback()
         raise ValueError("Ya existe una cuenta con ese usuario.") from None
@@ -415,7 +427,7 @@ def get_user_by_token(token):
 def list_messages(user_id):
     rows = run_query(
         """
-        select id, role, text, created_at
+        select id, role, `text`, created_at
         from chat_messages
         where user_id = %s
         and created_at >= %s
@@ -439,13 +451,13 @@ def create_message(user_id, role, text):
     message_id = secrets.token_urlsafe(16)
     run_query(
         """
-        insert into chat_messages (id, user_id, role, text, created_at)
+        insert into chat_messages (id, user_id, role, `text`, created_at)
         values (%s, %s, %s, %s, %s)
         """,
         (message_id, user_id, role, text, now_utc()),
     )
     row = run_query(
-        "select id, role, text, created_at from chat_messages where id = %s",
+        "select id, role, `text`, created_at from chat_messages where id = %s",
         (message_id,),
         fetchone=True,
     )
