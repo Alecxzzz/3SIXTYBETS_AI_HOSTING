@@ -9,6 +9,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 import db
+import sports
 from engine.search_engine import SearchEngine
 
 
@@ -421,6 +422,28 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return result
+
+
+# ==============================
+# ESTADISTICAS DEPORTIVAS (ESPN)
+# ==============================
+
+@app.get("/stats/summary")
+def stats_summary(user=Depends(get_current_user)):
+    """Resumen de todos los deportes: cuantos partidos hay y cuantos en vivo."""
+    return sports.get_all_sports_summary()
+
+
+@app.get("/stats/live")
+def stats_live(sport: str = "soccer", user=Depends(get_current_user)):
+    """Partidos de un deporte: en vivo, proximos y finalizados.
+
+    Deportes: soccer, nba, mlb, nfl, tennis
+    """
+    try:
+        return sports.get_sport_games(sport)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.get("/admin/keys")
