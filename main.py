@@ -599,11 +599,67 @@ def admin_create_keys(data: AdminKeyIn, user=Depends(get_admin)):
 # IPTV.  Este endpoint las resuelve: el browser habla con nosotros por https
 # (mismo origen del API) y Python re-encamina el stream al servidor real.
 
+import time as _time
+import threading
+
 HLS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
+# Caché temporal de segmentos .ts para streams con tokens efímeros.
+_segment_cache = {}  # key: tsUrl -> { buffer, timestamp, contentType }
+_segment_cache_lock = threading.Lock()
+_SEGMENT_CACHE_TTL = 30  # segundos
+
+
+def _clean_segment_cache():
+    """Elimina segmentos expirados del caché."""
+    now = _time.time()
+    with _segment_cache_lock:
+        expired = [k for k, v in _segment_cache.items() if now - v["timestamp"] > _SEGMENT_CACHE_TTL]
+        for k in expired:
+            del _segment_cache[k]
+
+
+def _preload_segments(manifest_text, base_url, headers):
+    """
+    Extrae todas las URLs de segmentos de una media playlist y las descarga
+    inmediatamente, guardándolas en el caché. Esto es necesario porque algunos
+    servidores IPTV (como Astra) generan tokens efímeros que expiran en segundos.
+    """
+    ts_urls = []
+    for line in manifest_text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            abs_url = urljoin(base_url, stripped)
+            if abs_url.endswith(".ts") or abs_url.endswith(".aac") or abs_url.endswith(".m4s"):
+                ts_urls.append(abs_url)
+        except Exception:
+            pass
+
+    for url in ts_urls:
+        with _segment_cache_lock:
+            if url in _segment_cache:
+                continue
+        try:
+            resp = http_requests.get(url, headers=headers, stream=True, timeout=(5, 30))
+            if resp.ok:
+                buffer = resp.content
+                content_type = resp.headers.get("content-type", "video/mp2t")
+                with _segment_cache_lock:
+                    _segment_cache[url] = {
+                        "buffer": buffer,
+                        "timestamp": _time.time(),
+                        "contentType": content_type,
+                    }
+        except Exception:
+            pass
+
+    _clean_segment_cache()
 
 # Cabeceras que no deben retransmitirse al cliente
 _HOP = {
@@ -727,6 +783,17 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     final_url = resp.url  # refleja redirects -> base correcta para rewrite
     proxy_base = _proxy_base(request)
 
+    # --- Segmentos .ts: servir desde caché si existe ---
+    _clean_segment_cache()
+    with _segment_cache_lock:
+        cached = _segment_cache.get(target)
+    if cached:
+        return PlainTextResponse(
+            cached["buffer"],
+            media_type=cached.get("contentType", "video/mp2t"),
+            headers={"Cache-Control": "no-store"},
+        )
+
     # --- Manifest reescrito ---
     if _is_manifest(final_url, content_type) and resp.status_code == 200:
         text = resp.text
@@ -746,6 +813,10 @@ def hls_proxy(request: Request, url: str, referer: str = None):
                     if sub_resp.ok:
                         sub_text = sub_resp.text
                         sub_final_url = sub_resp.url or variant_url
+
+                        # Precargar segmentos inmediatamente (tokens efímeros)
+                        _preload_segments(sub_text, sub_final_url, headers)
+
                         rewritten = _rewrite_manifest(sub_text, sub_final_url, proxy_base, referer)
                         return PlainTextResponse(
                             rewritten,
@@ -755,6 +826,10 @@ def hls_proxy(request: Request, url: str, referer: str = None):
                     print(f"[hls-proxy] sub-playlist {sub_resp.status_code} {variant_url}")
                 except http_requests.RequestException as exc:
                     print(f"[hls-proxy] sub-playlist error: {exc}")
+
+        # Si es media playlist, precargar segmentos antes de servir
+        if not _is_master_playlist(text):
+            _preload_segments(text, final_url, headers)
 
         rewritten = _rewrite_manifest(text, final_url, proxy_base, referer)
         return PlainTextResponse(
