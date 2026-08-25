@@ -314,13 +314,13 @@ def seleccionar_modelo():
     return MODELO_DEFAULT
 
 
-def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, modelo_actual=None):
+def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, modelo_actual=None, max_tokens=None):
     """Llama a Groq chat completions con reintentos, fallback de modelo y compactación."""
     modelo = modelo_actual or seleccionar_modelo()
     payload = {
         "model": modelo,
         "messages": messages,
-        "max_tokens": MAX_TOKENS
+        "max_tokens": max_tokens or MAX_TOKENS
     }
     if usar_tools:
         payload["tools"] = tools
@@ -512,4 +512,113 @@ def generar_respuesta_36ai(prompt_sistema: str, prompt_usuario: str) -> str:
     """Punto de entrada público compatible con ai.model.generar_respuesta."""
     return analizar_36ai(prompt_usuario, prompt_sistema) or ""
 
-    return content.strip()
+
+# ============================================================
+# CLASIFICACIÓN: diferenciar conversación de análisis de partido
+# ============================================================
+
+_CHAT_TRIGGERS = (
+    "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
+    "hey", "hi", "hello", "gracias", "gracia", "ok", "okay", "vale",
+    "que tal", "como estas", "como estás", "quien eres", "quién eres",
+    "tu nombre", "ayuda", "help",
+)
+
+
+def _clasificar_rapida(mensaje: str):
+    """Clasificación rápida por regex. Devuelve una etiqueta o None si es incierta."""
+    texto = mensaje.strip()
+    if not texto:
+        return "CONVERSACION"
+    t = texto.lower()
+
+    # Match claro: vs / versus / v. / contra
+    if re.search(r'\b(vs|versus|v\.|contra)\b', t):
+        return "SPORTS_MATCH"
+
+    # Saludos / charla corta conocida
+    if len(t) <= 40 and any(t == w or t.startswith(w + " ") or t.startswith(w + ",") or t.startswith(w + "!") for w in _CHAT_TRIGGERS):
+        return "CONVERSACION"
+
+    return None
+
+
+def clasificar_36ai(mensaje: str) -> str:
+    """Decide si el mensaje pide analizar un partido (SPORTS_MATCH) o es conversación.
+
+    Usa un filtro rápido por regex y, si es incierto, una llamada ligera a Groq
+    (sin tools, pocos tokens) para clasificar con precisión.
+    """
+    if not GROQ_API_KEY:
+        # Sin Groq no podemos clasificar con modelo: usamos solo el regex.
+        return _clasificar_rapida(mensaje) or "CONVERSACION"
+
+    rapida = _clasificar_rapida(mensaje)
+    if rapida:
+        return rapida
+
+    prompt_sistema = (
+        "Clasifica el mensaje del usuario para 365AI, un asistente de apuestas deportivas.\n"
+        "Responde SOLO una etiqueta, nada más:\n\n"
+        "SPORTS_MATCH = el usuario pide analizar, pronosticar o dar un pick de un partido o "
+        "enfrentamiento CONCRETO entre dos equipos o jugadores (con o sin la palabra 'vs').\n"
+        "CONVERSACION = saludo, charla normal, o pregunta deportiva/apuestas GENERAL sin un "
+        "partido concreto (ej: 'que es handicap asiatico', 'hola', 'que opinas de los Yankees', "
+        "'como uso la IA', 'que mercado me recomiendas').\n\n"
+        "Si dudas entre los dos, elige CONVERSACION."
+    )
+    messages = [
+        {"role": "system", "content": prompt_sistema},
+        {"role": "user", "content": f"Mensaje: {mensaje}\nEtiqueta:"},
+    ]
+
+    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=20)
+    if not data:
+        return "CONVERSACION"
+
+    content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip().upper()
+    if "SPORTS_MATCH" in content:
+        return "SPORTS_MATCH"
+    if "CONVERSACION" in content:
+        return "CONVERSACION"
+    return "CONVERSACION"
+
+
+def responder_conversacion_36ai(mensaje: str, system_prompt: str) -> str:
+    """Responde en modo conversación: una sola llamada a Groq, sin tools ni formato EDGE."""
+    if not GROQ_API_KEY:
+        return "365AI no está configurada. Falta AI36_GROQ_API_KEY en el backend."
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": mensaje},
+    ]
+    data, _ = llamar_modelo(messages, usar_tools=False)
+    if not data:
+        return None
+
+    content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+    # Quitar bloques de razonamiento internos que algunos modelos emiten
+    content = re.sub(r'<' + 'think' + r'>.*?</' + 'think' + r'>', '', content, flags=re.DOTALL).strip()
+    return content or None
+
+
+def procesar_36ai(mensaje: str) -> str:
+    """Punto de entrada principal de 365AI.
+
+    Clasifica el mensaje:
+    - SPORTS_MATCH  -> análisis agéntico con tools + formato EDGE.
+    - CONVERSACION  -> respuesta natural de asistente, sin EDGE ni tools.
+    """
+    from engine.prompt_builder import construir_prompt_sistema_36ai, construir_prompt_conversacional
+
+    tipo = clasificar_36ai(mensaje)
+
+    if tipo == "SPORTS_MATCH":
+        respuesta = analizar_36ai(mensaje, construir_prompt_sistema_36ai())
+    else:
+        respuesta = responder_conversacion_36ai(mensaje, construir_prompt_conversacional("365AI"))
+
+    if respuesta:
+        respuesta = respuesta.replace("*", "").replace("#", "")
+    return respuesta or "365AI no pudo generar una respuesta. Intenta de nuevo."

@@ -161,16 +161,12 @@ def listar_modelos():
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
     modelo_id = (data.modelo or "you").strip().lower()
-    # "groq" es el id que usa el frontend para "Walter tipster" -> ahora corre 36AI
+    # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
     if modelo_id in ("36ai", "36", "ia36", "groq"):
-        from engine.prompt_builder import construir_prompt_sistema_36ai
-        from ai.ia36 import analizar_36ai
-        prompt_sistema = construir_prompt_sistema_36ai()
-        respuesta = analizar_36ai(data.mensaje, prompt_sistema)
-        if respuesta:
-            # Limpiar asteriscos/numerales de formato markdown, igual que con You.com
-            respuesta = respuesta.replace("*", "").replace("#", "")
-        return respuesta or "36AI no pudo generar una respuesta. Intenta de nuevo."
+        from ai.ia36 import procesar_36ai
+        # procesar_36ai clasifica solo: conversación -> respuesta natural,
+        # partido -> análisis agéntico con formato EDGE.
+        return procesar_36ai(data.mensaje)
 
     if not YOU_API_KEY:
         return (
@@ -178,6 +174,25 @@ def chat(data: Chat):
             "En Render agrega la clave de You.com y la variable YOU_BASE_URL."
         )
 
+    # Demian (You.com): clasificar para diferenciar conversación de análisis.
+    # Usamos el clasificador de 365AI (rápido, vía Groq) para decidir.
+    try:
+        from ai.ia36 import clasificar_36ai
+        tipo = clasificar_36ai(data.mensaje)
+    except Exception:
+        tipo = "SPORTS_MATCH"  # si falla la clasificación, comportamiento anterior
+
+    if tipo != "SPORTS_MATCH":
+        # Modo conversación: sin formato EDGE, respuesta natural de asistente.
+        from engine.prompt_builder import construir_prompt_conversacional
+        respuesta = SearchEngine().ask_you(
+            data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
+        )
+        if respuesta:
+            respuesta = respuesta.replace("*", "").replace("#", "")
+        return respuesta or "No pude generar una respuesta. Intenta de nuevo."
+
+    # Modo análisis de partido: reglas EDGE + búsqueda web (comportamiento anterior).
     reglas = """
 Eres 3SIXTYBETS AI WORKSPOT - Analista cuantitativo de apuestas deportivas.
 
