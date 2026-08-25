@@ -161,7 +161,8 @@ def listar_modelos():
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
     modelo_id = (data.modelo or "you").strip().lower()
-    if modelo_id in ("36ai", "36", "ia36"):
+    # "groq" es el id que usa el frontend para "Walter tipster" -> ahora corre 36AI
+    if modelo_id in ("36ai", "36", "ia36", "groq"):
         from engine.prompt_builder import construir_prompt_sistema_36ai
         from ai.ia36 import analizar_36ai
         prompt_sistema = construir_prompt_sistema_36ai()
