@@ -54,11 +54,11 @@ La cuenta principal se crea automaticamente si configuras `ADMIN_USERNAME` y `AD
 Abre `/docs` y usa `POST /chat`. El campo `modelo` selecciona la IA:
 
 - `you` (por defecto): Demian tipster (You.com).
-- `36ai`: 36AI (Groq + function-calling, busca forma/lesiones/H2H con DDGS y cuotas reales con odds-api).
+- `36ai`: 365AI (Groq + function-calling, busca forma/lesiones/H2H con DDGS y cuotas reales con odds-api). En el frontend aparece como "365AI" (id `groq`).
 
 `GET /models` lista las IAs disponibles y si están configuradas.
 
-36AI:
+365AI:
 
 ```json
 {

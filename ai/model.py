@@ -20,7 +20,7 @@ MODEL_CONFIGS = {
         "model": os.getenv("YOU_MODEL", "research"),
     },
     "36ai": {
-        "name": "36AI",
+        "name": "365AI",
         "api_key": os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY"),
         "base_url": os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
         "model": os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
