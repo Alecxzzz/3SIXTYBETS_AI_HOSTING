@@ -19,12 +19,20 @@ MODEL_CONFIGS = {
         "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
         "model": os.getenv("YOU_MODEL", "research"),
     },
+    "36ai": {
+        "name": "36AI",
+        "api_key": os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY"),
+        "base_url": os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
+        "model": os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
+    },
 }
 
 YOU_CONTEXT_MAX_CHARS = int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1200"))
 
 
 def normalizar_modelo(modelo: str) -> str:
+    if modelo and str(modelo).strip().lower() in ("36ai", "36", "ia36"):
+        return "36ai"
     return "you"
 
 
@@ -166,5 +174,8 @@ Solicitud del usuario:
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "you") -> str:
-    normalizar_modelo(modelo)
+    modelo = normalizar_modelo(modelo)
+    if modelo == "36ai":
+        from ai.ia36 import generar_respuesta_36ai
+        return generar_respuesta_36ai(prompt_sistema, prompt_usuario)
     return generar_respuesta_you(prompt_sistema, prompt_usuario)

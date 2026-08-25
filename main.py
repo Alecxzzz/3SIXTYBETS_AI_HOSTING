@@ -52,6 +52,7 @@ app.add_middleware(
 class Chat(BaseModel):
     mensaje: str
     buscar: bool = True
+    modelo: str = "you"
 
 
 def limpiar_consulta(mensaje: str) -> str:
@@ -150,8 +151,26 @@ def inicio():
     return "Test"
 
 
+@app.get("/models")
+def listar_modelos():
+    """Lista las IAs disponibles en el backend (para que el frontend las seleccione)."""
+    from ai.model import modelos_disponibles
+    return {"modelos": modelos_disponibles()}
+
+
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
+    modelo_id = (data.modelo or "you").strip().lower()
+    if modelo_id in ("36ai", "36", "ia36"):
+        from engine.prompt_builder import construir_prompt_sistema_36ai
+        from ai.ia36 import analizar_36ai
+        prompt_sistema = construir_prompt_sistema_36ai()
+        respuesta = analizar_36ai(data.mensaje, prompt_sistema)
+        if respuesta:
+            # Limpiar asteriscos/numerales de formato markdown, igual que con You.com
+            respuesta = respuesta.replace("*", "").replace("#", "")
+        return respuesta or "36AI no pudo generar una respuesta. Intenta de nuevo."
+
     if not YOU_API_KEY:
         return (
             "ERROR: Falta YOU_API_KEY o YOU_SEARCH_API_KEY.\n"
