@@ -661,40 +661,49 @@ def _clean_segment_cache():
 def _preload_segments(manifest_text, base_url, headers):
     """
     Extrae todas las URLs de segmentos de una media playlist y las descarga
-    inmediatamente, guardándolas en el caché. Esto es necesario porque algunos
+    en segundo plano, guardándolas en el caché. Esto es necesario porque algunos
     servidores IPTV (como Astra) generan tokens efímeros que expiran en segundos.
+
+    Se ejecuta en un hilo daemon para NO bloquear la respuesta del manifest al
+    cliente: el manifest se sirve inmediatamente y los segmentos se cachean en
+    paralelo. Esto reduce drásticamente el tiempo al primer cuadro (TTFF).
     """
-    ts_urls = []
-    for line in manifest_text.split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        try:
-            abs_url = urljoin(base_url, stripped)
-            if abs_url.endswith(".ts") or abs_url.endswith(".aac") or abs_url.endswith(".m4s"):
-                ts_urls.append(abs_url)
-        except Exception:
-            pass
-
-    for url in ts_urls:
-        with _segment_cache_lock:
-            if url in _segment_cache:
+    def _fetch_all():
+        ts_urls = []
+        for line in manifest_text.split("\n"):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
-        try:
-            resp = http_requests.get(url, headers=headers, stream=True, timeout=(5, 30))
-            if resp.ok:
-                buffer = resp.content
-                content_type = resp.headers.get("content-type", "video/mp2t")
-                with _segment_cache_lock:
-                    _segment_cache[url] = {
-                        "buffer": buffer,
-                        "timestamp": _time.time(),
-                        "contentType": content_type,
-                    }
-        except Exception:
-            pass
+            try:
+                abs_url = urljoin(base_url, stripped)
+                if abs_url.endswith(".ts") or abs_url.endswith(".aac") or abs_url.endswith(".m4s"):
+                    ts_urls.append(abs_url)
+            except Exception:
+                pass
 
-    _clean_segment_cache()
+        for url in ts_urls:
+            with _segment_cache_lock:
+                if url in _segment_cache:
+                    continue
+            try:
+                resp = http_requests.get(url, headers=headers, stream=True, timeout=(5, 30))
+                if resp.ok:
+                    buffer = resp.content
+                    content_type = resp.headers.get("content-type", "video/mp2t")
+                    with _segment_cache_lock:
+                        _segment_cache[url] = {
+                            "buffer": buffer,
+                            "timestamp": _time.time(),
+                            "contentType": content_type,
+                        }
+            except Exception:
+                pass
+
+        _clean_segment_cache()
+
+    # Lanzar la precarga en segundo plano: no bloquea la respuesta del manifest.
+    _t = threading.Thread(target=_fetch_all, daemon=True)
+    _t.start()
 
 # Cabeceras que no deben retransmitirse al cliente
 _HOP = {
