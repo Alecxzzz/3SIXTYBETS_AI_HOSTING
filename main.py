@@ -12,12 +12,10 @@ import db
 import sports
 from engine.search_engine import SearchEngine
 
-
 try:
     from ddgs import DDGS
 except ImportError:
     DDGS = None
-
 
 # ==============================
 # CONFIGURACION PARA HOSTING
@@ -48,12 +46,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class Chat(BaseModel):
     mensaje: str
     buscar: bool = True
     modelo: str = "you"
-
 
 def limpiar_consulta(mensaje: str) -> str:
     texto = mensaje.strip()
@@ -79,7 +75,6 @@ def limpiar_consulta(mensaje: str) -> str:
 
     return texto if texto else mensaje
 
-
 # Limite de seguridad para no exceder el TPM (tokens por minuto) del modelo.
 # Groq free/on_demand tiers suelen tener limites bajos (p.ej. 8000 TPM), asi
 # que recortamos el contexto web ANTES de enviarlo, en vez de dejar que la
@@ -87,13 +82,11 @@ def limpiar_consulta(mensaje: str) -> str:
 MAX_CHARS_CONTEXTO_WEB = int(os.getenv("MAX_CHARS_CONTEXTO_WEB", "3500"))
 MAX_CHARS_POR_RESULTADO = int(os.getenv("MAX_CHARS_POR_RESULTADO", "220"))
 
-
 def recortar(texto: str, limite: int) -> str:
     texto = texto or ""
     if len(texto) <= limite:
         return texto
     return texto[:limite].rstrip() + "..."
-
 
 def buscar_web(mensaje: str, max_resultados: int = 2) -> str:
     partido = limpiar_consulta(mensaje)
@@ -111,10 +104,10 @@ def buscar_web(mensaje: str, max_resultados: int = 2) -> str:
     try:
         for consulta in consultas:
             resultados.append(f"\n=== BUSQUEDA WEB: {consulta} ===\n")
-            
+
             # Usar You.com para búsqueda
             datos_busqueda = search_engine.buscar_you(consulta, cantidad=max_resultados)
-            
+
             if not datos_busqueda:
                 # Fallback a DDGS si You.com falla
                 datos_busqueda = search_engine.buscar_ddgs(consulta, cantidad=max_resultados)
@@ -145,18 +138,15 @@ Contenido: {contenido}
 
     return contexto_final
 
-
 @app.get("/", response_class=PlainTextResponse)
 def inicio():
     return "Test"
-
 
 @app.get("/models")
 def listar_modelos():
     """Lista las IAs disponibles en el backend (para que el frontend las seleccione)."""
     from ai.model import modelos_disponibles
     return {"modelos": modelos_disponibles()}
-
 
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
@@ -304,7 +294,6 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         respuesta = respuesta.replace("*", "").replace("#", "")
     return respuesta
 
-
 # ==============================
 # AUTH + DB ENDPOINTS
 # ==============================
@@ -356,33 +345,27 @@ def _init_database():
             else:
                 print("[startup] DB not available — app continues without DB", flush=True)
 
-
 # ---- Pydantic models ----
 class AuthSignup(BaseModel):
     username: str
     password: str
     redeem_code: str
 
-
 class AuthSignin(BaseModel):
     username: str
     password: str
-
 
 class MessageIn(BaseModel):
     role: str
     text: str
 
-
 class RedeemIn(BaseModel):
     redeem_code: str
-
 
 class AdminKeyIn(BaseModel):
     duration_days: int
     quantity: int = 1
     expires_in_days: int | None = None
-
 
 # ---- Auth dependency ----
 def get_current_user(authorization: str = Header(None)):
@@ -394,12 +377,10 @@ def get_current_user(authorization: str = Header(None)):
         raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
     return user
 
-
 def get_admin(user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(403, "Acceso restringido a administradores.")
     return user
-
 
 # ---- Endpoints ----
 
@@ -407,7 +388,6 @@ def get_admin(user=Depends(get_current_user)):
 def health():
     """Estado del backend y la base de datos."""
     return db.health_status()
-
 
 @app.post("/auth/signup")
 def auth_signup(data: AuthSignup):
@@ -418,7 +398,6 @@ def auth_signup(data: AuthSignup):
     token = db.create_session(user["id"])
     return {"access_token": token, "user": user}
 
-
 @app.post("/auth/signin")
 def auth_signin(data: AuthSignin):
     user = db.get_user_by_username(data.username)
@@ -426,7 +405,6 @@ def auth_signin(data: AuthSignin):
         raise HTTPException(401, "Usuario o contrasena incorrecta.")
     token = db.create_session(user["id"])
     return {"access_token": token, "user": db.public_user(user)}
-
 
 @app.post("/auth/signout")
 def auth_signout(request: Request, user=Depends(get_current_user)):
@@ -436,23 +414,19 @@ def auth_signout(request: Request, user=Depends(get_current_user)):
         db.delete_session(token)
     return {"ok": True}
 
-
 @app.get("/auth/me")
 def auth_me(user=Depends(get_current_user)):
     return db.public_user(user)
-
 
 @app.get("/messages")
 def get_messages(user=Depends(get_current_user)):
     messages = db.list_messages(user["id"])
     return {"messages": messages}
 
-
 @app.post("/messages")
 def post_message(data: MessageIn, user=Depends(get_current_user)):
     msg = db.create_message(user["id"], data.role, data.text)
     return msg
-
 
 @app.post("/redeem")
 def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
@@ -467,17 +441,16 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
 # ESTADISTICAS DEPORTIVAS (ESPN)
 # ==============================
 
+
 @app.get("/stats/summary")
 def stats_summary(user=Depends(get_current_user)):
     """Resumen de todos los deportes: cuantos partidos hay y cuantos en vivo."""
     return sports.get_all_sports_summary()
 
-
 @app.get("/stats/leagues")
 def stats_leagues(user=Depends(get_current_user)):
     """Lista de ligas disponibles para el selector."""
     return sports.get_available_leagues()
-
 
 @app.get("/stats/live")
 def stats_live(sport: str = "soccer", league: str = None, user=Depends(get_current_user)):
@@ -491,7 +464,6 @@ def stats_live(sport: str = "soccer", league: str = None, user=Depends(get_curre
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
-
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
@@ -501,7 +473,6 @@ def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
         raise HTTPException(400, str(exc))
     except Exception as exc:
         raise HTTPException(502, f"Error obteniendo detalle del partido: {exc}")
-
 
 @app.get("/stats/ai-analysis")
 def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user)):
@@ -597,12 +568,10 @@ Responde en espanol, conciso (max 200 palabras), formato:
     except Exception as exc:
         return {"analysis": f"No se pudo generar analisis: {exc}", "context": contexto}
 
-
 @app.get("/admin/keys")
 def admin_list_keys(user=Depends(get_admin)):
     keys = db.list_redeem_keys()
     return {"keys": keys}
-
 
 @app.post("/admin/keys")
 def admin_create_keys(data: AdminKeyIn, user=Depends(get_admin)):
@@ -623,7 +592,6 @@ def admin_create_keys(data: AdminKeyIn, user=Depends(get_admin)):
             "expires_at": key["key_expires_at"].isoformat() if key.get("key_expires_at") else None,
         })
     return {"keys": created}
-
 
 # ==============================
 # PROXY HLS
@@ -648,7 +616,6 @@ _segment_cache = {}  # key: tsUrl -> { buffer, timestamp, contentType }
 _segment_cache_lock = threading.Lock()
 _SEGMENT_CACHE_TTL = 30  # segundos
 
-
 def _clean_segment_cache():
     """Elimina segmentos expirados del caché."""
     now = _time.time()
@@ -656,7 +623,6 @@ def _clean_segment_cache():
         expired = [k for k, v in _segment_cache.items() if now - v["timestamp"] > _SEGMENT_CACHE_TTL]
         for k in expired:
             del _segment_cache[k]
-
 
 def _preload_segments(manifest_text, base_url, headers):
     """
@@ -712,13 +678,11 @@ _HOP = {
     "content-encoding", "content-length",
 }
 
-
 def _proxy_base(request: Request) -> str:
     """URL canónica del propio endpoint /hls-proxy (para reescritura de manifests)."""
     scheme = request.headers.get("x-forwarded-proto", "https")
     host = request.headers.get("host", request.url.netloc)
     return f"{scheme}://{host}/hls-proxy"
-
 
 def _wrap(abs_url: str, proxy_base: str, referer: str | None = None) -> str:
     """Construye una URL *hacia nuestro proxy* a partir de una URL absoluta."""
@@ -726,7 +690,6 @@ def _wrap(abs_url: str, proxy_base: str, referer: str | None = None) -> str:
     if referer:
         out += f"&referer={quote(referer, safe='')}"
     return out
-
 
 def _is_manifest(path: str, content_type: str = "") -> bool:
     low = path.lower()
@@ -737,7 +700,6 @@ def _is_manifest(path: str, content_type: str = "") -> bool:
         or "x-mpegurl" in content_type
         or "vnd.apple.mpegurl" in content_type
     )
-
 
 def _rewrite_manifest(text: str, base_url: str, proxy_base: str, referer: str | None) -> str:
     """
@@ -774,11 +736,9 @@ def _rewrite_manifest(text: str, base_url: str, proxy_base: str, referer: str | 
 
     return "\n".join(out_lines)
 
-
 def _is_master_playlist(text: str) -> bool:
     """Detecta si un manifiesto es un master playlist (contiene #EXT-X-STREAM-INF)."""
     return "#EXT-X-STREAM-INF" in text
-
 
 def _extract_first_variant_url(text: str, base_url: str) -> str | None:
     """
@@ -798,7 +758,6 @@ def _extract_first_variant_url(text: str, base_url: str) -> str | None:
                     except Exception:
                         return None
     return None
-
 
 @app.get("/hls-proxy")
 def hls_proxy(request: Request, url: str, referer: str = None):
@@ -910,5 +869,3 @@ def hls_proxy(request: Request, url: str, referer: str = None):
         media_type=out_headers.get("Content-Type", "application/octet-stream"),
         headers=out_headers,
     )
-
-
