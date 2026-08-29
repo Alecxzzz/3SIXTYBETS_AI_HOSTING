@@ -885,3 +885,47 @@ async def api_get_player_last5(sport: str, player_id: int, season: int = 2024):
     if result.get("error"):
         return {"error": True, "message": result.get("message", "Error desconocido")}
     return result
+
+# ==============================
+# PANEL ADMIN (solo administradores)
+# ==============================
+
+@app.get("/api/game/{sport}/{game_id}/players")
+def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(get_current_user)):
+    """Lista de jugadores clickeables de un partido (boxscore MLB / lineup futbol)."""
+    return player_stats_service.get_clickable_players(sport, game_id, season)
+
+
+@app.get("/admin/channel-test")
+def admin_channel_test(url: str, user=Depends(get_admin)):
+    """Prueba un m3u8/canal desde el servidor: status, content-type y si es HLS."""
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "URL invalida")
+    try:
+        resp = http_requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        ct = (resp.headers.get("content-type") or "")
+        body = resp.text[:200]
+        is_hls = ("mpegurl" in ct.lower()) or body.startswith("#EXTM3U")
+        return {
+            "url": url,
+            "status": resp.status_code,
+            "content_type": ct,
+            "is_hls": bool(is_hls),
+            "ok": resp.status_code == 200 and is_hls,
+        }
+    except Exception as exc:
+        return {"url": url, "status": 0, "ok": False, "error": str(exc)}
+
+
+@app.delete("/admin/keys/{code}")
+def admin_delete_key(code: str, user=Depends(get_admin)):
+    """Borra una key SOLO si no ha sido reclamada."""
+    ok = db.delete_unclaimed_key(code)
+    if not ok:
+        raise HTTPException(400, "La key no existe o ya fue reclamada.")
+    return {"ok": True, "message": f"Key {code.upper()} eliminada."}
+

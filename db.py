@@ -468,9 +468,11 @@ def create_message(user_id, role, text):
 def list_redeem_keys():
     rows = run_query(
         """
-        select code, duration_days, key_expires_at, claimed_by, claimed_at, created_at
-        from redeem_keys
-        order by created_at desc
+        select rk.code, rk.duration_days, rk.key_expires_at, rk.claimed_by,
+               rk.claimed_at, rk.created_at, u.username
+        from redeem_keys rk
+        left join users u on u.id = rk.claimed_by
+        order by rk.created_at desc
         limit 100
         """
     ) or []
@@ -483,6 +485,7 @@ def list_redeem_keys():
             else "expired"
             if row.get("key_expires_at") and row["key_expires_at"] < now_utc()
             else "available",
+            "claimed_by_username": row.get("username"),
             "key_expires_at": row["key_expires_at"].isoformat()
             if row.get("key_expires_at")
             else None,
@@ -495,3 +498,21 @@ def list_redeem_keys():
         }
         for row in rows
     ]
+
+
+def delete_unclaimed_key(code: str) -> bool:
+    """
+    Borra una key SOLO si no ha sido reclamada.
+    Devuelve True si se borró, False si no existe o ya fue reclamada.
+    """
+    code = (code or "").strip().upper()
+    row = run_query(
+        "select claimed_by from redeem_keys where code = %s",
+        (code,),
+        fetchone=True,
+    )
+    if not row or row.get("claimed_by"):
+        return False
+    return bool(
+        run_query("delete from redeem_keys where code = %s", (code,))
+    )
