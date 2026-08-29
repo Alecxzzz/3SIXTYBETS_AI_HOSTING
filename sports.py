@@ -646,7 +646,28 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         data = _fetch_scoreboard("mma/ufc")
         for event in data.get("events", []):
             if str(event.get("id")) == str(event_id):
-                return _parse_event(event, label, None)
+                parsed = _parse_event(event, label, None)
+                # El endpoint /stats/ai-analysis consume detail["teams"] con
+                # {homeAway, name, score, records, linescores}. Normalizamos
+                # el resultado de MMA (que usa home/away) al formato esperado.
+                teams = []
+                for side in ("home", "away"):
+                    t = parsed.get(side) or {}
+                    teams.append({
+                        "homeAway": "home" if side == "home" else "away",
+                        "id": t.get("id"),
+                        "name": t.get("name", "?"),
+                        "short_name": t.get("short_name", t.get("name", "?")),
+                        "abbr": t.get("abbr", ""),
+                        "logo": t.get("logo"),
+                        "score": t.get("score"),
+                        "records": [t.get("record")] if t.get("record") else [],
+                        "linescores": t.get("home_linescores") if side == "home" else t.get("away_linescores", []),
+                        "color": t.get("color"),
+                        "alt_color": t.get("alt_color"),
+                    })
+                parsed["teams"] = teams
+                return parsed
         return {"error": "Combate no encontrado", "games": []}
 
     # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
