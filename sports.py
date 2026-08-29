@@ -18,36 +18,22 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 SOCCER_LEAGUES = {
     # Europa
     "eng.1": "Premier League (Inglaterra)",
-    "eng.2": "Championship (Inglaterra)",
-    "esp.1": "LaLiga (Espana)",
-    "esp.2": "LaLiga 2 (Espana)",
+    "esp.1": "LaLiga (España)",
     "ita.1": "Serie A (Italia)",
-    "ita.2": "Serie B (Italia)",
     "ger.1": "Bundesliga (Alemania)",
-    "ger.2": "Bundesliga 2 (Alemania)",
     "fra.1": "Ligue 1 (Francia)",
-    "fra.2": "Ligue 2 (Francia)",
     "por.1": "Primeira Liga (Portugal)",
     "ned.1": "Eredivisie (Holanda)",
-    "sco.1": "Premiership (Escocia)",
-    "bel.1": "Pro League (Belgica)",
-    "tur.1": "Super Lig (Turquia)",
-    "nor.1": "Eliteserien (Noruega)",
-    "swe.1": "Allsvenskan (Suecia)",
     "uefa.champions": "Champions League",
     "uefa.europa": "Europa League",
     "uefa.europa.conf": "Conference League",
     # Americas
     "mex.1": "Liga MX (Mexico)",
-    "mex.2": "Liga de Expansion MX (Mexico)",
     "usa.1": "MLS (USA)",
     "arg.1": "Liga Profesional (Argentina)",
     "bra.1": "Brasileirao (Brasil)",
     "col.1": "Liga BetPlay (Colombia)",
-        "conmebol.libertadores": "Copa Libertadores",
-    "concacaf.champions": "Champions Cup (Concacaf)",
-    "usa.leaguescup": "Leagues Cup (MLS + Liga MX)",
-    "mex.2": "Liga de Expansion MX (Mexico)",
+    "conmebol.libertadores": "Copa Libertadores",
     # Asia/Other
     "sau.1": "Saudi Pro League",
     "jpn.1": "J-League (Japon)",
@@ -60,7 +46,6 @@ SPORTS = {
     "mlb": ("baseball/mlb", "MLB"),
     "nfl": ("football/nfl", "NFL"),
     "tennis": ("tennis/atp", "Tenis"),
-    "mma": ("mma/ufc", "MMA/UFC"),
 }
 
 CACHE_TTL_SECONDS = 60
@@ -177,8 +162,8 @@ STAT_TRANSLATIONS = {
     "errors": "Errores",
     "assists": "Asistencias",
     "putouts": "Ponches defensivos",
-    "doublePlays": "Doble matanza",
-    "triplePlays": "Triple matanza",
+    "doublePlays": "Doble bases",
+    "triplePlays": "Triple bases",
 }
 
 _cache = {}  # clave -> {"data": ..., "ts": epoch}
@@ -277,42 +262,19 @@ def _parse_event(event: dict, league_label: str, league_code: str | None) -> dic
     home, away = {}, {}
     home_linescores, away_linescores = [], []
     for competitor in comp.get("competitors", []):
-        team = competitor.get("team", {})
-        parsed = _parse_team(team)
-        # Fallback MMA/UFC: el fighting card usa "athlete" (singular) con el peleador
-        if not parsed["name"] or parsed["name"] == "?":
-            athlete = competitor.get("athlete") or {}
-            if not athlete.get("displayName"):
-                athletes = competitor.get("athletes") or []
-                if athletes:
-                    athlete = athletes[0]
-            if athlete:
-                parsed["name"] = athlete.get("displayName") or athlete.get("fullName") or athlete.get("name") or "?"
-                parsed["short_name"] = athlete.get("shortName") or parsed["name"]
-                a_logo = athlete.get("logo") or []
-                parsed["logo"] = (a_logo[0] if isinstance(a_logo, list) and a_logo else a_logo) or parsed["logo"]
-                parsed["id"] = athlete.get("id") or parsed["id"]
+        parsed = _parse_team(competitor.get("team", {}))
         # Fallback: a veces el score viene en el competitor y no en team
         if parsed["score"] is None:
             parsed["score"] = _parse_number(competitor.get("score"))
         recs = [r for r in (competitor.get("records") or []) if r]
         parsed["record"] = recs[0].get("summary") if recs else None
         lines = _linescores(competitor)
-        ha = competitor.get("homeAway")
-        # UFC/MMA no trae homeAway: asignar primero a home, segundo a away
-        if ha == "home":
+        if competitor.get("homeAway") == "home":
             home = parsed
             home_linescores = lines
-        elif ha == "away":
+        else:
             away = parsed
             away_linescores = lines
-        else:
-            if not home:
-                home = parsed
-                home_linescores = lines
-            else:
-                away = parsed
-                away_linescores = lines
 
     status = event.get("status", {})
     type_info = status.get("type", {})
@@ -419,16 +381,8 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
                 except Exception:
                     continue  # una liga que falla no tira todo el deporte
         elif sport == "tennis":
-            # Seleccionar torneo ATP o WTA segun el league elegido
-            tennis_path = "tennis/atp"
-            if league and league in ("wta", "atp"):
-                tennis_path = f"tennis/{league}"
-            data = _fetch_scoreboard(tennis_path)
+            data = _fetch_scoreboard(path)
             games = _parse_tennis(data.get("events", []))
-        elif sport == "mma":
-            data = _fetch_scoreboard(path)  # mma/ufc
-            for event in data.get("events", []):
-                games.append(_parse_event(event, label, None))
         else:
             data = _fetch_scoreboard(path)
             for event in data.get("events", []):
@@ -457,21 +411,10 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
 
 
 def get_available_leagues() -> dict:
-    """Lista de ligas/categorias disponibles para el selector del frontend.
-
-    Se cataloga por deporte: futbol tiene su lista de ligas, tenis expone
-    ATP/WTA y MMA/UFC su categoria.
-    """
+    """Lista de ligas disponibles para el selector del frontend."""
     return {
         "soccer": [
             {"code": code, "name": name} for code, name in SOCCER_LEAGUES.items()
-        ],
-        "tennis": [
-            {"code": "atp", "name": "Tenis ATP"},
-            {"code": "wta", "name": "Tenis WTA"},
-        ],
-        "mma": [
-            {"code": "ufc", "name": "MMA / UFC"},
         ],
     }
 
@@ -666,16 +609,6 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         return cached
 
     path, label = SPORTS[sport]
-
-    # Para MMA/UFC la API ESPN no expone /summary?event=ID (da 404).
-    # El detalle del combate viene embebido en el scoreboard del dia,
-    # asi que buscamos el evento por ID y reutilizamos el parser.
-    if sport == "mma":
-        data = _fetch_scoreboard("mma/ufc")
-        for event in data.get("events", []):
-            if str(event.get("id")) == str(event_id):
-                return _parse_event(event, label, None)
-        return {"error": "Combate no encontrado", "games": []}
 
     # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
     league_code = None
