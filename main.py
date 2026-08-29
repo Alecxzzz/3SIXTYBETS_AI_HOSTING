@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import db
 import sports
 from engine.search_engine import SearchEngine
+from backend.player_stats.player_stats_service import player_stats_service
 
 try:
     from ddgs import DDGS
@@ -869,3 +870,18 @@ def hls_proxy(request: Request, url: str, referer: str = None):
         media_type=out_headers.get("Content-Type", "application/octet-stream"),
         headers=out_headers,
     )
+
+
+# === Player Stats API (MLB + Football) ===
+@app.get("/api/player/{sport}/{player_id}/last5")
+async def api_get_player_last5(sport: str, player_id: int, season: int = 2024):
+    """
+    Obtiene las últimas 5 actuaciones de un jugador.
+    sport: "mlb" o "football"
+    player_id: ID numérico del jugador
+    season: año de la temporada (opcional, default 2024)
+    """
+    result = player_stats_service.get_last5(sport, player_id, season)
+    if result.get("error"):
+        return {"error": True, "message": result.get("message", "Error desconocido")}
+    return result
