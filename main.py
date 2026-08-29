@@ -11,7 +11,11 @@ from pydantic import BaseModel
 import db
 import sports
 from engine.search_engine import SearchEngine
-from backend.player_stats.player_stats_service import player_stats_service
+try:
+    from backend.player_stats.player_stats_service import player_stats_service
+except Exception as _pse:
+    print(f"[WARN] player_stats no disponible: {_pse}")
+    player_stats_service = None
 
 try:
     from ddgs import DDGS
@@ -890,6 +894,8 @@ async def api_get_player_last5(
     team_ids: ids de equipos ESPN separados por coma — usado por el fallback ESPN
     """
     tid_list = [t.strip() for t in team_ids.split(",") if t.strip()] if team_ids else None
+    if player_stats_service is None:
+        return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
     result = player_stats_service.get_last5(sport, player_id, season, league=league, team_ids=tid_list)
     if result.get("error"):
         return {"error": True, "message": result.get("message", "Error desconocido")}
@@ -904,6 +910,8 @@ async def api_get_player_last5(
 @app.get("/api/game/{sport}/{game_id}/players")
 def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(get_current_user)):
     """Lista de jugadores clickeables de un partido (boxscore MLB / lineup futbol)."""
+    if player_stats_service is None:
+        return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
     return player_stats_service.get_clickable_players(sport, game_id, season)
 
 

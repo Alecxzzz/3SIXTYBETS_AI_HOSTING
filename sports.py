@@ -192,6 +192,39 @@ def _date_range() -> str:
     return f"{today.strftime('%Y%m%d')}-{tomorrow.strftime('%Y%m%d')}"
 
 
+# Cabeceras de navegador: ESPN/Akamai bloquea el User-Agent por defecto de
+# python-requests con 403 "Access Denied". Sin esto NO cargan los partidos.
+ESPN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Referer": "https://www.espn.com/",
+}
+
+
+def _espn_get(url: str, params: dict | None = None, timeout: int = 10):
+    """GET a ESPN con cabeceras de navegador y reintento con espera.
+
+    Akamai a veces responde 403 transitorio cuando detecta volumen; se
+    reintenta hasta 2 veces con espera creciente antes de rendirse.
+    """
+    import time as _time
+    last_exc = None
+    for intento in range(3):
+        try:
+            resp = http_requests.get(url, params=params, timeout=timeout, headers=ESPN_HEADERS)
+            if resp.status_code == 403 and intento < 2:
+                _time.sleep(1.5 * (intento + 1))
+                continue
+            resp.raise_for_status()
+            return resp
+        except Exception as e:
+            last_exc = e
+            if intento < 2:
+                _time.sleep(1.5 * (intento + 1))
+    raise last_exc
+
+
 def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
     # En soccer la liga va en el path (soccer/eng.1/scoreboard), no como query param
     if league and path.startswith("soccer"):
@@ -200,14 +233,12 @@ def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
         url = f"{ESPN_BASE}/{path}/scoreboard"
     # Agregar rango de fechas para incluir proximos partidos
     params = {"dates": _date_range()}
-    resp = http_requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
+    resp = _espn_get(url, params=params)
     return resp.json()
 
 
 def _fetch_json(url: str) -> dict:
-    resp = http_requests.get(url, timeout=10)
-    resp.raise_for_status()
+    resp = _espn_get(url)
     return resp.json()
 
 
@@ -251,15 +282,14 @@ def get_team_recent_events(sport: str, league: str | None, team_id, limit: int =
         return cached
 
     today = datetime.now(timezone.utc)
-    start = today - timedelta(days=75)
+    start = today - timedelta(days=45)
     params = {"dates": f"{start.strftime('%Y%m%d')}-{today.strftime('%Y%m%d')}"}
     url = (
         f"{ESPN_BASE}/{path}/{league}/scoreboard"
         if (league and path.startswith("soccer"))
         else f"{ESPN_BASE}/{path}/scoreboard"
     )
-    resp = http_requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
+    resp = _espn_get(url, params=params)
     data = resp.json()
 
     events = []
