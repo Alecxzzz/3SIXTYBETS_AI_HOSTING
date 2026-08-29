@@ -874,16 +874,27 @@ def hls_proxy(request: Request, url: str, referer: str = None):
 
 # === Player Stats API (MLB + Football) ===
 @app.get("/api/player/{sport}/{player_id}/last5")
-async def api_get_player_last5(sport: str, player_id: int, season: int = 2024):
+async def api_get_player_last5(
+    sport: str,
+    player_id: int,
+    season: int = 2024,
+    league: str = None,
+    team_ids: str = None,
+):
     """
     Obtiene las últimas 5 actuaciones de un jugador.
     sport: "mlb" o "football"
-    player_id: ID numérico del jugador
+    player_id: ID del jugador
     season: año de la temporada (opcional, default 2024)
+    league: slug de liga ESPN para futbol (ej. esp.1) — usado por el fallback ESPN
+    team_ids: ids de equipos ESPN separados por coma — usado por el fallback ESPN
     """
-    result = player_stats_service.get_last5(sport, player_id, season)
+    tid_list = [t.strip() for t in team_ids.split(",") if t.strip()] if team_ids else None
+    result = player_stats_service.get_last5(sport, player_id, season, league=league, team_ids=tid_list)
     if result.get("error"):
         return {"error": True, "message": result.get("message", "Error desconocido")}
+    if not result.get("last_5_games"):
+        return {"error": True, "message": "No hay estadísticas disponibles para este jugador todavía."}
     return result
 
 # ==============================

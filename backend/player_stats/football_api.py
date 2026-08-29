@@ -186,3 +186,124 @@ def get_player_last5(player_id: int, season: int, team_id: int = None):
     except Exception as e:
         print(f"[Football] Error en get_player_last5(player={player_id}): {e}")
         return []
+
+
+# =====================================================================
+# FALLBACK ESPN (gratis, sin API key) - usa datos reales de ESPN
+# =====================================================================
+_ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+_ESPN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+    "Accept": "application/json",
+    "Referer": "https://www.espn.com/",
+}
+_summary_cache: dict = {}  # event_id o sched:tid -> (timestamp, data)
+
+
+def _espn_team_recent_events(team_id, league, limit=6):
+    """Últimos eventos finalizados de un equipo vía ESPN (caché 15 min)."""
+    import time as _t
+    cache_key = f"sched:{team_id}:{league}"
+    cached = _summary_cache.get(cache_key)
+    if cached and _t.time() - cached[0] < 900:
+        return cached[1]
+    r = requests.get(f"{_ESPN_BASE}/{league}/teams/{team_id}/schedule", timeout=10, headers=_ESPN_HEADERS)
+    r.raise_for_status()
+    events = [
+        ev for ev in r.json().get("events", [])
+        if (ev.get("status") or {}).get("type", {}).get("state", "") == "post"
+    ]
+    events = events[-limit:]
+    _summary_cache[cache_key] = (_t.time(), events)
+    return events
+
+
+# Traducción de claves de stats de ESPN al español
+_ESPN_STAT_ES = {
+    "mins": "Min", "minutes": "Min", "goals": "Goles", "goal": "Goles",
+    "assists": "Asist", "assist": "Asist", "shots": "Tiros", "shot": "Tiros",
+    "shotsOnTarget": "Tiros a puerta", "shots_on_target": "Tiros a puerta",
+    "onTargetShots": "Tiros a puerta", "yellowCards": "Amarillas", "yellow": "Amarillas",
+    "redCards": "Rojas", "red": "Rojas", "passes": "Pases", "passAccuracy": "% Pases",
+    "tackles": "Entradas", "interceptions": "Intercepciones", "saves": "Atajadas",
+    "cleanSheet": "Valla invicta", "foulsCommitted": "Faltas", "offsides": "Fueras de juego",
+    "duelsWon": "Duelos ganados", "aerialsWon": "Aéreos ganados", "clearances": "Despejes",
+    "accuratePasses": "Pases completos", "totalPasses": "Pases", "keyPasses": "Pases clave",
+    "bigChancesCreated": "Ocasiones claras creadas", "bigChancesMissed": "Ocasiones claras fallidas",
+    "hitWoodwork": "Al palo", "ownGoals": "Goles en propia", "rating": "Rating",
+    "dribblesCompleted": "Regates", "dribblesAttempted": "Regates intentados",
+}
+
+
+def _espn_parse_athlete_stats(summary: dict, player_id: str):
+    """Busca un jugador en el boxscore de un summary de ESPN y devuelve sus stats."""
+    box = summary.get("boxscore") or {}
+    for team_block in box.get("players", []) or []:
+        for category in team_block.get("statistics", []) or []:
+            keys = [k.get("name", "") if isinstance(k, dict) else str(k) for k in category.get("keys", [])]
+            labels = [k.get("displayName", "") for k in category.get("keys", []) if isinstance(k, dict)] or keys
+            for ath in category.get("athletes", []) or []:
+                a = ath.get("athlete") or {}
+                if str(a.get("id")) == str(player_id):
+                    raw = ath.get("stats") or []
+                    stats = {}
+                    for i, val in enumerate(raw):
+                        if i >= len(keys):
+                            break
+                        name = _ESPN_STAT_ES.get(keys[i], labels[i] if i < len(labels) else keys[i])
+                        if val not in (None, "-", "--"):
+                            stats[name] = val
+                    return stats
+    return None
+
+def get_player_last5_espn(player_id, league, team_ids=None, season=None) -> list:
+    """
+    Últimas 5 actuaciones de un futbolista usando ESPN (gratis, datos reales).
+    Devuelve [{date, opponent, stats}] ordenado por fecha desc (máx 5).
+    """
+    import time as _t
+    if not league or not team_ids:
+        return []
+    seen = set()
+    games = []
+    for tid in team_ids:
+        try:
+            events = _espn_team_recent_events(tid, league)
+        except Exception as e:
+            print(f"[Football-ESPN] Error schedule team={tid}: {e}")
+            continue
+        for ev in events:
+            eid = str(ev.get("id"))
+            if eid in seen:
+                continue
+            seen.add(eid)
+            try:
+                cached = _summary_cache.get(f"sum:{eid}")
+                if cached and _t.time() - cached[0] < 900:
+                    summary = cached[1]
+                else:
+                    r = requests.get(f"{_ESPN_BASE}/{league}/summary?event={eid}", timeout=12, headers=_ESPN_HEADERS)
+                    if r.status_code != 200:
+                        continue
+                    summary = r.json()
+                    _summary_cache[f"sum:{eid}"] = (_t.time(), summary)
+                comps = ((summary.get("header") or {}).get("competitions") or [{}])[0]
+                opponent = "?"
+                for comp in comps.get("competitors", []) or []:
+                    tinfo = comp.get("team") or {}
+                    name = tinfo.get("displayName") or tinfo.get("shortDisplayName")
+                    if name and str(tinfo.get("id")) != str(tid):
+                        opponent = name
+                        break
+                stats = _espn_parse_athlete_stats(summary, player_id)
+                if stats:
+                    games.append({"date": ev.get("date", ""), "opponent": opponent, "stats": stats})
+            except Exception as e:
+                print(f"[Football-ESPN] Error summary event={eid}: {e}")
+                continue
+            if len(games) >= 8:
+                break
+        if len(games) >= 8:
+            break
+    games.sort(key=lambda g: g["date"], reverse=True)
+    return games[:5]

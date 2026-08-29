@@ -71,17 +71,40 @@ def _try_mlb(player_id: int, season: int) -> dict:
     return {"player_name": None, "sport": "mlb", "group": None, "last_5_games": []}
 
 
-def _try_football(player_id: int, season: int, team_id=None) -> dict:
-    games = football_last5(player_id, season, team_id)
+def _try_football(player_id: int, season: int, team_ids=None, league=None) -> dict:
+    games = []
+    fuente = "api-sports"
+    # 1) Intentar API-Sports si hay clave configurada
+    if _has_api_key():
+        try:
+            games = football_last5(player_id, season)
+        except Exception as e:
+            print(f"[PlayerStats] API-Sports fallo, se usara fallback ESPN: {e}")
+            games = []
+    # 2) Fallback ESPN (gratis, datos reales) si no hubo resultados
+    if not games:
+        fuente = "espn"
+        try:
+            from .football_api import get_player_last5_espn
+            games = get_player_last5_espn(player_id, league, team_ids, season)
+        except Exception as e:
+            print(f"[PlayerStats] Fallback ESPN fallo: {e}")
+            games = []
     return {
         "player_name": None,
         "sport": "football",
         "group": None,
+        "source": fuente,
         "last_5_games": games,
     }
 
 
-def get_last5(sport: str, player_id: int, season: int = 2024) -> dict:
+def _has_api_key() -> bool:
+    import os
+    return bool(os.environ.get("FOOTBALL_API_KEY", "").strip())
+
+
+def get_last5(sport: str, player_id: int, season: int = 2024, league: str = None, team_ids: list = None) -> dict:
     """
     Punto de entrada unificado.
     Devuelve:
@@ -96,7 +119,7 @@ def get_last5(sport: str, player_id: int, season: int = 2024) -> dict:
     if sport not in ("mlb", "football"):
         return {"error": True, "message": f"Deporte no soportado: {sport}"}
 
-    cache_key = f"last5:{sport}:{player_id}:{season}"
+    cache_key = f"last5:{sport}:{player_id}:{season}:{league or ''}:{','.join(str(t) for t in (team_ids or []))}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -105,7 +128,7 @@ def get_last5(sport: str, player_id: int, season: int = 2024) -> dict:
         if sport == "mlb":
             result = _try_mlb(player_id, season)
         else:
-            result = _try_football(player_id, season)
+            result = _try_football(player_id, season, team_ids=team_ids, league=league)
     except Exception as e:
         print(f"[PlayerStats] Error inesperado ({sport}/{player_id}): {e}")
         return {"error": True, "message": "No se pudieron cargar las estadísticas"}
