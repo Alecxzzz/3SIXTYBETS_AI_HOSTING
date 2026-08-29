@@ -235,6 +235,68 @@ def _parse_team(team: dict) -> dict:
     color = team.get("color")
     alt_color = team.get("alternateColor")
 
+
+def get_team_recent_events(sport: str, league: str | None, team_id, limit: int = 6) -> list:
+    """Ultimos eventos finalizados de un equipo, via scoreboard por rango de fechas.
+
+    Es el mecanismo mas confiable (el mismo scoreboard que usa el resto del
+    sitio) y sirve de respaldo cuando el summary de ESPN no trae los ultimos
+    partidos del equipo (pasa en futbol). Devuelve eventos crudos de ESPN.
+    """
+    from datetime import timedelta
+    path, _label = SPORTS[sport]
+    cache_key = f"team_recent:{sport}:{league or ''}:{team_id}:{limit}"
+    cached = _cache_get(cache_key, ttl=900)
+    if cached is not None:
+        return cached
+
+    today = datetime.now(timezone.utc)
+    start = today - timedelta(days=75)
+    params = {"dates": f"{start.strftime('%Y%m%d')}-{today.strftime('%Y%m%d')}"}
+    url = (
+        f"{ESPN_BASE}/{path}/{league}/scoreboard"
+        if (league and path.startswith("soccer"))
+        else f"{ESPN_BASE}/{path}/scoreboard"
+    )
+    resp = http_requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+
+    events = []
+    for ev in data.get("events", []):
+        state = (ev.get("status") or {}).get("type", {}).get("state", "")
+        if state != "post":
+            continue
+        comp0 = (ev.get("competitions") or [{}])[0]
+        ids = {str((c.get("team") or {}).get("id")) for c in comp0.get("competitors", [])}
+        if str(team_id) in ids:
+            events.append(ev)
+    events.sort(key=lambda e: e.get("date", ""))
+    events = events[-limit:]
+    _cache_set(cache_key, events)
+    return events
+
+
+def _recent_from_events(events: list) -> list:
+    """Convierte eventos crudos de ESPN al formato recent_games del detalle."""
+    recent = []
+    for ev in events:
+        comp0 = (ev.get("competitions") or [{}])[0]
+        tmap = {}
+        for c in comp0.get("competitors", []):
+            tmap[c.get("homeAway")] = {
+                "name": (c.get("team") or {}).get("displayName", "?"),
+                "score": _parse_number(c.get("score")),
+                "winner": c.get("winner"),
+            }
+        recent.append({
+            "date": ev.get("date"),
+            "status": (comp0.get("status") or {}).get("type", {}).get("shortDetail", ""),
+            "home": tmap.get("home", {}),
+            "away": tmap.get("away", {}),
+        })
+    return recent
+
     return {
         "id": team.get("id"),
         "name": team.get("displayName", team.get("name", "?")),
@@ -740,6 +802,17 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     # Asignar ultimos partidos a cada equipo
     for t in teams_out:
         t["recent_games"] = recent.get(str(t["id"]), {}).get("recent", [])
+
+    # Backfill: si el summary no trae ultimos partidos (pasa en futbol),
+    # buscarlos via scoreboard por rango de fechas.
+    for t in teams_out:
+        if t.get("recent_games"):
+            continue
+        try:
+            evs = get_team_recent_events(sport, league_code, t["id"], limit=5)
+            t["recent_games"] = _recent_from_events(evs)[:5]
+        except Exception as e:
+            print(f"[Detail] recent backfill team={t.get('id')}: {e}")
 
     result = {
         "sport": sport,

@@ -307,3 +307,41 @@ def get_player_last5_espn(player_id, league, team_ids=None, season=None) -> list
             break
     games.sort(key=lambda g: g["date"], reverse=True)
     return games[:5]
+
+def get_player_last5_from_events(player_id, league, events, own_team_id=None) -> list:
+    """
+    Variante del fallback ESPN que recibe eventos ya obtenidos (ej. del
+    scoreboard por fechas de sports.py). Devuelve [{date, opponent, stats}].
+    """
+    import time as _t
+    if not league or not events:
+        return []
+    games = []
+    for ev in events:
+        eid = str(ev.get("id"))
+        try:
+            cached = _summary_cache.get(f"sum:{eid}")
+            if cached and _t.time() - cached[0] < 900:
+                summary = cached[1]
+            else:
+                r = requests.get(f"{_ESPN_BASE}/{league}/summary?event={eid}", timeout=12, headers=_ESPN_HEADERS)
+                if r.status_code != 200:
+                    continue
+                summary = r.json()
+                _summary_cache[f"sum:{eid}"] = (_t.time(), summary)
+            comps = ((summary.get("header") or {}).get("competitions") or [{}])[0]
+            opponent = "?"
+            for comp in comps.get("competitors", []) or []:
+                tinfo = comp.get("team") or {}
+                name = tinfo.get("displayName") or tinfo.get("shortDisplayName")
+                if name and own_team_id and str(tinfo.get("id")) != str(own_team_id):
+                    opponent = name
+                    break
+            stats = _espn_parse_athlete_stats(summary, player_id)
+            if stats:
+                games.append({"date": ev.get("date", ""), "opponent": opponent, "stats": stats})
+        except Exception as e:
+            print(f"[Football-ESPN] Error summary event={eid}: {e}")
+            continue
+    return games
+

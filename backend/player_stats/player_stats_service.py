@@ -81,8 +81,8 @@ def _try_football(player_id: int, season: int, team_ids=None, league=None) -> di
         except Exception as e:
             print(f"[PlayerStats] API-Sports fallo, se usara fallback ESPN: {e}")
             games = []
-    # 2) Fallback ESPN (gratis, datos reales) si no hubo resultados
-    if not games:
+    # 2) Fallback ESPN via schedule del equipo (gratis, datos reales)
+    if not games and league:
         fuente = "espn"
         try:
             from .football_api import get_player_last5_espn
@@ -90,6 +90,27 @@ def _try_football(player_id: int, season: int, team_ids=None, league=None) -> di
         except Exception as e:
             print(f"[PlayerStats] Fallback ESPN fallo: {e}")
             games = []
+    # 3) Fallback definitivo: scoreboard por rango de fechas (el mismo
+    #    mecanismo que usa el detalle del partido, mas confiable)
+    if not games and league and team_ids:
+        fuente = "espn-scoreboard"
+        try:
+            import sports as _sports
+            from .football_api import get_player_last5_from_events
+            seen = set()
+            for tid in team_ids:
+                evs = _sports.get_team_recent_events("soccer", league, tid, limit=5) or []
+                for ev in evs:
+                    eid = str(ev.get("id"))
+                    if eid in seen:
+                        continue
+                    seen.add(eid)
+                    games.extend(get_player_last5_from_events(player_id, league, [ev], tid))
+        except Exception as e:
+            print(f"[PlayerStats] Fallback scoreboard fallo: {e}")
+    if games:
+        games.sort(key=lambda g: g["date"], reverse=True)
+        games = games[:5]
     return {
         "player_name": None,
         "sport": "football",
