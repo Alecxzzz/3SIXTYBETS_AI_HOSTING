@@ -46,6 +46,7 @@ SPORTS = {
     "mlb": ("baseball/mlb", "MLB"),
     "nfl": ("football/nfl", "NFL"),
     "tennis": ("tennis/atp", "Tenis"),
+    "mma": ("mma/ufc", "MMA/UFC"),
 }
 
 CACHE_TTL_SECONDS = 60
@@ -262,19 +263,37 @@ def _parse_event(event: dict, league_label: str, league_code: str | None) -> dic
     home, away = {}, {}
     home_linescores, away_linescores = [], []
     for competitor in comp.get("competitors", []):
-        parsed = _parse_team(competitor.get("team", {}))
+        parsed = _parse_team(competitor.get("team") or {})
+        # Fallback MMA/UFC: cuando no hay "team", el dato viene en "athlete"
+        if parsed["name"] in (None, "?", "") and competitor.get("athlete"):
+            athlete = competitor["athlete"]
+            parsed["name"] = athlete.get("displayName") or athlete.get("fullName") or "?"
+            parsed["short_name"] = athlete.get("shortName") or parsed["name"]
+            parsed["abbr"] = athlete.get("shortName") or ""
+            _al = athlete.get("logo")
+            if isinstance(_al, list):
+                _al = _al[0] if _al else None
+            parsed["logo"] = _al
+            parsed["id"] = athlete.get("id") or parsed["id"]
         # Fallback: a veces el score viene en el competitor y no en team
         if parsed["score"] is None:
             parsed["score"] = _parse_number(competitor.get("score"))
         recs = [r for r in (competitor.get("records") or []) if r]
         parsed["record"] = recs[0].get("summary") if recs else None
         lines = _linescores(competitor)
-        if competitor.get("homeAway") == "home":
+        ha = competitor.get("homeAway")
+        # homeAway="home" -> local; homeAway="away" -> visitante.
+        # Si ESPN no marca homeAway (peleas MMA/UFC), el primero es local.
+        if ha == "home":
             home = parsed
             home_linescores = lines
-        else:
+        elif ha == "away" or home:
             away = parsed
             away_linescores = lines
+        else:
+            # Primer competidor sin homeAway -> local (home)
+            home = parsed
+            home_linescores = lines
 
     status = event.get("status", {})
     type_info = status.get("type", {})
@@ -416,6 +435,16 @@ def get_available_leagues() -> dict:
         "soccer": [
             {"code": code, "name": name} for code, name in SOCCER_LEAGUES.items()
         ],
+        "tennis": [
+            {"code": "atp", "name": "Tenis ATP"},
+            {"code": "wta", "name": "Tenis WTA"},
+        ],
+        "mma": [
+            {"code": "ufc", "name": "MMA / UFC"},
+        ],
+        "nba": [],
+        "mlb": [],
+        "nfl": [],
     }
 
 
@@ -609,6 +638,16 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         return cached
 
     path, label = SPORTS[sport]
+
+    # Para MMA/UFC la API ESPN no expone /summary?event=ID (da 404).
+    # El detalle del combate viene embebido en el scoreboard del dia,
+    # asi que buscamos el evento por ID y reutilizamos el parser.
+    if sport == "mma":
+        data = _fetch_scoreboard("mma/ufc")
+        for event in data.get("events", []):
+            if str(event.get("id")) == str(event_id):
+                return _parse_event(event, label, None)
+        return {"error": "Combate no encontrado", "games": []}
 
     # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
     league_code = None
