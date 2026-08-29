@@ -667,6 +667,16 @@ def get_game_detail(sport: str, event_id: str) -> dict:
 
     path, label = SPORTS[sport]
 
+    # Para MMA/UFC la API ESPN no expone /summary?event=ID (da 404).
+    # El detalle del combate viene embebido en el scoreboard del dia,
+    # asi que buscamos el evento por ID y reutilizamos el parser.
+    if sport == "mma":
+        data = _fetch_scoreboard("mma/ufc")
+        for event in data.get("events", []):
+            if str(event.get("id")) == str(event_id):
+                return _parse_event(event, label, None)
+        return {"error": "Combate no encontrado", "games": []}
+
     # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
     league_code = None
     if sport == "soccer":
