@@ -247,7 +247,7 @@ def _espn_get(url: str, params: dict | None = None, timeout: int = 10):
     raise last_exc
 
 
-def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
+def _fetch_scoreboard(path: str, league: str | None = None, params_extra: dict | None = None) -> dict:
     # En soccer la liga va en el path (soccer/eng.1/scoreboard), no como query param
     if league and path.startswith("soccer"):
         url = f"{ESPN_BASE}/{path}/{league}/scoreboard"
@@ -258,6 +258,8 @@ def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
     # perdemos los torneos en curso (ej. US Open). Sin dates trae todo.
     if not path.startswith("tennis"):
         params["dates"] = _date_range()
+    if params_extra:
+        params.update(params_extra)
     resp = _espn_get(url, params=params)
     return resp.json()
 
@@ -820,6 +822,76 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     # Para MMA/UFC la API ESPN no expone /summary?event=ID (da 404).
     # El detalle del combate viene embebido en el scoreboard del dia,
     # asi que buscamos el evento por ID y reutilizamos el parser.
+    # Para tenis tampoco existe /summary por evento (400/404). El detalle del
+    # partido viene en el scoreboard filtrado por ?event=ID (dentro de
+    # groupings). Buscamos la competencia y armamos el detalle desde ahi.
+    if sport == "tennis":
+        data = _fetch_scoreboard(path, params_extra={"event": event_id})
+        found = None
+        for ev in data.get("events", []):
+            for g in ev.get("groupings") or []:
+                for comp in g.get("competitions") or []:
+                    if str(comp.get("id")) == str(event_id):
+                        found = (ev, g.get("grouping", {}).get("displayName", ""), comp)
+                        break
+            if found:
+                break
+        if not found:
+            return {"error": "Partido de tenis no encontrado", "games": []}
+        ev, rama, comp = found
+        torneo = ev.get("shortName") or ev.get("name") or "Tenis"
+
+        def _tplayer(competitor: dict) -> dict:
+            ath = competitor.get("athlete") or {}
+            name = ath.get("displayName") or "?"
+            flag = ath.get("flag") or ath.get("logo")
+            if isinstance(flag, list):
+                flag = flag[0] if flag else None
+            return {
+                "id": ath.get("id"),
+                "name": name,
+                "short_name": ath.get("shortName") or name,
+                "abbr": ath.get("shortName") or "",
+                "logo": flag,
+                "color": None,
+                "alt_color": None,
+                "score": _parse_number(competitor.get("score")),
+                "winner": competitor.get("winner"),
+                "linescores": [
+                    {"value": _parse_number(p.get("value")), "displayValue": p.get("displayValue", "")}
+                    for p in competitor.get("linescores") or []
+                ],
+                "records": [r.get("summary") for r in competitor.get("records") or [] if r],
+                "statistics": [
+                    {"name": s.get("name"), "displayValue": s.get("displayValue")}
+                    for s in competitor.get("statistics") or []
+                ],
+            }
+
+        competitors = comp.get("competitors") or []
+        status = comp.get("status") or ev.get("status") or {}
+        type_info = status.get("type", {})
+        teams_out = [_tplayer(competitors[0]), _tplayer(competitors[1])]
+        teams_out[0]["homeAway"] = "home"
+        teams_out[1]["homeAway"] = "away"
+        result = {
+            "sport": sport,
+            "label": f"{torneo} · {rama}" if rama else torneo,
+            "event_id": event_id,
+            "league": f"{torneo} · {rama}" if rama else torneo,
+            "state": type_info.get("state"),
+            "status": type_info.get("shortDetail", ""),
+            "clock": status.get("displayClock", ""),
+            "period": None,
+            "situation": None,
+            "teams": teams_out,
+            "head_to_head": [],
+            "key_players": [],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _cache_set(cache_key, result)
+        return result
+
     if sport == "mma":
         data = _fetch_scoreboard("mma/ufc")
         for event in data.get("events", []):
