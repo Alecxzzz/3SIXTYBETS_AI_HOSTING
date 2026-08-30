@@ -202,26 +202,48 @@ ESPN_HEADERS = {
 }
 
 
-def _espn_get(url: str, params: dict | None = None, timeout: int = 10):
-    """GET a ESPN con cabeceras de navegador y reintento con espera.
+ESPN_HOSTS = [
+    "https://site.api.espn.com/apis/site/v2/sports",
+    "https://site.web.api.espn.com/apis/site/v2/sports",
+]
 
-    Akamai a veces responde 403 transitorio cuando detecta volumen; se
-    reintenta hasta 2 veces con espera creciente antes de rendirse.
+
+_espn_host_idx = {"i": 0}  # host preferente (sticky): si el primario bloquea, se queda en el mirror
+
+
+def _espn_get(url: str, params: dict | None = None, timeout: int = 10):
+    """GET a ESPN con cabeceras de navegador, mirror y host preferente.
+
+    Akamai bloquea IPs de datacenter con 403. Se prueba el host preferente
+    (empieza siendo site.api) y si responde 403/429 se pasa al mirror
+    site.web.api.espn.com (misma estructura). El host que funciona queda
+    "pegado" para no repetir los intentos fallidos en cada llamada.
     """
     import time as _time
+    hosts = ESPN_HOSTS if url.startswith(ESPN_HOSTS[0]) else [None]
     last_exc = None
-    for intento in range(3):
-        try:
-            resp = http_requests.get(url, params=params, timeout=timeout, headers=ESPN_HEADERS)
-            if resp.status_code == 403 and intento < 2:
-                _time.sleep(1.5 * (intento + 1))
-                continue
-            resp.raise_for_status()
-            return resp
-        except Exception as e:
-            last_exc = e
-            if intento < 2:
-                _time.sleep(1.5 * (intento + 1))
+    orden = hosts[_espn_host_idx["i"] % len(hosts):] + hosts[:_espn_host_idx["i"] % len(hosts)] if len(hosts) > 1 else hosts
+    for host in orden:
+        u = url.replace(ESPN_HOSTS[0], host) if host else url
+        for intento in range(2):
+            try:
+                resp = http_requests.get(u, params=params, timeout=timeout, headers=ESPN_HEADERS)
+                if resp.status_code in (403, 429) and intento < 1:
+                    _time.sleep(1.2)
+                    continue
+                if resp.status_code in (403, 429):
+                    break  # siguiente host
+                resp.raise_for_status()
+                # Host que funciona -> preferente para siguientes llamadas
+                if host:
+                    _espn_host_idx["i"] = ESPN_HOSTS.index(host)
+                return resp
+            except Exception as e:
+                last_exc = e
+                if intento < 1:
+                    _time.sleep(1.2)
+    if last_exc is None:
+        last_exc = Exception("ESPN bloqueado (403/429) en todos los hosts")
     raise last_exc
 
 
@@ -265,6 +287,18 @@ def _parse_team(team: dict) -> dict:
 
     color = team.get("color")
     alt_color = team.get("alternateColor")
+
+    return {
+        "id": team.get("id"),
+        "name": team.get("displayName", team.get("name", "?")),
+        "short_name": team.get("shortDisplayName", team.get("name", "?")),
+        "abbr": team.get("abbreviation", ""),
+        "logo": logo,
+        "color": f"#{color}" if color else None,
+        "alt_color": f"#{alt_color}" if alt_color else None,
+        "score": _parse_number(raw_score),
+        "winner": team.get("winner"),
+    }
 
 
 def get_team_recent_events(sport: str, league: str | None, team_id, limit: int = 6) -> list:
@@ -327,18 +361,6 @@ def _recent_from_events(events: list) -> list:
         })
     return recent
 
-    return {
-        "id": team.get("id"),
-        "name": team.get("displayName", team.get("name", "?")),
-        "short_name": team.get("shortDisplayName", team.get("name", "?")),
-        "abbr": team.get("abbreviation", ""),
-        "logo": logo,
-        "color": f"#{color}" if color else None,
-        "alt_color": f"#{alt_color}" if alt_color else None,
-        "score": _parse_number(raw_score),
-        "winner": team.get("winner"),
-    }
-
 
 def _linescores(competitor: dict) -> list:
     """Scores por periodo: innings (MLB), cuartos (NBA/NFL), etc."""
@@ -355,9 +377,9 @@ def _parse_event(event: dict, league_label: str, league_code: str | None) -> dic
     home, away = {}, {}
     home_linescores, away_linescores = [], []
     for competitor in comp.get("competitors", []):
-        parsed = _parse_team(competitor.get("team") or {})
+        parsed = _parse_team(competitor.get("team") or {}) or {}
         # Fallback MMA/UFC: cuando no hay "team", el dato viene en "athlete"
-        if parsed["name"] in (None, "?", "") and competitor.get("athlete"):
+        if parsed.get("name") in (None, "?", "") and competitor.get("athlete"):
             athlete = competitor["athlete"]
             parsed["name"] = athlete.get("displayName") or athlete.get("fullName") or "?"
             parsed["short_name"] = athlete.get("shortName") or parsed["name"]

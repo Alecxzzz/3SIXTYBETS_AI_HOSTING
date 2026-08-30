@@ -191,12 +191,38 @@ def get_player_last5(player_id: int, season: int, team_id: int = None):
 # =====================================================================
 # FALLBACK ESPN (gratis, sin API key) - usa datos reales de ESPN
 # =====================================================================
-_ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+_ESPN_BASES = [
+    "https://site.api.espn.com/apis/site/v2/sports/soccer",
+    "https://site.web.api.espn.com/apis/site/v2/sports/soccer",
+]
+_ESPN_BASE = _ESPN_BASES[0]
 _ESPN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
     "Accept": "application/json",
     "Referer": "https://www.espn.com/",
 }
+
+
+def _espn_get_json(path: str, timeout: int = 12):
+    """GET a ESPN probando el host principal y el mirror si hay 403/429."""
+    import time as _t
+    last_exc = None
+    for base in _ESPN_BASES:
+        for intento in range(2):
+            try:
+                r = requests.get(f"{base}/{path}", timeout=timeout, headers=_ESPN_HEADERS)
+                if r.status_code in (403, 429) and intento < 1:
+                    _t.sleep(1.5)
+                    continue
+                if r.status_code in (403, 429):
+                    break
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last_exc = e
+                if intento < 1:
+                    _t.sleep(1.5)
+    raise last_exc
 _summary_cache: dict = {}  # event_id o sched:tid -> (timestamp, data)
 
 
@@ -207,10 +233,9 @@ def _espn_team_recent_events(team_id, league, limit=6):
     cached = _summary_cache.get(cache_key)
     if cached and _t.time() - cached[0] < 900:
         return cached[1]
-    r = requests.get(f"{_ESPN_BASE}/{league}/teams/{team_id}/schedule", timeout=10, headers=_ESPN_HEADERS)
-    r.raise_for_status()
+    data = _espn_get_json(f"{league}/teams/{team_id}/schedule")
     events = [
-        ev for ev in r.json().get("events", [])
+        ev for ev in (data or {}).get("events", [])
         if (ev.get("status") or {}).get("type", {}).get("state", "") == "post"
     ]
     events = events[-limit:]
@@ -282,10 +307,9 @@ def get_player_last5_espn(player_id, league, team_ids=None, season=None) -> list
                 if cached and _t.time() - cached[0] < 900:
                     summary = cached[1]
                 else:
-                    r = requests.get(f"{_ESPN_BASE}/{league}/summary?event={eid}", timeout=12, headers=_ESPN_HEADERS)
-                    if r.status_code != 200:
+                    summary = _espn_get_json(f"{league}/summary?event={eid}")
+                    if not summary:
                         continue
-                    summary = r.json()
                     _summary_cache[f"sum:{eid}"] = (_t.time(), summary)
                 comps = ((summary.get("header") or {}).get("competitions") or [{}])[0]
                 opponent = "?"
@@ -324,10 +348,9 @@ def get_player_last5_from_events(player_id, league, events, own_team_id=None) ->
             if cached and _t.time() - cached[0] < 900:
                 summary = cached[1]
             else:
-                r = requests.get(f"{_ESPN_BASE}/{league}/summary?event={eid}", timeout=12, headers=_ESPN_HEADERS)
-                if r.status_code != 200:
+                summary = _espn_get_json(f"{league}/summary?event={eid}")
+                if not summary:
                     continue
-                summary = r.json()
                 _summary_cache[f"sum:{eid}"] = (_t.time(), summary)
             comps = ((summary.get("header") or {}).get("competitions") or [{}])[0]
             opponent = "?"
