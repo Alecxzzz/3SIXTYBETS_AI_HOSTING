@@ -253,8 +253,11 @@ def _fetch_scoreboard(path: str, league: str | None = None) -> dict:
         url = f"{ESPN_BASE}/{path}/{league}/scoreboard"
     else:
         url = f"{ESPN_BASE}/{path}/scoreboard"
-    # Agregar rango de fechas para incluir proximos partidos
-    params = {"dates": _date_range()}
+    params = {}
+    # El tenis anida los torneos en un solo evento; si filtramos por fechas
+    # perdemos los torneos en curso (ej. US Open). Sin dates trae todo.
+    if not path.startswith("tennis"):
+        params["dates"] = _date_range()
     resp = _espn_get(url, params=params)
     return resp.json()
 
@@ -450,25 +453,74 @@ def _parse_event(event: dict, league_label: str, league_code: str | None) -> dic
 
 
 def _parse_tennis(events: list) -> list:
-    """El tenis de ESPN tiene estructura distinta: competitions anidadas por grupo."""
+    """Parsea tenis de ESPN.
+
+    Estructura real: cada evento es un TORNEO (ej. US Open) y los partidos
+    viven en event.groupings[*].competitions[*]. Los competidores usan
+    'athlete' (no 'team'). Se muestran solo partidos en vivo y proximos.
+    """
+    from datetime import datetime, timedelta, timezone
+    limite = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y%m%d%H%M%S")
+
+    def _player(competitor: dict) -> dict:
+        ath = competitor.get("athlete") or {}
+        name = ath.get("displayName") or ath.get("fullName") or "?"
+        flag = ath.get("flag") or ath.get("logo")
+        if isinstance(flag, list):
+            flag = flag[0] if flag else None
+        return {
+            "id": ath.get("id"),
+            "name": name,
+            "short_name": ath.get("shortName") or name,
+            "abbr": ath.get("shortName") or "",
+            "logo": flag,
+            "color": None,
+            "alt_color": None,
+            "score": _parse_number(competitor.get("score")),
+            "winner": competitor.get("winner"),
+        }
+
     out = []
     for event in events:
-        for comp in event.get("competitions", []):
-            competitors = comp.get("competitors", [])
+        torneo = event.get("shortName") or event.get("name") or "Tenis"
+        groupings = event.get("groupings") or []
+        comps_iter = []
+        if groupings:
+            for g in groupings:
+                for comp in g.get("competitions") or []:
+                    comps_iter.append((g.get("grouping", {}).get("displayName", ""), comp))
+        else:
+            for comp in event.get("competitions") or []:
+                comps_iter.append(("", comp))
+
+        for rama, comp in comps_iter:
+            competitors = comp.get("competitors") or []
             if len(competitors) < 2:
                 continue
-            home = _parse_team(competitors[0].get("team", {}))
-            away = _parse_team(competitors[1].get("team", {}))
-            status = event.get("status", {})
+            status = comp.get("status") or event.get("status") or {}
             type_info = status.get("type", {})
+            state = type_info.get("state")
+            if state not in ("in", "pre"):
+                continue  # solo en vivo y proximos (no todo el cuadro jugado)
+            date = comp.get("date") or event.get("date") or ""
+            if state == "pre" and date:
+                # descartar muy futuros (ronda dentro de >2 dias)
+                try:
+                    if datetime.fromisoformat(date.replace("Z", "+00:00")).strftime("%Y%m%d%H%M%S") > limite:
+                        continue
+                except Exception:
+                    pass
+            home = _player(competitors[0])
+            away = _player(competitors[1])
+            etiqueta = f"{torneo} · {rama}" if rama else torneo
             out.append({
-                "id": event.get("id"),
+                "id": comp.get("id") or event.get("id"),
                 "sport_path": None,
                 "league_code": None,
-                "league": "Tenis",
-                "date": event.get("date"),
-                "name": event.get("name", ""),
-                "state": type_info.get("state"),
+                "league": etiqueta,
+                "date": date,
+                "name": f"{home['name']} vs {away['name']}",
+                "state": state,
                 "status": type_info.get("shortDetail", ""),
                 "clock": status.get("displayClock", ""),
                 "period": None,
@@ -514,8 +566,20 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
                 except Exception:
                     continue  # una liga que falla no tira todo el deporte
         elif sport == "tennis":
-            data = _fetch_scoreboard(path)
-            games = _parse_tennis(data.get("events", []))
+            games = []
+            # Traer circuitos ATP y WTA. El mismo torneo (ej. US Open) aparece
+            # en ambos scoreboards con todas sus ramas, asi que deduplicamos por id.
+            vistos = set()
+            for tennis_path, tennis_label in (("tennis/atp", "Tenis ATP"), ("tennis/wta", "Tenis WTA")):
+                try:
+                    tdata = _fetch_scoreboard(tennis_path)
+                    for g in _parse_tennis(tdata.get("events", [])):
+                        if str(g.get("id")) in vistos:
+                            continue
+                        vistos.add(str(g.get("id")))
+                        games.append(g)
+                except Exception as e:
+                    print(f"[Tennis] Error {tennis_path}: {e}")
         else:
             data = _fetch_scoreboard(path)
             for event in data.get("events", []):
