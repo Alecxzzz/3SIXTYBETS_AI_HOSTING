@@ -51,6 +51,7 @@ create table if not exists chat_messages (
 );
 
 create table if not exists credit_transactions (
+
   id varchar(64) primary key,
   user_id varchar(64) not null,
   amount int not null,
@@ -58,6 +59,21 @@ create table if not exists credit_transactions (
   provider varchar(40) not null,
   reference varchar(160) null,
   created_at datetime not null,
+  foreign key (user_id) references users(id) on delete cascade
+);
+
+create table if not exists pagadito_orders (
+  id varchar(64) primary key,
+  user_id varchar(64) not null,
+  plan_code varchar(40) not null,
+  amount decimal(10, 2) not null,
+  currency varchar(3) not null default 'USD',
+  ern varchar(64) not null unique,
+  token_trans varchar(128) null,
+  status varchar(20) not null default 'pending',
+  reference varchar(160) null,
+  created_at datetime not null,
+  updated_at datetime null,
   foreign key (user_id) references users(id) on delete cascade
 );
 

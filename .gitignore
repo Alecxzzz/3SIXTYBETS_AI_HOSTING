@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .env
 *.db
+node_modules/
+dist/
+uvicorn.log
+nul

@@ -160,6 +160,22 @@ def init_db():
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
+        """
+        create table if not exists pagadito_orders (
+            id varchar(64) primary key,
+            user_id varchar(64) not null,
+            plan_code varchar(40) not null,
+            amount decimal(10, 2) not null,
+            currency varchar(3) not null default 'USD',
+            ern varchar(64) not null unique,
+            token_trans varchar(128) null,
+            status varchar(20) not null default 'pending',
+            reference varchar(160) null,
+            created_at datetime not null,
+            updated_at datetime null,
+            foreign key (user_id) references users(id) on delete cascade
+        )
+        """,
     ]
 
     for statement in statements:
@@ -516,3 +532,130 @@ def delete_unclaimed_key(code: str) -> bool:
     return bool(
         run_query("delete from redeem_keys where code = %s", (code,))
     )
+
+
+# ==============================
+# PAGADITO: ordenes y suscripciones
+# ==============================
+
+def create_pagadito_order(user_id, plan_code, amount, currency="USD"):
+    """Crea una orden pendiente con ERN unico. Devuelve la fila creada."""
+    order_id = secrets.token_urlsafe(16)
+    ern = f"SIXTYB-{secrets.token_hex(12)}"  # ID unico de la orden para Pagadito
+    ok = run_query(
+        """
+        insert into pagadito_orders
+        (id, user_id, plan_code, amount, currency, ern, status, created_at)
+        values (%s, %s, %s, %s, %s, %s, 'pending', %s)
+        """,
+        (order_id, user_id, plan_code, amount, currency, ern, now_utc()),
+    )
+    if not ok:
+        raise RuntimeError("No se pudo registrar la orden de pago.")
+    return run_query(
+        "select * from pagadito_orders where id = %s", (order_id,), fetchone=True
+    )
+
+
+def get_pagadito_order_by_ern(ern):
+    return run_query(
+        "select * from pagadito_orders where ern = %s", (ern,), fetchone=True
+    )
+
+
+def attach_pagadito_token(ern, token_trans):
+    """Guarda el token de transaccion devuelto por exec_trans."""
+    return bool(
+        run_query(
+            "update pagadito_orders set token_trans = %s where ern = %s",
+            (token_trans, ern),
+        )
+    )
+
+
+def mark_pagadito_order_status(ern, status, reference=None):
+    """Actualiza el estado de la orden: pending / completed / failed."""
+    return bool(
+        run_query(
+            """
+            update pagadito_orders
+            set status = %s, reference = %s, updated_at = %s
+            where ern = %s
+            """,
+            (status, reference, now_utc(), ern),
+        )
+    )
+
+
+def activate_subscription(ern, plan_days):
+    """
+    Activa/renueva la suscripcion del usuario dueño de la orden.
+    Extiende access_expires_at desde la fecha mas lejana entre "ahora"
+    y la expiracion actual (igual que el canje de keys). Marca la orden
+    como completada. Idempotente: si ya estaba completada no vuelve a
+    extender los dias.
+
+    Devuelve dict {"ok", "already_processed", "access_expires_at", "username"}.
+    """
+    order = get_pagadito_order_by_ern(ern)
+    if not order:
+        raise ValueError("Orden de pago no encontrada.")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_connection(autocommit=False)
+        cur = conn.cursor()
+
+        cur.execute("select * from pagadito_orders where ern = %s for update", (ern,))
+        order = cur.fetchone()
+        if order["status"] == "completed":
+            # Ya procesada (reintento de Pagadito / doble click): no duplicar dias.
+            cur.execute("select username, access_expires_at from users where id = %s", (order["user_id"],))
+            user = cur.fetchone()
+            conn.commit()
+            return {
+                "ok": True,
+                "already_processed": True,
+                "access_expires_at": user["access_expires_at"].isoformat() if user else None,
+                "username": user["username"] if user else None,
+            }
+
+        cur.execute("select username, access_expires_at from users where id = %s", (order["user_id"],))
+        user = cur.fetchone()
+        if not user:
+            raise ValueError("Usuario de la orden no encontrado.")
+
+        current_expires_at = user["access_expires_at"]
+        base_date = max(current_expires_at, now_utc())
+        next_expires_at = base_date + timedelta(days=plan_days)
+
+        cur.execute(
+            "update users set access_expires_at = %s where id = %s",
+            (next_expires_at, order["user_id"]),
+        )
+        cur.execute(
+            """
+            update pagadito_orders
+            set status = 'completed', updated_at = %s
+            where ern = %s and status != 'completed'
+            """,
+            (now_utc(), ern),
+        )
+        conn.commit()
+
+        return {
+            "ok": True,
+            "already_processed": False,
+            "access_expires_at": next_expires_at.isoformat(),
+            "username": user["username"],
+        }
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()

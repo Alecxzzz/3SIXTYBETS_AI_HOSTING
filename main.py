@@ -5,7 +5,7 @@ from urllib.parse import urljoin, quote
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 import db
@@ -443,8 +443,205 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
 
 
 # ==============================
-# ESTADISTICAS DEPORTIVAS (ESPN)
+# PAGADITO (pasarela de pagos)
 # ==============================
+# Flujo: el frontend llama a /pagadito/create-payment, obtiene la URL de
+# checkout y redirige al usuario. Al terminar el pago, Pagadito devuelve
+# al usuario a /pagadito/return (return URL configurada en el panel de
+# Pagadito). Ahi se consulta el estado real con get_status() y, si la
+# transaccion esta COMPLETED, se activa/renueva la suscripcion en MySQL.
+#
+# Variables de entorno:
+#   PAGADITO_UID / PAGADITO_WSK  credenciales del comercio
+#   PAGADITO_SANDBOX             "true" para sandbox (default true)
+#   PAGADITO_PLANS               JSON con los planes (opcional)
+#   PAGADITO_RETURN_REDIRECT     URL del frontend a la que redirigir al
+#                                usuario tras procesar el retorno
+
+import json as _json
+
+import pagadito_client
+from pagadito_client import (
+    PagaditoAuthError,
+    PagaditoClient,
+    PagaditoConnectionError,
+    PagaditoError,
+    PagaditoTransactionError,
+)
+
+# Planes: sobreescribir con PAGADITO_PLANS='[{"code":"mensual","description":"Plan mensual 3SIXTYBETS","amount":9.99,"days":30}, ...]'
+DEFAULT_PLANS = [
+    {"code": "mensual", "description": "Suscripcion 3SIXTYBETS - 1 mes", "amount": 9.99, "days": 30},
+    {"code": "trimestral", "description": "Suscripcion 3SIXTYBETS - 3 meses", "amount": 24.99, "days": 90},
+    {"code": "anual", "description": "Suscripcion 3SIXTYBETS - 1 año", "amount": 79.99, "days": 365},
+]
+
+class PagaditoPaymentIn(BaseModel):
+    plan_code: str
+
+
+def get_pagadito_plans():
+    raw = os.getenv("PAGADITO_PLANS", "").strip()
+    if raw:
+        try:
+            return _json.loads(raw)
+        except (ValueError, TypeError):
+            print("[WARN] PAGADITO_PLANS no es JSON valido, usando planes por defecto.")
+    return DEFAULT_PLANS
+
+
+@app.get("/pagadito/plans")
+def pagadito_plans():
+    """Lista de planes disponibles para el boton de compra del frontend."""
+    return {
+        "plans": get_pagadito_plans(),
+        "sandbox": os.getenv("PAGADITO_SANDBOX", "true").lower() in ("1", "true", "yes"),
+    }
+
+
+@app.post("/pagadito/create-payment")
+def pagadito_create_payment(data: PagaditoPaymentIn, user=Depends(get_current_user)):
+    """
+    Recibe el plan elegido, registra la transaccion en Pagadito
+    (connect + exec_trans) y devuelve la URL de checkout.
+    El frontend debe redirigir al usuario a esa URL.
+    """
+    plan = next(
+        (p for p in get_pagadito_plans() if p.get("code") == data.plan_code), None
+    )
+    if not plan:
+        raise HTTPException(400, "Plan invalido.")
+
+    try:
+        order = db.create_pagadito_order(
+            user["id"], plan["code"], plan["amount"], currency="USD"
+        )
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc))
+
+    client = PagaditoClient()
+    try:
+        checkout_url = client.exec_trans(
+            amount=plan["amount"],
+            ern=order["ern"],
+            details=[{
+                "quantity": 1,
+                "description": plan.get("description", plan["code"]),
+                "price": float(plan["amount"]),
+                "url_product": os.getenv(
+                    "PAGADITO_PRODUCT_URL",
+                    "https://threesixtybets-chat.vercel.app",
+                ),
+            }],
+            currency="USD",
+        )
+    except PagaditoAuthError as exc:
+        raise HTTPException(502, f"Pagadito rechazo las credenciales: {exc}")
+    except PagaditoConnectionError as exc:
+        raise HTTPException(502, f"Pagadito no disponible: {exc}")
+    except PagaditoTransactionError as exc:
+        raise HTTPException(400, f"Pagadito rechazo la transaccion: {exc}")
+    except PagaditoError as exc:
+        raise HTTPException(500, f"Error inesperado con Pagadito: {exc}")
+
+    # La URL de checkout contiene el token de la TRANSACCION
+    # (necesario para get_status en el retorno), ej:
+    # https://sandbox.pagadito.com/.../index.php?token=<token_trans>
+    token_trans = ""
+    try:
+        from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+        token_trans = _parse_qs(_urlparse(checkout_url).query).get("token", [""])[0]
+    except Exception:
+        pass
+    if token_trans:
+        db.attach_pagadito_token(order["ern"], token_trans)
+    return {
+        "ok": True,
+        "ern": order["ern"],
+        "checkout_url": checkout_url,
+        "token_trans": token_trans,
+        "sandbox": client.sandbox,
+    }
+
+
+@app.get("/pagadito/return")
+def pagadito_return(request: Request):
+    """
+    URL de retorno configurada en el panel de Pagadito. Pagadito regresa
+    al usuario aqui con el token de la transaccion en el query string.
+    Consulta el estado real (get_status) y activa la suscripcion si el
+    pago esta COMPLETED. Redirige al frontend con el resultado.
+    """
+    from urllib.parse import urlencode
+
+    frontend = os.getenv(
+        "PAGADITO_RETURN_REDIRECT",
+        "https://threesixtybets-chat.vercel.app",
+    ).rstrip("/")
+
+    params = dict(request.query_params)
+    token_trans = params.get("token_trans", params.get("token", "")).strip()
+    ern = params.get("ern", "").strip()
+
+    def redirect(status_key):
+        query = urlencode({"payment": status_key, "ern": ern or ""})
+        return RedirectResponse(f"{frontend}/subscription?{query}", status_code=302)
+
+    # Localizar la orden: por ERN (si Pagadito lo devuelve) o por el
+    # token_trans guardado al crear el pago.
+    order = None
+    if ern:
+        order = db.get_pagadito_order_by_ern(ern)
+    if order is None and token_trans:
+        order = db.run_query(
+            "select * from pagadito_orders where token_trans = %s",
+            (token_trans,),
+            fetchone=True,
+        )
+
+    if order is None or not token_trans:
+        return redirect("not_found")
+
+    client = PagaditoClient()
+    try:
+        status = client.get_status(token_trans)
+    except (PagaditoAuthError, PagaditoConnectionError, PagaditoTransactionError, PagaditoError) as exc:
+        print(f"[PAGADITO] Error consultando estado de {order['ern']}: {exc}")
+        return redirect("error")
+
+    if status["status"] == "COMPLETED":
+        plan_days = next(
+            (
+                int(p.get("days", 30))
+                for p in get_pagadito_plans()
+                if p.get("code") == order["plan_code"]
+            ),
+            30,
+        )
+        try:
+            result = db.activate_subscription(order["ern"], plan_days)
+        except ValueError as exc:
+            print(f"[PAGADITO] Error activando suscripcion {order['ern']}: {exc}")
+            return redirect("error")
+        print(
+            f"[PAGADITO] Pago aprobado: ern={order['ern']} ref={status['reference']} "
+            f"user={result.get('username')} hasta={result.get('access_expires_at')}"
+        )
+        return redirect("success")
+
+    # REGISTERED (pendiente), CANCELED, EXPIRED, REJECTED u otro estado.
+    db.mark_pagadito_order_status(
+        order["ern"],
+        "failed" if status["status"] not in ("REGISTERED",) else "pending",
+        reference=status["reference"],
+    )
+    status_map = {
+        "REGISTERED": "pending",
+        "CANCELED": "canceled",
+        "EXPIRED": "expired",
+        "REJECTED": "rejected",
+    }
+    return redirect(status_map.get(status["status"], "failed"))
 
 
 @app.get("/stats/summary")
