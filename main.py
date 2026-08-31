@@ -580,12 +580,21 @@ def pagadito_return(request: Request):
     ).rstrip("/")
 
     params = dict(request.query_params)
-    token_trans = params.get("token_trans", params.get("token", "")).strip()
-    ern = params.get("ern", "").strip()
+    # Return URL configurada en el panel de Pagadito:
+    #   /pagadito/return?token={value}&ern={ern_value}
+    # Pagadito reemplaza {value} por el token de la transaccion y
+    # {ern_value} por el ERN enviado en exec_trans.
+    token_trans = (
+        params.get("token", params.get("token_trans", "")).strip()
+    )
+    ern = params.get("ern", params.get("ern_value", "")).strip()
+    print(f"[PAGADITO] return recibido con params: {params}")
 
     def redirect(status_key):
         query = urlencode({"payment": status_key, "ern": ern or ""})
-        return RedirectResponse(f"{frontend}/subscription?{query}", status_code=302)
+        # El frontend no tiene ruta /subscription: volver a la raiz con
+        # el resultado en el query string (?payment=success|rejected|...).
+        return RedirectResponse(f"{frontend}/?{query}", status_code=302)
 
     # Localizar la orden: por ERN (si Pagadito lo devuelve) o por el
     # token_trans guardado al crear el pago.
