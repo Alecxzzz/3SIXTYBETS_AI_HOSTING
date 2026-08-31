@@ -627,7 +627,9 @@ def activate_subscription(ern, plan_days):
             raise ValueError("Usuario de la orden no encontrado.")
 
         current_expires_at = user["access_expires_at"]
-        base_date = max(current_expires_at, now_utc())
+        # Usuarios sin premium previo tienen access_expires_at NULL.
+        base = current_expires_at if current_expires_at else now_utc()
+        base_date = max(base, now_utc())
         next_expires_at = base_date + timedelta(days=plan_days)
 
         cur.execute(

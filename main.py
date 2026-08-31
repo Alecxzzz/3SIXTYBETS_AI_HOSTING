@@ -664,6 +664,9 @@ def pagadito_return(request: Request):
         except ValueError as exc:
             print(f"[PAGADITO] Error activando suscripcion {order['ern']}: {exc}")
             return redirect("error")
+        except Exception as exc:
+            print(f"[PAGADITO] Excepcion activando suscripcion {order['ern']}: {exc!r}")
+            return redirect("error")
         print(
             f"[PAGADITO] Pago aprobado: ern={order['ern']} ref={status['reference']} "
             f"user={result.get('username')} hasta={result.get('access_expires_at')}"
