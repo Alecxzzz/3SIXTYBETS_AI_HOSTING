@@ -498,6 +498,38 @@ def pagadito_plans():
         "sandbox": os.getenv("PAGADITO_SANDBOX", "true").lower() in ("1", "true", "yes"),
     }
 
+@app.get("/pagadito/debug")
+def pagadito_debug():
+    """
+    Diagnostico: prueba connect() contra Pagadito con las credenciales
+    configuradas y devuelve el resultado crudo (sin exponer el WSK).
+    """
+    uid = os.getenv("PAGADITO_UID", "").strip()
+    wsk = os.getenv("PAGADITO_WSK", "").strip()
+    result = {
+        "uid_present": bool(uid),
+        "wsk_present": bool(wsk),
+        "sandbox": os.getenv("PAGADITO_SANDBOX", "true").lower() in ("1", "true", "yes"),
+        "endpoint": None,
+        "ok": False,
+        "code": None,
+        "message": None,
+    }
+    if not uid or not wsk:
+        result["message"] = "Faltan PAGADITO_UID y/o PAGADITO_WSK en las variables de entorno."
+        return result
+    try:
+        client = PagaditoClient(uid=uid, wsk=wsk)
+        result["endpoint"] = client.endpoint
+        token = client.connect()
+        result["ok"] = True
+        result["message"] = "connect() OK, token recibido."
+        result["token_prefix"] = token[:8] + "..."
+    except Exception as exc:  # noqa: BLE001 - diagnostico
+        result["message"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 
 @app.post("/pagadito/create-payment")
 def pagadito_create_payment(data: PagaditoPaymentIn, user=Depends(get_current_user)):
