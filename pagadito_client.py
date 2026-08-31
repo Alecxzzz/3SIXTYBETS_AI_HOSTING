@@ -219,8 +219,8 @@ class PagaditoClient:
         if not self.token:
             self.connect()
         response = self._call(operation, {"token": self.token, **extra})
-        # Token expirado: reconectar una vez y reintentar.
-        if str(response.get("code")) == "PG3002":
+        # Token expirado/invalidado (PG3002 o PG3007): reconectar y reintentar.
+        if str(response.get("code")) in ("PG3002", "PG3007"):
             self.token = None
             self.connect()
             response = self._call(operation, {"token": self.token, **extra})
@@ -271,16 +271,21 @@ class PagaditoClient:
         if amount <= 0:
             raise PagaditoTransactionError("El monto debe ser mayor que cero.")
 
+        # Detalles como arreglo de OBJETOS JSON (claves quantity, description,
+        # price, url_product) segun la especificacion oficial del WSPG.
         details_json = []
         for detail in details or []:
-            details_json.append([
-                int(detail.get("quantity", 1)),
-                str(detail.get("description", "Producto"))[:255],
-                round(float(detail.get("price", 0)), 2),
-                str(detail.get("url_product", "")),
-            ])
+            details_json.append({
+                "quantity": int(detail.get("quantity", 1)),
+                "description": str(detail.get("description", "Producto"))[:255],
+                "price": round(float(detail.get("price", 0)), 2),
+                "url_product": str(detail.get("url_product", "")),
+            })
 
-        response = self._call_with_reconnect("exec_trans", {
+        # Cada transaccion usa una conexion fresca: el WSPG invalida el token
+        # tras registrar un cobro (observado en sandbox).
+        self.connect()
+        response = self._call("exec_trans", {
             "token": self.token,
             "ern": str(ern),
             "amount": f"{amount:.2f}",
