@@ -1,20 +1,15 @@
 """
-Cliente Pagadito APIPG en Python puro (no hay SDK oficial de Python).
+Cliente Pagadito WSPG en Python puro (no hay SDK oficial de Python).
 
-Habla directamente con el servicio web de Pagadito (APIPG) igual que el
-SDK PHP oficial (v1.0.1): POST form-encoded al endpoint charges.php con
-campos planos:
+El WSPG de Pagadito es un servicio SOAP estilo RPC/encoded (NuSOAP).
+Verificado en vivo contra el WSDL oficial:
+    https://sandbox.pagadito.com/comercios/wspg/charges.php?wsdl
 
-    connect:     operation=connect, uid, wsk, format_return
-    exec_trans:  operation=exec_trans, token, ern, amount, details (JSON),
-                 custom_params (JSON), currency, format_return,
-                 allow_pending_payments
-    get_status:  operation=get_status, token, token_trans, format_return
-
-Respuesta JSON: {"code": "PG1001", "value": "..."}.
-
-Referencia: https://dev.pagadito.com/index.php?mod=docs&hac=mostrar&tema=APIPG
-y al SDK PHP oficial de Pagadito.
+Operaciones usadas (todas devuelven un string JSON {"code","message","value"}):
+    connect(uid, wsk, format_return)
+    exec_trans(token, ern, amount, details, format_return, currency,
+               custom_params, allow_pending_payments)
+    get_status(token, token_trans, format_return)
 
 Variables de entorno:
     PAGADITO_UID        UID del comercio (obligatorio)
@@ -24,15 +19,16 @@ Variables de entorno:
 
 import json
 import os
+import xml.etree.ElementTree as ET
 
 import requests
 
 
 # ============================================================
-# URLs del APIPG (sandbox por defecto para pruebas)
+# URLs del WSPG (sandbox por defecto para pruebas)
 # ============================================================
-APIPG_SANDBOX_URL = "https://sandbox.pagadito.com/comercios/apipg/charges.php"
-APIPG_PRODUCTION_URL = "https://comercios.pagadito.com/apipg/charges.php"
+WSPG_SANDBOX_URL = "https://sandbox.pagadito.com/comercios/wspg/charges.php"
+WSPG_PRODUCTION_URL = "https://comercios.pagadito.com/wspg/charges.php"
 
 # Codigo de respuesta -> descripcion (lista oficial del APIPG)
 RESPONSE_CODES = {
@@ -102,14 +98,48 @@ class PagaditoClient:
     # --------------------------------------------------------
     @property
     def endpoint(self) -> str:
-        return APIPG_SANDBOX_URL if self.sandbox else APIPG_PRODUCTION_URL
+        return WSPG_SANDBOX_URL if self.sandbox else WSPG_PRODUCTION_URL
 
-    def _call(self, params: dict) -> dict:
-        payload = {k: str(v) for k, v in params.items() if v is not None}
+    @staticmethod
+    def _xml_escape(value: str) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _soap_envelope(self, operation: str, params: dict) -> str:
+        items = "".join(
+            f'<{key} xsi:type="xsd:string">{self._xml_escape(value)}</{key}>'
+            for key, value in params.items()
+            if value is not None
+        )
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<SOAP-ENV:Envelope '
+            'SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" '
+            'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
+            'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" '
+            'xmlns:tns="urn:wspg">'
+            f'<SOAP-ENV:Body><tns:{operation}>{items}</tns:{operation}>'
+            '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+        )
+
+    def _call(self, operation: str, params: dict) -> dict:
+        """Ejecuta una operacion SOAP del WSPG y devuelve {"code","message","value"}."""
+        envelope = self._soap_envelope(operation, params)
         try:
             response = requests.post(
-                self.endpoint, data=payload, timeout=self.timeout,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                self.endpoint,
+                data=envelope.encode("utf-8"),
+                headers={
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": f"urn:ws#{operation}",
+                },
+                timeout=self.timeout,
             )
         except requests.exceptions.Timeout as exc:
             raise PagaditoConnectionError(
@@ -130,11 +160,35 @@ class PagaditoClient:
                 f"{response.text[:200]}"
             )
 
-        try:
-            data = response.json()
-        except ValueError as exc:
+        # Extraer la falla SOAP si la hay.
+        if "SOAP-ENV:Fault" in response.text or ":Fault" in response.text:
             raise PagaditoConnectionError(
-                f"Respuesta no-JSON de Pagadito: {response.text[:200]}"
+                f"Falla SOAP de Pagadito: {response.text[:300]}"
+            )
+
+        # Extraer el valor de <return> del cuerpo SOAP.
+        try:
+            root = ET.fromstring(response.text)
+        except ET.ParseError as exc:
+            raise PagaditoConnectionError(
+                f"Respuesta no-XML de Pagadito: {response.text[:200]}"
+            ) from exc
+
+        return_text = None
+        for element in root.iter():
+            if element.tag.endswith("return"):
+                return_text = element.text or ""
+                break
+        if return_text is None:
+            raise PagaditoConnectionError(
+                f"Respuesta SOAP sin 'return': {response.text[:200]}"
+            )
+
+        try:
+            data = json.loads(return_text)
+        except (ValueError, TypeError) as exc:
+            raise PagaditoConnectionError(
+                f"El WSPG devolvio una respuesta no-JSON: {return_text[:200]}"
             ) from exc
 
         if not isinstance(data, dict) or "code" not in data:
@@ -147,29 +201,29 @@ class PagaditoClient:
     def _raise_for(response: dict):
         code = str(response.get("code", ""))
         value = response.get("value", "")
+        message = response.get("message", "")
+        detail = f"{message} (value={value!r})" if message else f"(value={value!r})"
         if code == "PG2001":
             raise PagaditoConnectionError(_describe(code), code=code)
         if code in ("PG1002", "PG3001", "PG3002"):
             raise PagaditoAuthError(
-                f"{_describe(code)} (value={value!r})", code=code, message_pg=value
+                f"{_describe(code)} {detail}", code=code, message_pg=value
             )
         if code in ("PG2002", "PG3003", "PG3004", "PG3005", "PG3006",
                     "PG3007", "PG3008"):
             raise PagaditoTransactionError(
-                f"{_describe(code)} (value={value!r})", code=code, message_pg=value
+                f"{_describe(code)} {detail}", code=code, message_pg=value
             )
 
     def _call_with_reconnect(self, operation: str, extra: dict) -> dict:
         if not self.token:
             self.connect()
-        response = self._call({"operation": operation, "token": self.token, **extra})
+        response = self._call(operation, {"token": self.token, **extra})
         # Token expirado: reconectar una vez y reintentar.
         if str(response.get("code")) == "PG3002":
             self.token = None
             self.connect()
-            response = self._call(
-                {"operation": operation, "token": self.token, **extra}
-            )
+            response = self._call(operation, {"token": self.token, **extra})
         return response
 
     # --------------------------------------------------------
@@ -180,8 +234,7 @@ class PagaditoClient:
         Autentica el comercio contra el APIPG y guarda el token de conexion.
         Devuelve el token.
         """
-        response = self._call({
-            "operation": "connect",
+        response = self._call("connect", {
             "uid": self.uid,
             "wsk": self.wsk,
             "format_return": "json",
@@ -228,12 +281,13 @@ class PagaditoClient:
             ])
 
         response = self._call_with_reconnect("exec_trans", {
+            "token": self.token,
             "ern": str(ern),
             "amount": f"{amount:.2f}",
             "details": json.dumps(details_json),
-            "custom_params": json.dumps([]),
-            "currency": currency,
             "format_return": "json",
+            "currency": currency,
+            "custom_params": json.dumps([]),
             "allow_pending_payments": "false",
         })
         code = str(response.get("code", ""))
