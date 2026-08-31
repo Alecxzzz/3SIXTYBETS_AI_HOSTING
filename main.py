@@ -469,11 +469,11 @@ from pagadito_client import (
     PagaditoTransactionError,
 )
 
-# Planes: sobreescribir con PAGADITO_PLANS='[{"code":"mensual","description":"Plan mensual 3SIXTYBETS","amount":9.99,"days":30}, ...]'
+# Planes: sobreescribir con PAGADITO_PLANS='[{"code":"plan15","description":"...","amount":5,"days":15}, ...]'
 DEFAULT_PLANS = [
-    {"code": "mensual", "description": "Suscripcion 3SIXTYBETS - 1 mes", "amount": 9.99, "days": 30},
-    {"code": "trimestral", "description": "Suscripcion 3SIXTYBETS - 3 meses", "amount": 24.99, "days": 90},
-    {"code": "anual", "description": "Suscripcion 3SIXTYBETS - 1 año", "amount": 79.99, "days": 365},
+    {"code": "plan15", "description": "PREMIUM 3SIXTYBETS - 15 dias", "amount": 5.00, "days": 15},
+    {"code": "plan30", "description": "PREMIUM 3SIXTYBETS - 30 dias", "amount": 10.00, "days": 30},
+    {"code": "plan45", "description": "PREMIUM 3SIXTYBETS - 45 dias", "amount": 15.00, "days": 45},
 ]
 
 class PagaditoPaymentIn(BaseModel):
