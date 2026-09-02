@@ -57,11 +57,6 @@
         ].join('');
         document.head.appendChild(css);
 
-        var btn = document.createElement('button');
-        btn.className = 'txh-btn';
-        btn.type = 'button';
-        btn.innerHTML = '\uD83E\uDDFE Historial de transacciones';
-
         var overlay = document.createElement('div');
         overlay.className = 'txh-overlay';
         overlay.innerHTML =
@@ -70,10 +65,26 @@
           '<button class="txh-close" type="button" aria-label="Cerrar">&times;</button></div>' +
           '<div class="txh-body"><div class="txh-content"></div></div></div>';
 
-        document.body.appendChild(btn);
         document.body.appendChild(overlay);
 
         var content = overlay.querySelector('.txh-content');
+
+        function openPanel() {
+          overlay.classList.add('open');
+          loadAndRender();
+        }
+
+        /* Interceptar el clic en el item "Historial de transacciones" del
+           menu lateral (añadido en el bundle) para abrir este panel en vez
+           de dejar que la app cambie a una pagina inexistente. */
+        document.addEventListener('click', function (e) {
+          var el = e.target && e.target.closest ? e.target.closest('aside button') : null;
+          if (el && el.textContent.indexOf('Historial de transacciones') !== -1) {
+            e.preventDefault();
+            e.stopPropagation();
+            openPanel();
+          }
+        }, true);
         overlay.querySelector('.txh-close').addEventListener('click', function () {
           overlay.classList.remove('open');
         });
@@ -165,19 +176,11 @@
             });
         }
 
-        btn.addEventListener('click', function () {
-          overlay.classList.add('open');
-          loadAndRender();
-        });
-
         function checkSession() {
-          var session = getSession();
-          btn.style.display = (session && session.access_token) ? 'flex' : 'none';
+          /* Reservado: la visibilidad ahora la maneja el menu lateral. */
         }
         window.addEventListener('threesixtybets:session-expired', checkSession);
         window.addEventListener('storage', checkSession);
-        setInterval(checkSession, 2000);
-        checkSession();
       })();
     </script>
   </body>
