@@ -5,7 +5,7 @@ from urllib.parse import urljoin, quote
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 import db
@@ -686,6 +686,151 @@ def pagadito_return(request: Request):
         "REJECTED": "rejected",
     }
     return redirect(status_map.get(status["status"], "failed"))
+
+
+# ==============================
+# HISTORIAL DE TRANSACCIONES + FACTURA PDF
+# ==============================
+
+_TX_STATUS_LABELS = {
+    "completed": "APROBADO",
+    "approved": "APROBADO",
+    "pending": "PENDIENTE",
+    "registered": "PENDIENTE",
+    "canceled": "CANCELADO",
+    "cancelled": "CANCELADO",
+    "expired": "EXPIRADO",
+    "rejected": "RECHAZADO",
+    "failed": "FALLIDO",
+}
+
+
+def _tx_label(status: str) -> str:
+    return _TX_STATUS_LABELS.get((status or "").lower(), (status or "DESCONOCIDO").upper())
+
+
+def _tx_public(order) -> dict:
+    created = order.get("created_at")
+    updated = order.get("updated_at")
+    return {
+        "ern": order["ern"],
+        "plan_code": order["plan_code"],
+        "amount": float(order["amount"]),
+        "currency": order.get("currency") or "USD",
+        "status": order["status"],
+        "status_label": _tx_label(order["status"]),
+        "reference": order.get("reference"),
+        "created_at": created.isoformat() if created else None,
+        "updated_at": updated.isoformat() if updated else None,
+    }
+
+
+def _simple_pdf(title: str, lines: list[tuple[str, str]]) -> bytes:
+    """
+    Genera un PDF de una pagina (Helvetica) sin dependencias externas.
+    lines: lista de (texto, tamano_fuente).
+    """
+    import zlib
+
+    def esc(s: str) -> str:
+        return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+    y = 780
+    parts = ["BT"]
+    for text, size in lines:
+        parts.append(f"/F1 {size} Tf")
+        parts.append(f"1 0 0 1 60 {y} Tm")
+        parts.append(f"({esc(text)}) Tj")
+        y -= size + 10
+    parts.append("ET")
+    content = " ".join(parts).encode("latin-1", "replace")
+    compressed = zlib.compress(content)
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(compressed)).encode()
+        + b" /Filter /FlateDecode >>\nstream\n" + compressed + b"\nendstream",
+    ]
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + obj + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+@app.get("/transactions")
+def list_transactions(user=Depends(get_current_user)):
+    """Historial de pagos (Pagadito) del usuario autenticado."""
+    orders = db.list_pagadito_orders_for_user(user["id"]) or []
+    return {"transactions": [_tx_public(o) for o in orders]}
+
+
+@app.get("/transactions/{ern}/invoice")
+def transaction_invoice(ern: str, request: Request):
+    """
+    Factura PDF de una transaccion del usuario. Acepta el token por
+    header Authorization Bearer o por query string (?token=...) para
+    permitir descarga directa por link.
+    """
+    token = request.query_params.get("token", "").strip()
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+    user = db.get_user_by_token(token) if token else None
+    if not user:
+        raise HTTPException(401, "Necesitas iniciar sesion.")
+
+    order = db.get_pagadito_order_by_ern(ern)
+    if not order or order["user_id"] != user["id"]:
+        raise HTTPException(404, "Transaccion no encontrada.")
+
+    info = _tx_public(order)
+    created = info["created_at"] or ""
+    lines: list[tuple[str, str]] = [
+        ("3SIXTYBETS AI", 20),
+        ("FACTURA DE SUSCRIPCION", 14),
+        ("", 10),
+        (f"Factura / ERN: {info['ern']}", 11),
+        (f"Fecha: {created.replace('T', ' ')[:19]}", 11),
+        (f"Cliente: {user['username']}", 11),
+        ("", 10),
+        (f"Plan: {info['plan_code']}", 11),
+        (f"Monto: {info['currency']} {info['amount']:.2f}", 11),
+        (f"Estado: {_tx_label(info['status'])}", 11),
+    ]
+    if info.get("reference"):
+        lines.append((f"Referencia Pagadito: {info['reference']}", 11))
+    lines += [
+        ("", 10),
+        ("Gracias por tu compra.", 10),
+        ("Este documento es un comprobante generado electronicamente.", 9),
+    ]
+
+    pdf = _simple_pdf("Factura", lines)
+    from urllib.parse import quote
+
+    filename = quote(f"factura-{info['ern']}.pdf")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 @app.get("/stats/summary")

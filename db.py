@@ -563,6 +563,20 @@ def get_pagadito_order_by_ern(ern):
     )
 
 
+def list_pagadito_orders_for_user(user_id):
+    """Historial de transacciones del usuario, mas recientes primero."""
+    return run_query(
+        """
+        select id, plan_code, amount, currency, ern, token_trans, status,
+               reference, created_at, updated_at
+        from pagadito_orders
+        where user_id = %s
+        order by created_at desc
+        """,
+        (user_id,),
+    )
+
+
 def attach_pagadito_token(ern, token_trans):
     """Guarda el token de transaccion devuelto por exec_trans."""
     return bool(
