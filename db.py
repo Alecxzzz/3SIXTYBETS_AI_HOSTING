@@ -176,6 +176,20 @@ def init_db():
             foreign key (user_id) references users(id) on delete cascade
         )
         """,
+        """
+        create table if not exists channels (
+            id varchar(64) primary key,
+            name varchar(120) not null,
+            stream text not null,
+            type varchar(20) not null default 'm3u8',
+            status varchar(20) not null default 'ACTIVO',
+            ads boolean not null default false,
+            use_proxy boolean not null default false,
+            geo_restriction varchar(20) not null default 'NONE',
+            created_at datetime not null,
+            updated_at datetime null
+        )
+        """,
     ]
 
     for statement in statements:
@@ -675,3 +689,76 @@ def activate_subscription(ern, plan_days):
             cur.close()
         if conn:
             conn.close()
+
+
+# ==============================
+# CANALES DE TV (panel admin)
+# ==============================
+
+def public_channel(row):
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "stream": row["stream"],
+        "type": row.get("type") or "m3u8",
+        "status": row.get("status") or "ACTIVO",
+        "ads": bool(row.get("ads")),
+        "useProxy": bool(row.get("use_proxy")),
+        "geoRestriction": row.get("geo_restriction") or "NONE",
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+    }
+
+
+def list_channels(active_only=False):
+    if active_only:
+        rows = run_query(
+            "select * from channels where status = %s order by name asc",
+            ("ACTIVO",),
+        )
+    else:
+        rows = run_query("select * from channels order by name asc")
+    return [public_channel(r) for r in (rows or [])]
+
+
+def create_channel(name, stream, ctype="m3u8", ads=False, use_proxy=False, geo_restriction="NONE"):
+    channel_id = secrets.token_urlsafe(8)
+    ok = run_query(
+        """
+        insert into channels
+        (id, name, stream, type, status, ads, use_proxy, geo_restriction, created_at)
+        values (%s, %s, %s, %s, 'ACTIVO', %s, %s, %s, %s)
+        """,
+        (channel_id, name, stream, ctype, ads, use_proxy, geo_restriction, now_utc()),
+    )
+    if not ok:
+        return None
+    row = run_query("select * from channels where id = %s", (channel_id,), fetchone=True)
+    return public_channel(row) if row else None
+
+
+def update_channel(channel_id, **fields):
+    allowed = {"name", "stream", "type", "status", "ads", "use_proxy", "geo_restriction"}
+    sets, params = [], []
+    for key, value in fields.items():
+        if key in allowed and value is not None:
+            sets.append(f"{key} = %s")
+            params.append(value)
+    if not sets:
+        return None
+    sets.append("updated_at = %s")
+    params.append(now_utc())
+    params.append(channel_id)
+    ok = run_query(
+        f"update channels set {', '.join(sets)} where id = %s",
+        tuple(params),
+    )
+    if not ok:
+        return None
+    row = run_query("select * from channels where id = %s", (channel_id,), fetchone=True)
+    return public_channel(row) if row else None
+
+
+def delete_channel(channel_id):
+    return bool(run_query("delete from channels where id = %s", (channel_id,)))
+

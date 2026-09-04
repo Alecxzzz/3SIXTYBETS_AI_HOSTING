@@ -221,13 +221,136 @@ PASO 4: DECISIÓN CON CONFIANZA
 ═══════════════════════════════════════════════════════════════════════════════
 
 VARÍA ENTRE ESTOS (NO SIEMPRE LO MISMO):
-- Moneyline (1X2): ganador, doble oportunidad (1X, X2, 12)
-- Goles: Over 1.5, 2.5 | Goles por equipo | BTTS (ambos marcan)
-- Corners: Total 7.5+ | Por equipo 3.5+ | Ambos equipos 2+ cada uno
-- Handicap: Europa (-1, -2) o Asiático (-1.5, -2.5)
-- Props: Tiros a puerta, faltas, tarjetas, fueras de juego
-- Mitades: Gana primera mitad, segunda mitad, cualquier mitad
-- Especiales: Multigoles, gana cualquier mitad
+Fútbol:
+- `1x2`, ya sea equipo A o B
+- `over de goles`, con mínimo de `1.25` goles dependiendo la cuota
+- `DOBLE OPORTUNIDAD` (1X, X2, 12, 21)
+- `TOTAL TIROS DE EQUINA, MINIMO 7.5 CORNERS CUOTA MINIMA 1.25`
+- `TOTAL TIROS DE ESQUINA`, equipo a o b, con mínimo recomendado de `3.5`
+- `primera mitad tiros de esquina`, con mínimo recomendado de `3.5`
+- `AMBOS EQUIPOS +4 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +1 TARJETAS CADA UNO`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TARJETAS CADA UNO`, `SI`, `NO`
+- `ambos marcan`
+- `apuesta sin empate`
+- `handicap europeo o asiático` para equipo A o B:
+  - mínimo positivo: `+3.5`
+  - mínimo negativo: `-2.5`
+- `equipo A total de goles`, mínimo `0.5` goles over
+- `equipo B total de goles`, mínimo `0.5` goles over
+- `multigoles`
+- `equipo A gana cualquier mitad` (`SI`, `NO`)
+- `equipo B gana cualquier mitad` (`SI`, `NO`)
+- `cualquier equipo gana`
+- `ambos equipos marcan o 2.5 goles`
+- `TOTAL FUERAS DE JUEGO`, equipo A o B, mínimo recomendado `2.5`
+- `tiros a puerta del jugador`, mínimo `0.5` o `1.5`
+- `tiros en general del jugador`
+- `jugador que marca o asiste`
+- `over de tarjetas`
+- `goleador en cualquier momento`
+- `equipo A o B gana la primera mitad`
+- Props jugadores
+- `UNDER/OVER DE TIROS GENERALES`, equipo A o B
+- `UNDER/OVER DE TIROS A PUERTA`, equipo A o B
+- `TOTAL DE FALTAS`, equipo A o B
+- `UNDER/OVER DE TARJETAS`, equipo A o B
+
+NBA:
+- `Ganador (inc. prórroga)`
+- `handicap`:
+  - mínimo positivo: `+25.5`
+  - mínimo negativo: `-1`
+- `total de puntos (incl. prórroga)`, O SIEMPRE USA EL UNDER MAS BAJO DEL PARTIDO COMO PRIORIDAD, EJEMPLO: SI EL UNDER MAS BAJO ES 210.5, USA ESE, NO 220.5
+- `total de puntos del equipo A`
+- `total de puntos del equipo B`
+- `mínimo de puntos del jugador`
+- `mínimo de rebotes del jugador`
+- `mínimo de asistencias del jugador`
+- `mínimo de triples anotados del jugador`
+- `mínimo puntos+rebotes del jugador`
+- `mínimo puntos+asistencias del jugador`
+- `mínimo asistencias+rebotes del jugador`
+- `mínimo asistencias+puntos del jugador`
+- `mínimo de puntos+rebotes+asistencias del jugador`
+- `jugador hace un doble-doble` (`si`, `no`)
+- `jugador hace un triple-doble` (`si`, `no`)
+- `ambos equipos anotarán 100 puntos` (`si`, `no`)
+- `ambos equipos anotarán 110 puntos` (`si`, `no`)
+- `ambos equipos anotarán OVER 100 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán OVER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `total asistencias del equipo A o B`
+- `total robos del equipo A o B`
+- `total triples del equipo A o B`
+- `total rebotes del equipo A o B`
+- `1er cuarto total de puntos`
+- `equipo A o B gana la primera mitad`
+- `carrera a 10 puntos`, equipo A o B
+- `carrera a 20 puntos`, equipo A o B
+- `PRIMERA MITAD - TOTAL DE PUNTOS`
+- `PRIMERA MITAD - EQUIPO A O B TOTAL DE PUNTOS`
+- `PRIMER CUARTO TOTAL DE PUNTOS`
+- `PRIMER CUARTO - HANDICAP`
+
+
+**MLB:**
+* Ganador incl extra innings
+* Totales incl extra innings
+* Handicap incl extra innings (positivo o negativo)
+* Ganador y total incl extra innings
+* Hits más de/menos de incl extra innings
+* Equipo A hits más de/menos de incl extra innings
+* Equipo B hits más de/menos de incl extra innings
+* Bases totales por jugador incl extra innings
+* Hits totales del jugador incl extra innings
+* HR totales del jugador incl extra innings
+* SO (Strikeouts) del jugador incl extra innings
+* Equipo A totales de runs over/under
+* Equipo B totales de runs over/under
+* Hits + Carreras + RBIs del jugador incl extra innings
+* Lanzador total hits permitidos incl extra innings
+
+**TENIS:**
+
+* Ganador
+* Juegos
+* Sets
+* Hándicap
+* Primer set ganador
+* Segundo set ganador
+* Handicap de sets
+* Handicap de juego
+* Total juegos *(priorizar siempre el under más bajo del mercado)*
+* Marcador exacto
+* Jugador A total juegos
+* Jugador B total juegos
+* Gana un set jugador A
+* Gana un set jugador B
+* Ambos jugadores ganan un set
+* Doble resultado (1° set/partido)
+* Sets exactos
+* Hitos de aces totales
+* Aces totales por jugador A
+* Aces totales por jugador B
+* Breaks totales
+* Jugador A total de breaks
+* Jugador B total de breaks
+* Hitos de doble faltas
+* Hitos de doble faltas jugador A
+* Hitos de doble faltas jugador B
+* Primer set handicap de juego
+* Primer set total juegos under/over
+* Segundo set total juegos under/over
+* Encuentro total tie breaks
+
+NOTA FINAL: TIENES QUE USAR TODOS LOS MERCADOS LISTADOS AQUI, NUNCA REPETIR EL MISMO MERCADO EN LOS DIFERENTES O MISMOS PARTIDOS.
+
+
+SIEMPRE VE VARIANDO LAS OPCIONES,  NO SOLO TE CENTRES EN 1X2 O GOLES, BUSCA SIEMPRE LA APUESTA MÁS FÁCIL DE ACERTAR CON VALOR.
+
 
 REGLA DE ORO:
 - Si equipo fuerte vs débil → handicap o over goles equipo fuerte
@@ -478,6 +601,25 @@ DEFAULT_PLANS = [
 
 class PagaditoPaymentIn(BaseModel):
     plan_code: str
+
+
+class ChannelIn(BaseModel):
+    name: str
+    stream: str
+    type: str = "m3u8"
+    ads: bool = False
+    useProxy: bool = False
+    geoRestriction: str = "NONE"
+
+
+class ChannelUpdateIn(BaseModel):
+    name: str | None = None
+    stream: str | None = None
+    type: str | None = None
+    status: str | None = None
+    ads: bool | None = None
+    useProxy: bool | None = None
+    geoRestriction: str | None = None
 
 
 def get_pagadito_plans():
@@ -946,7 +1088,7 @@ Responde en espanol, conciso (max 200 palabras), formato:
 [jugada a jugada]
 ⭐ Jugador destacado:
 [nombre y razon]
-🎯 Tendencia:
+🎯 Pronostico:
 [pronostico]"""
 
     try:
@@ -1333,4 +1475,72 @@ def admin_delete_key(code: str, user=Depends(get_admin)):
     if not ok:
         raise HTTPException(400, "La key no existe o ya fue reclamada.")
     return {"ok": True, "message": f"Key {code.upper()} eliminada."}
+
+
+# ==============================
+# CANALES DE TV (gestion admin)
+# ==============================
+
+@app.get("/channels")
+def list_public_channels(user=Depends(get_current_user)):
+    """Canales ACTIVOS para la pagina de TV (usuarios autenticados)."""
+    return {"channels": db.list_channels(active_only=True)}
+
+
+@app.get("/admin/channels")
+def admin_list_channels(user=Depends(get_admin)):
+    """Todos los canales (activos y apagados) para el panel admin."""
+    return {"channels": db.list_channels(active_only=False)}
+
+
+@app.post("/admin/channels")
+def admin_create_channel(data: ChannelIn, user=Depends(get_admin)):
+    """Agrega un canal nuevo (queda ACTIVO por defecto)."""
+    name = data.name.strip()
+    stream = data.stream.strip()
+    if not name or not stream.startswith(("http://", "https://")):
+        raise HTTPException(400, "Nombre y URL del stream son obligatorios.")
+    channel = db.create_channel(
+        name=name,
+        stream=stream,
+        ctype=data.type if data.type in ("m3u8", "iframe") else "m3u8",
+        ads=data.ads,
+        use_proxy=data.useProxy,
+        geo_restriction=(data.geoRestriction or "NONE").upper(),
+    )
+    if not channel:
+        raise HTTPException(500, "No se pudo guardar el canal.")
+    return {"ok": True, "channel": channel}
+
+
+@app.put("/admin/channels/{channel_id}")
+def admin_update_channel(channel_id: str, data: ChannelUpdateIn, user=Depends(get_admin)):
+    """Edita un canal o cambia su estado (ACTIVO / CAIDO = apagado)."""
+    fields = {}
+    if data.name is not None:
+        fields["name"] = data.name.strip()
+    if data.stream is not None:
+        fields["stream"] = data.stream.strip()
+    if data.type is not None and data.type in ("m3u8", "iframe"):
+        fields["type"] = data.type
+    if data.status is not None:
+        fields["status"] = data.status.upper()
+    if data.ads is not None:
+        fields["ads"] = data.ads
+    if data.useProxy is not None:
+        fields["use_proxy"] = data.useProxy
+    if data.geoRestriction is not None:
+        fields["geo_restriction"] = data.geoRestriction.upper()
+    channel = db.update_channel(channel_id, **fields)
+    if not channel:
+        raise HTTPException(404, "Canal no encontrado o sin cambios.")
+    return {"ok": True, "channel": channel}
+
+
+@app.delete("/admin/channels/{channel_id}")
+def admin_delete_channel(channel_id: str, user=Depends(get_admin)):
+    ok = db.delete_channel(channel_id)
+    if not ok:
+        raise HTTPException(404, "Canal no encontrado.")
+    return {"ok": True}
 

@@ -1,4 +1,4 @@
-def construir_prompt_sistema():
+def construir_walter_sistema():
     return """
 Eres 3SIXTYBETS AI WORKSPOT.
 
@@ -238,6 +238,138 @@ REGLAS:
 
 REGLA: USAR ESTADISTICAS DEL MES QUE ESTAMOS DEL AÑO 2026, NO USAR ESTADISTICAS DE MESES ANTERIORES, SOLO DEL MES ACTUAL
 
+
+picks a usar dependiendo del deporte:
+Fútbol:
+- `1x2`, ya sea equipo A o B
+- `over de goles`, con mínimo de `1.25` goles dependiendo la cuota
+- `DOBLE OPORTUNIDAD` (1X, X2, 12, 21)
+- `TOTAL TIROS DE EQUINA, MINIMO 7.5 CORNERS CUOTA MINIMA 1.25`
+- `TOTAL TIROS DE ESQUINA`, equipo a o b, con mínimo recomendado de `3.5`
+- `primera mitad tiros de esquina`, con mínimo recomendado de `3.5`
+- `AMBOS EQUIPOS +4 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +1 TARJETAS CADA UNO`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TARJETAS CADA UNO`, `SI`, `NO`
+- `ambos marcan`
+- `apuesta sin empate`
+- `handicap europeo o asiático` para equipo A o B:
+  - mínimo positivo: `+3.5`
+  - mínimo negativo: `-2.5`
+- `equipo A total de goles`, mínimo `0.5` goles over
+- `equipo B total de goles`, mínimo `0.5` goles over
+- `multigoles`
+- `equipo A gana cualquier mitad` (`SI`, `NO`)
+- `equipo B gana cualquier mitad` (`SI`, `NO`)
+- `cualquier equipo gana`
+- `ambos equipos marcan o 2.5 goles`
+- `TOTAL FUERAS DE JUEGO`, equipo A o B, mínimo recomendado `2.5`
+- `tiros a puerta del jugador`, mínimo `0.5` o `1.5`
+- `tiros en general del jugador`
+- `jugador que marca o asiste`
+- `over de tarjetas`
+- `goleador en cualquier momento`
+- `equipo A o B gana la primera mitad`
+- Props jugadores
+- `UNDER/OVER DE TIROS GENERALES`, equipo A o B
+- `UNDER/OVER DE TIROS A PUERTA`, equipo A o B
+- `TOTAL DE FALTAS`, equipo A o B
+- `UNDER/OVER DE TARJETAS`, equipo A o B
+
+NBA:
+- `Ganador (inc. prórroga)`
+- `handicap`:
+  - mínimo positivo: `+25.5`
+  - mínimo negativo: `-1`
+- `total de puntos (incl. prórroga)`, O SIEMPRE USA EL UNDER MAS BAJO DEL PARTIDO COMO PRIORIDAD, EJEMPLO: SI EL UNDER MAS BAJO ES 210.5, USA ESE, NO 220.5
+- `total de puntos del equipo A`
+- `total de puntos del equipo B`
+- `mínimo de puntos del jugador`
+- `mínimo de rebotes del jugador`
+- `mínimo de asistencias del jugador`
+- `mínimo de triples anotados del jugador`
+- `mínimo puntos+rebotes del jugador`
+- `mínimo puntos+asistencias del jugador`
+- `mínimo asistencias+rebotes del jugador`
+- `mínimo asistencias+puntos del jugador`
+- `mínimo de puntos+rebotes+asistencias del jugador`
+- `jugador hace un doble-doble` (`si`, `no`)
+- `jugador hace un triple-doble` (`si`, `no`)
+- `ambos equipos anotarán 100 puntos` (`si`, `no`)
+- `ambos equipos anotarán 110 puntos` (`si`, `no`)
+- `ambos equipos anotarán OVER 100 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán OVER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `total asistencias del equipo A o B`
+- `total robos del equipo A o B`
+- `total triples del equipo A o B`
+- `total rebotes del equipo A o B`
+- `1er cuarto total de puntos`
+- `equipo A o B gana la primera mitad`
+- `carrera a 10 puntos`, equipo A o B
+- `carrera a 20 puntos`, equipo A o B
+- `PRIMERA MITAD - TOTAL DE PUNTOS`
+- `PRIMERA MITAD - EQUIPO A O B TOTAL DE PUNTOS`
+- `PRIMER CUARTO TOTAL DE PUNTOS`
+- `PRIMER CUARTO - HANDICAP`
+
+
+**MLB:**
+* Ganador incl extra innings
+* Totales incl extra innings
+* Handicap incl extra innings (positivo o negativo)
+* Ganador y total incl extra innings
+* Hits más de/menos de incl extra innings
+* Equipo A hits más de/menos de incl extra innings
+* Equipo B hits más de/menos de incl extra innings
+* Bases totales por jugador incl extra innings
+* Hits totales del jugador incl extra innings
+* HR totales del jugador incl extra innings
+* SO (Strikeouts) del jugador incl extra innings
+* Equipo A totales de runs over/under
+* Equipo B totales de runs over/under
+* Hits + Carreras + RBIs del jugador incl extra innings
+* Lanzador total hits permitidos incl extra innings
+
+**TENIS:**
+
+* Ganador
+* Juegos
+* Sets
+* Hándicap
+* Primer set ganador
+* Segundo set ganador
+* Handicap de sets
+* Handicap de juego
+* Total juegos *(priorizar siempre el under más bajo del mercado)*
+* Marcador exacto
+* Jugador A total juegos
+* Jugador B total juegos
+* Gana un set jugador A
+* Gana un set jugador B
+* Ambos jugadores ganan un set
+* Doble resultado (1° set/partido)
+* Sets exactos
+* Hitos de aces totales
+* Aces totales por jugador A
+* Aces totales por jugador B
+* Breaks totales
+* Jugador A total de breaks
+* Jugador B total de breaks
+* Hitos de doble faltas
+* Hitos de doble faltas jugador A
+* Hitos de doble faltas jugador B
+* Primer set handicap de juego
+* Primer set total juegos under/over
+* Segundo set total juegos under/over
+* Encuentro total tie breaks
+
+NOTA FINAL: TIENES QUE USAR TODOS LOS MERCADOS LISTADOS AQUI, NUNCA REPETIR EL MISMO MERCADO EN LOS DIFERENTES O MISMOS PARTIDOS.
+
+
+SIEMPRE VE VARIANDO LAS OPCIONES,  NO SOLO TE CENTRES EN 1X2 O GOLES, BUSCA SIEMPRE LA APUESTA MÁS FÁCIL DE ACERTAR CON VALOR.
+
 ---
 
 Formato obligatorio:
@@ -264,7 +396,7 @@ FAVOR DE DOBLE REVISAR LA APUESTA ANTES DE METERLE
 """
 
 
-def construir_prompt_usuario(data_engine: dict, mensaje_usuario: str):
+def construir_walter_usuario(data_engine: dict, mensaje_usuario: str):
     return f"""
 PREGUNTA DEL USUARIO:
 {mensaje_usuario}
@@ -298,8 +430,8 @@ INSTRUCCIONES DE DECISIÓN:
 """
 
 
-def construir_prompt_sistema_36ai():
-    """Prompt de sistema para 36AI (Groq + tools).
+def construir_walter_sistema_36ai():
+    """walter de sistema para 36AI (Groq + tools).
 
     Adaptado al estilo de escritura del resto del ecosistema 3SIXTYBETS:
     secciones con cabeceras emoji, sin markdown de asteriscos, y la regla
@@ -442,8 +574,8 @@ Devuelve exactamente ese formato y en ese orden.
 
 
 
-def construir_prompt_conversacional(nombre: str = "3SIXTYBETS AI"):
-    """Prompt para modo conversación (saludos, preguntas generales, charla).
+def construir_walter_conversacional(nombre: str = "3SIXTYBETS AI"):
+    """walter para modo conversación (saludos, preguntas generales, charla).
 
     Importante: NO usa el formato EDGE ni menciones a picks/confianza salvo que
     el usuario pida analizar un partido concreto. Pensado para que la IA se
