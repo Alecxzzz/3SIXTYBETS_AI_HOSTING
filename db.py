@@ -615,12 +615,43 @@ def mark_pagadito_order_status(ern, status, reference=None):
     )
 
 
-def activate_subscription(ern, plan_days):
+def set_pagadito_reference(ern, reference):
+    """Guarda/actualiza solo el numero de aprobacion (reference) de la orden."""
+    return bool(
+        run_query(
+            "update pagadito_orders set reference = %s, updated_at = %s where ern = %s",
+            (reference, now_utc(), ern),
+        )
+    )
+
+
+def pagadito_orders_missing_reference(limit=50):
+    """
+    Ordenes completadas con token_trans pero sin numero de aprobacion
+    guardado (pagos procesados antes de guardar la referencia).
+    """
+    return run_query(
+        """
+        select ern, token_trans
+        from pagadito_orders
+        where status = 'completed'
+          and token_trans is not null
+          and token_trans != ''
+          and (reference is null or reference = '')
+        order by created_at desc
+        limit %s
+        """,
+        (limit,),
+    )
+
+
+def activate_subscription(ern, plan_days, reference=None):
     """
     Activa/renueva la suscripcion del usuario dueño de la orden.
     Extiende access_expires_at desde la fecha mas lejana entre "ahora"
     y la expiracion actual (igual que el canje de keys). Marca la orden
-    como completada. Idempotente: si ya estaba completada no vuelve a
+    como completada y guarda el numero de aprobacion de Pagadito
+    (reference). Idempotente: si ya estaba completada no vuelve a
     extender los dias.
 
     Devuelve dict {"ok", "already_processed", "access_expires_at", "username"}.
@@ -639,6 +670,12 @@ def activate_subscription(ern, plan_days):
         order = cur.fetchone()
         if order["status"] == "completed":
             # Ya procesada (reintento de Pagadito / doble click): no duplicar dias.
+            # Igual se guarda el numero de aprobacion si faltaba.
+            if reference and not order.get("reference"):
+                cur.execute(
+                    "update pagadito_orders set reference = %s where ern = %s",
+                    (reference, ern),
+                )
             cur.execute("select username, access_expires_at from users where id = %s", (order["user_id"],))
             user = cur.fetchone()
             conn.commit()
@@ -667,10 +704,12 @@ def activate_subscription(ern, plan_days):
         cur.execute(
             """
             update pagadito_orders
-            set status = 'completed', updated_at = %s
+            set status = 'completed',
+                reference = coalesce(nullif(%s, ''), reference),
+                updated_at = %s
             where ern = %s and status != 'completed'
             """,
-            (now_utc(), ern),
+            (reference, now_utc(), ern),
         )
         conn.commit()
 

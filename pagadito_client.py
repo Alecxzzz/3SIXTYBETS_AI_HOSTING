@@ -333,9 +333,21 @@ class PagaditoClient:
         elif isinstance(raw_value, dict):
             status_data = raw_value
 
+        print(f"[PAGADITO] get_status raw: {raw_value!r}")
+
+        # El "PG approval number" puede venir en distintas claves segun la
+        # version del WSPG: reference, approval, approval_number, auth...
+        reference = ""
+        for key in ("reference", "approval", "approval_number", "auth",
+                    "authorization", "approval_code", "reference_number"):
+            value = status_data.get(key)
+            if value:
+                reference = str(value)
+                break
+
         return {
             "status": str(status_data.get("status", "")).upper(),
-            "reference": status_data.get("reference", ""),
+            "reference": reference,
             "date_trans": status_data.get("date_trans", ""),
             "value": status_data.get("value", ""),
             "raw": status_data or raw_value,

@@ -792,6 +792,8 @@ def pagadito_return(request: Request):
         print(f"[PAGADITO] Error consultando estado de {order['ern']}: {exc}")
         return redirect("error")
 
+    print(f"[PAGADITO] get_status de {order['ern']}: {status}")
+
     if status["status"] == "COMPLETED":
         plan_days = next(
             (
@@ -802,7 +804,9 @@ def pagadito_return(request: Request):
             30,
         )
         try:
-            result = db.activate_subscription(order["ern"], plan_days)
+            result = db.activate_subscription(
+                order["ern"], plan_days, reference=status.get("reference") or None
+            )
         except ValueError as exc:
             print(f"[PAGADITO] Error activando suscripcion {order['ern']}: {exc}")
             return redirect("error")
@@ -976,6 +980,34 @@ def transaction_invoice(ern: str, request: Request):
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
+
+
+@app.post("/pagadito/backfill-approvals")
+def pagadito_backfill_approvals(admin=Depends(get_admin)):
+    """
+    Recupera el numero de aprobacion (PG approval number) de ordenes
+    completadas que quedaron sin referencia guardada: consulta get_status
+    con el token_trans almacenado y actualiza la orden.
+    Solo para administradores.
+    """
+    pending = db.pagadito_orders_missing_reference() or []
+    client = PagaditoClient()
+    updated, errors = [], []
+    for row in pending:
+        ern, token_trans = row["ern"], row["token_trans"]
+        try:
+            status = client.get_status(token_trans)
+            print(f"[PAGADITO] backfill {ern}: {status}")
+        except PagaditoError as exc:
+            errors.append({"ern": ern, "error": str(exc)})
+            continue
+        reference = status.get("reference") or ""
+        if reference:
+            db.set_pagadito_reference(ern, reference)
+            updated.append({"ern": ern, "approval_number": reference})
+        else:
+            errors.append({"ern": ern, "error": "Pagadito no devolvio reference"})
+    return {"checked": len(pending), "updated": updated, "errors": errors}
 
 
 @app.get("/stats/summary")
