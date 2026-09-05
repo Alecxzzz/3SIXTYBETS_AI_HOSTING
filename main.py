@@ -862,6 +862,9 @@ def _tx_public(order) -> dict:
         "status": order["status"],
         "status_label": _tx_label(order["status"]),
         "reference": order.get("reference"),
+        "approval_number": (order.get("reference") or "").strip()
+        if isinstance(order.get("reference"), str)
+        else (order.get("reference") or None),
         "created_at": created.isoformat() if created else None,
         "updated_at": updated.isoformat() if updated else None,
     }
@@ -956,8 +959,8 @@ def transaction_invoice(ern: str, request: Request):
         (f"Monto: {info['currency']} {info['amount']:.2f}", 11),
         (f"Estado: {_tx_label(info['status'])}", 11),
     ]
-    if info.get("reference"):
-        lines.append((f"Referencia Pagadito: {info['reference']}", 11))
+    if info.get("approval_number"):
+        lines.append((f"Numero de aprobacion: {info['approval_number']}", 11))
     lines += [
         ("", 10),
         ("Gracias por tu compra.", 10),
