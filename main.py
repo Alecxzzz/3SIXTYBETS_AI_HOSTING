@@ -5,11 +5,12 @@ from urllib.parse import urljoin, quote
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from pydantic import BaseModel
 
 import db
 import sports
+import transcoder
 from engine.search_engine import SearchEngine
 try:
     from backend.player_stats.player_stats_service import player_stats_service
@@ -1476,6 +1477,45 @@ def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(
     if player_stats_service is None:
         return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
     return player_stats_service.get_clickable_players(sport, game_id, season)
+
+
+# ==============================
+# TRANSCODIFICADOR HLS (fallback universal)
+# ==============================
+@app.get("/live/index.m3u8")
+def live_index(request: Request, url: str, referer: str = None):
+    """
+    Inicia (o reutiliza) un transcodificador FFmpeg para la fuente indicada
+    y devuelve una playlist H.264/AAC universal que reproduce cualquier
+    navegador. Tercer fallback del reproductor de TV.
+    """
+    if not url or not re.match(r"^https?://", url.strip()):
+        raise HTTPException(400, "URL invalida")
+    try:
+        key = transcoder.start_session(url.strip(), (referer or "").strip() or None)
+        playlist = transcoder.get_playlist(key)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    return PlainTextResponse(
+        playlist,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/live/{key}/{name}")
+def live_segment(key: str, name: str):
+    """Sirve segmentos .ts del transcodificador y mantiene la sesion viva."""
+    if not re.match(r"^[a-f0-9]{16}$", key):
+        raise HTTPException(400, "Sesion invalida")
+    path = transcoder.get_segment_path(key, name)
+    if not path:
+        raise HTTPException(404, "Segmento no disponible")
+    media_type = (
+        "application/vnd.apple.mpegurl" if name.endswith(".m3u8")
+        else "video/mp2t"
+    )
+    return FileResponse(path, media_type=media_type)
 
 
 @app.get("/admin/channel-test")
