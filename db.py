@@ -190,6 +190,28 @@ def init_db():
             updated_at datetime null
         )
         """,
+        """
+        create table if not exists ai_picks (
+            id varchar(64) primary key,
+            sport varchar(20) not null,
+            sport_label varchar(40) not null,
+            event_id varchar(64) not null,
+            event_name varchar(200) not null,
+            event_date varchar(60) null,
+            market varchar(200) not null,
+            selection varchar(200) not null,
+            odds decimal(10, 2) null,
+            confidence varchar(10) null,
+            rationale text null,
+            model varchar(40) null,
+            pick_date date not null,
+            result varchar(20) not null default 'PENDIENTE',
+            created_at datetime not null,
+            updated_at datetime null,
+            unique key ai_picks_event_market_idx (event_id, market),
+            index ai_picks_date_idx (pick_date)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -800,4 +822,99 @@ def update_channel(channel_id, **fields):
 
 def delete_channel(channel_id):
     return bool(run_query("delete from channels where id = %s", (channel_id,)))
+
+
+# ==============================
+# AI PICKS (dashboard)
+# ==============================
+
+def public_ai_pick(row):
+    return {
+        "id": row["id"],
+        "sport": row["sport"],
+        "sportLabel": row.get("sport_label"),
+        "eventId": row.get("event_id"),
+        "eventName": row.get("event_name"),
+        "eventDate": row.get("event_date"),
+        "market": row.get("market"),
+        "selection": row.get("selection"),
+        "odds": float(row["odds"]) if row.get("odds") is not None else None,
+        "confidence": row.get("confidence"),
+        "rationale": row.get("rationale"),
+        "model": row.get("model"),
+        "pickDate": row["pick_date"].isoformat() if row.get("pick_date") else None,
+        "result": row.get("result") or "PENDIENTE",
+        "createdAt": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
+                   market, selection, odds=None, confidence=None,
+                   rationale=None, model=None):
+    pick_id = secrets.token_urlsafe(8)
+    ok = run_query(
+        """
+        insert into ai_picks
+        (id, sport, sport_label, event_id, event_name, event_date, market,
+         selection, odds, confidence, rationale, model, pick_date, result, created_at)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+        """,
+        (
+            pick_id, sport, sport_label, event_id, event_name, event_date,
+            market, selection, odds, confidence, rationale, model,
+            now_utc().date(), now_utc(),
+        ),
+    )
+    if not ok:
+        return None
+    row = run_query("select * from ai_picks where id = %s", (pick_id,), fetchone=True)
+    return public_ai_pick(row) if row else None
+
+
+def pick_existe(event_id):
+    row = run_query(
+        "select id from ai_picks where event_id = %s limit 1",
+        (event_id,),
+        fetchone=True,
+    )
+    return bool(row)
+
+
+def list_picks_hoy():
+    rows = run_query(
+        "select * from ai_picks where pick_date = %s order by created_at asc",
+        (now_utc().date(),),
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
+
+
+def list_picks_pendientes():
+    rows = run_query(
+        "select * from ai_picks where result = 'PENDIENTE' order by created_at asc limit 20"
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
+
+
+def update_pick_result(pick_id, result):
+    if result not in ("ACIERTO", "FALLO"):
+        return False
+    return bool(run_query(
+        "update ai_picks set result = %s, updated_at = %s where id = %s",
+        (result, now_utc(), pick_id),
+    ))
+
+
+def count_aciertos_historico():
+    row = run_query(
+        """
+        select
+          coalesce(sum(case when result = 'ACIERTO' then 1 else 0 end), 0) as aciertos,
+          coalesce(sum(case when result in ('ACIERTO', 'FALLO') then 1 else 0 end), 0) as resueltos
+        from ai_picks
+        """,
+        fetchone=True,
+    )
+    if not row:
+        return {"aciertos": 0, "resueltos": 0}
+    return {"aciertos": int(row["aciertos"]), "resueltos": int(row["resueltos"])}
 

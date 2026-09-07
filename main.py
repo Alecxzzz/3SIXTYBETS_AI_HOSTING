@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import db
 import sports
 import transcoder
+import dashboard
 from engine.search_engine import SearchEngine
 try:
     from backend.player_stats.player_stats_service import player_stats_service
@@ -465,6 +466,13 @@ def _init_database():
                 print(f"[startup] DB ready, {count} available key(s)", flush=True)
 
             print("[startup] Database initialized successfully", flush=True)
+
+            # Dashboard: arrancar generacion automatica de picks en background
+            try:
+                dashboard.iniciar_scheduler()
+            except Exception as exc:
+                print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
+
             break
 
         except Exception as exc:
@@ -564,6 +572,41 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return result
+
+
+# ==============================
+# DASHBOARD (pronosticos IA)
+# ==============================
+
+@app.get("/dashboard")
+def dashboard_home(user=Depends(get_current_user)):
+    """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra)."""
+    return dashboard.resumen_dashboard(user["username"])
+
+
+@app.get("/dashboard/picks")
+def dashboard_picks(user=Depends(get_current_user)):
+    """Pronosticos del dia de todos los deportes."""
+    return {"picks": db.list_picks_hoy() or []}
+
+
+@app.get("/dashboard/acertados")
+def dashboard_acertados(user=Depends(get_current_user)):
+    """Solo los pronosticos ACERTADOS por la IA (los fallados no se muestran)."""
+    picks = db.list_picks_hoy() or []
+    return {"acertados": [p for p in picks if p.get("result") == "ACIERTO"]}
+
+
+@app.post("/dashboard/generate")
+def dashboard_generate(user=Depends(get_admin)):
+    """Fuerza la generacion de picks ahora (admin)."""
+    return dashboard.generar_picks_dia()
+
+
+@app.post("/dashboard/resolve")
+def dashboard_resolve(user=Depends(get_admin)):
+    """Resuelve los picks pendientes cuyos partidos ya terminaron (admin)."""
+    return dashboard.resolver_picks_finalizados()
 
 
 # ==============================
