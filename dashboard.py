@@ -251,9 +251,10 @@ def _preguntar_ia(mensaje: str):
                 usar_tools=False,
                 max_tokens=700,
             )
-            content = (
-                data.get("choices", [{}])[0].get("message", {}).get("content") or ""
-            )
+            content = ""
+            choices = data.get("choices") or [{}]
+            message = choices[0].get("message") or {}
+            content = message.get("content") or ""
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
             if content:
                 return content, "365AI"
