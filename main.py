@@ -581,6 +581,11 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
 @app.get("/dashboard")
 def dashboard_home(user=Depends(get_current_user)):
     """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra)."""
+    # Reparar picks viejos sin equipos/logos al vuelo (barato: 1 query si no hay nada)
+    try:
+        dashboard.backfill_picks_metadata()
+    except Exception:
+        pass
     return dashboard.resumen_dashboard(user["username"])
 
 
