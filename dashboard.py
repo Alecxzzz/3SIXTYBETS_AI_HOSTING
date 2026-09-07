@@ -208,15 +208,24 @@ def _partidos_hoy():
             for g in data.get("games", []):
                 if g.get("state") == "post":
                     continue  # ya finalizados: no generar pick nuevo
-                equipos = g.get("teams") or []
-                nombres = [t.get("name", "?") for t in equipos]
+                home = g.get("home") or {}
+                away = g.get("away") or {}
+                # Fallback tenis/MMA: 'teams' si no hay home/away
+                if not home and not away:
+                    equipos = g.get("teams") or []
+                    away = equipos[0] if equipos else {}
+                    home = equipos[1] if len(equipos) > 1 else {}
+                home_name = home.get("name") or "?"
+                away_name = away.get("name") or "?"
                 partidos.append({
                     "sport": sport,
                     "label": data.get("label", sport),
                     "event_id": str(g.get("id", "")),
-                    "event_name": " vs ".join(nombres) if nombres else "?",
-                    "home": nombres[1] if len(nombres) > 1 else "?",
-                    "away": nombres[0] if nombres else "?",
+                    "event_name": f"{away_name} vs {home_name}",
+                    "home_name": home_name,
+                    "away_name": away_name,
+                    "home_logo": home.get("logo"),
+                    "away_logo": away.get("logo"),
                     "date": g.get("date", ""),
                 })
         except Exception as exc:
@@ -308,7 +317,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             break  # ya se usaron todos los mercados del catalogo hoy
 
         mensaje = (
-            f"Partido: {p['away']} (visitante) vs {p['home']} (local)\n"
+            f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
             f"Deporte: {label}\nFecha/hora: {p['date']}\n\n"
             f"Elige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
             f"usados hoy: {', '.join(list(mercados_usados)[:15]) or 'ninguno'}). "
@@ -343,6 +352,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             confidence=pick.get("confidence", "MEDIA"),
             rationale=pick.get("rationale", ""),
             model=modelo or "IA",
+            home_name=p["home_name"],
+            away_name=p["away_name"],
+            home_logo=p["home_logo"],
+            away_logo=p["away_logo"],
         )
         if creado:
             generados += 1

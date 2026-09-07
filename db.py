@@ -197,6 +197,10 @@ def init_db():
             sport_label varchar(40) not null,
             event_id varchar(64) not null,
             event_name varchar(200) not null,
+            home_name varchar(120) null,
+            away_name varchar(120) null,
+            home_logo varchar(400) null,
+            away_logo varchar(400) null,
             event_date varchar(60) null,
             market varchar(200) not null,
             selection varchar(200) not null,
@@ -216,6 +220,19 @@ def init_db():
 
     for statement in statements:
         run_query(statement)
+
+    # Migracion ligera: columnas de logos/nombres para instalaciones previas.
+    for column in ("home_name", "away_name", "home_logo", "away_logo"):
+        exists = run_query(
+            """
+            select count(*) as cnt from information_schema.columns
+            where table_schema = database() and table_name = 'ai_picks' and column_name = %s
+            """,
+            (column,),
+            fetchone=True,
+        )
+        if exists and not exists.get("cnt"):
+            run_query(f"alter table ai_picks add column {column} varchar(400) null")
 
     ensure_admin_user()
 
@@ -835,6 +852,10 @@ def public_ai_pick(row):
         "sportLabel": row.get("sport_label"),
         "eventId": row.get("event_id"),
         "eventName": row.get("event_name"),
+        "homeName": row.get("home_name"),
+        "awayName": row.get("away_name"),
+        "homeLogo": row.get("home_logo"),
+        "awayLogo": row.get("away_logo"),
         "eventDate": row.get("event_date"),
         "market": row.get("market"),
         "selection": row.get("selection"),
@@ -850,18 +871,21 @@ def public_ai_pick(row):
 
 def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
-                   rationale=None, model=None):
+                   rationale=None, model=None,
+                   home_name=None, away_name=None, home_logo=None, away_logo=None):
     pick_id = secrets.token_urlsafe(8)
     ok = run_query(
         """
         insert into ai_picks
-        (id, sport, sport_label, event_id, event_name, event_date, market,
+        (id, sport, sport_label, event_id, event_name, home_name, away_name,
+         home_logo, away_logo, event_date, market,
          selection, odds, confidence, rationale, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
         (
-            pick_id, sport, sport_label, event_id, event_name, event_date,
-            market, selection, odds, confidence, rationale, model,
+            pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
+            home_logo, away_logo, event_date, market,
+            selection, odds, confidence, rationale, model,
             now_utc().date(), now_utc(),
         ),
     )

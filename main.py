@@ -609,6 +609,13 @@ def dashboard_resolve(user=Depends(get_admin)):
     return dashboard.resolver_picks_finalizados()
 
 
+@app.post("/dashboard/reset")
+def dashboard_reset(user=Depends(get_admin)):
+    """Borra TODOS los picks para regenerarlos con equipos/logos (admin)."""
+    db.run_query("delete from ai_picks")
+    return {"ok": True, "message": "Picks borrados. Se regeneraran en el proximo ciclo."}
+
+
 # ==============================
 # PAGADITO (pasarela de pagos)
 # ==============================
