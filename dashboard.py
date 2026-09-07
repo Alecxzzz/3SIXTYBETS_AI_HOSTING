@@ -413,6 +413,33 @@ def _resolver_pick_con_ia(pick: dict):
     return None
 
 
+def backfill_picks_metadata() -> int:
+    """Repara picks viejos sin nombres/logos de equipos usando los datos de hoy.
+
+    Los picks generados antes de la correccion quedaron con home_name NULL y
+    por eso el frontend mostraba '?'. Esto los actualiza con la info de ESPN.
+    """
+    viejos = db.picks_sin_equipo() or []
+    if not viejos:
+        return 0
+
+    por_evento = {p["event_id"]: p for p in _partidos_hoy()}
+    reparados = 0
+    for pick in viejos:
+        partido = por_evento.get(pick["eventId"])
+        if not partido:
+            continue
+        if db.update_pick_metadata(
+            pick["id"],
+            partido["home_name"],
+            partido["away_name"],
+            partido["home_logo"],
+            partido["away_logo"],
+        ):
+            reparados += 1
+    return reparados
+
+
 def resolver_picks_finalizados() -> dict:
     """Resuelve los picks pendientes cuyos partidos ya terminaron."""
     pendientes = db.list_picks_pendientes() or []
@@ -471,6 +498,12 @@ _generando = threading.Lock()
 
 def _ciclo():
     with _generando:
+        try:
+            reparados = backfill_picks_metadata()
+            if reparados:
+                print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
+        except Exception:
+            print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
         try:
             stats = generar_picks_dia()
             print(f"[Dashboard] Picks automaticos: {stats}", flush=True)

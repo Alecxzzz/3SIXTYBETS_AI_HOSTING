@@ -919,12 +919,31 @@ def list_picks_pendientes():
     return [public_ai_pick(r) for r in (rows or [])]
 
 
+def picks_sin_equipo():
+    """Picks sin nombres de equipos (generados antes de la correccion)."""
+    rows = run_query(
+        "select * from ai_picks where home_name is null order by created_at desc limit 60"
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
+
+
 def update_pick_result(pick_id, result):
     if result not in ("ACIERTO", "FALLO"):
         return False
     return bool(run_query(
         "update ai_picks set result = %s, updated_at = %s where id = %s",
         (result, now_utc(), pick_id),
+    ))
+
+
+def update_pick_metadata(pick_id, home_name, away_name, home_logo, away_logo):
+    return bool(run_query(
+        """
+        update ai_picks
+        set home_name = %s, away_name = %s, home_logo = %s, away_logo = %s
+        where id = %s
+        """,
+        (home_name, away_name, home_logo, away_logo, pick_id),
     ))
 
 
