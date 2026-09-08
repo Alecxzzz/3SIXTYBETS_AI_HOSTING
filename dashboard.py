@@ -177,13 +177,17 @@ SOLO PUEDES USAR ESTOS PICKS DEFINIDOS PARA CADA DEPORTE:
 """ + catalogo_texto() + """
 REGLAS OBLIGATORIAS:
 1. USA SOLO los mercados listados arriba. NUNCA inventes mercados.
-2. NUNCA repitas el mismo mercado en los diferentes o mismos partidos.
-3. SIEMPRE ve variando las opciones: no te centres solo en 1X2 o goles.
-4. Busca SIEMPRE la apuesta mas FACIL de acertar CON VALOR (cuota justa vs probabilidad real).
-5. Respeta los minimos indicados (cuotas minimas, handicap minimo, under mas bajo en NBA/tenis).
-6. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
+2. Los textos del catalogo son INSTRUCCIONES/REGLAS del mercado (minimos de
+   linea, cuota minima, limites de handicap, etc.), NO texto literal para el
+   usuario. Interpretalos: eligen la linea concreta que cumpla esas reglas.
+3. NUNCA repitas el mismo mercado en los diferentes o mismos partidos.
+4. SIEMPRE ve variando las opciones: no te centres solo en 1X2 o goles.
+5. Busca SIEMPRE la apuesta mas FACIL de acertar CON VALOR (cuota justa vs probabilidad real).
+6. Respeta los minimos indicados (cuotas minimas, handicap minimo, under mas bajo en NBA/tenis).
+7. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
 {
-  "market": "<nombre exacto del mercado elegido del catalogo>",
+  "market": "<nombre del mercado del catalogo que elegiste (para validar)>",
+  "titulo": "<apuesta en lenguaje natural y corto para mostrar al usuario. Ejemplos: 'Corners de Club Brugge: Over 3.5', 'Total de corners del partido: Over 7.5', 'Ambos equipos marcan: SI', 'Hándicap asiatico Real Madrid -1.5', 'Total de puntos Lakers: Under 210.5'>",
   "selection": "<seleccion concreta: equipo A/B, SI/NO, over/under X.X, etc>",
   "odds": <cuota decimal estimada o null>,
   "confidence": "<ALTA|MEDIA|BAJA>",
@@ -227,6 +231,7 @@ def _partidos_hoy():
                     "home_logo": home.get("logo"),
                     "away_logo": away.get("logo"),
                     "date": g.get("date", ""),
+                    "odds": g.get("odds"),
                 })
         except Exception as exc:
             print(f"[Dashboard] Error trayendo partidos {sport}: {exc}")
@@ -319,10 +324,32 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 
         mensaje = (
             f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
-            f"Deporte: {label}\nFecha/hora: {p['date']}\n\n"
-            f"Elige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
+            f"Deporte: {label}\nFecha/hora: {p['date']}\n"
+        )
+
+        cuotas = p.get("odds") or {}
+        if cuotas.get("details") or cuotas.get("over_under"):
+            mensaje += (
+                "Cuotas REALES de ESPN: "
+                f"linea={cuotas.get('details') or 'N/A'}, "
+                f"ML local={cuotas.get('home_odds') or 'N/A'}, "
+                f"ML visitante={cuotas.get('away_odds') or 'N/A'}, "
+                f"total de la casa={cuotas.get('over_under') or 'N/A'}. "
+                "BASATE en estas cuotas reales para calcular valor; la linea que "
+                "elijas debe respetar los minimos del catalogo.\n"
+            )
+        else:
+            mensaje += (
+                "No hay cuotas reales disponibles para este partido: estima la "
+                "cuota y respetando los minimos del catalogo.\n"
+            )
+
+        mensaje += (
+            f"\nElige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
             f"usados hoy: {', '.join(list(mercados_usados)[:15]) or 'ninguno'}). "
-            f"Devuelve el JSON del pick."
+            f"Recuerda: el campo 'market' es para validar contra el catalogo; el campo "
+            f"'titulo' es la apuesta en lenguaje natural (ej: 'Corners de "
+            f"{p['home_name']}: Over 3.5'). Devuelve el JSON del pick."
         )
 
         texto, modelo = _preguntar_ia(mensaje)
@@ -357,6 +384,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             away_name=p["away_name"],
             home_logo=p["home_logo"],
             away_logo=p["away_logo"],
+            titulo=str(pick.get("titulo") or "").strip() or str(pick.get("selection", "")),
         )
         if creado:
             generados += 1

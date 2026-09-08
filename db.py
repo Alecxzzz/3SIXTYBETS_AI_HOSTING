@@ -203,6 +203,7 @@ def init_db():
             away_logo varchar(400) null,
             event_date varchar(60) null,
             market varchar(200) not null,
+            titulo varchar(200) null,
             selection varchar(200) not null,
             odds decimal(10, 2) null,
             confidence varchar(10) null,
@@ -222,7 +223,7 @@ def init_db():
         run_query(statement)
 
     # Migracion ligera: columnas de logos/nombres para instalaciones previas.
-    for column in ("home_name", "away_name", "home_logo", "away_logo"):
+    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo"):
         exists = run_query(
             """
             select count(*) as cnt from information_schema.columns
@@ -858,6 +859,7 @@ def public_ai_pick(row):
         "awayLogo": row.get("away_logo"),
         "eventDate": row.get("event_date"),
         "market": row.get("market"),
+        "titulo": row.get("titulo"),
         "selection": row.get("selection"),
         "odds": float(row["odds"]) if row.get("odds") is not None else None,
         "confidence": row.get("confidence"),
@@ -872,19 +874,20 @@ def public_ai_pick(row):
 def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
-                   home_name=None, away_name=None, home_logo=None, away_logo=None):
+                   home_name=None, away_name=None, home_logo=None, away_logo=None,
+                   titulo=None):
     pick_id = secrets.token_urlsafe(8)
     ok = run_query(
         """
         insert into ai_picks
         (id, sport, sport_label, event_id, event_name, home_name, away_name,
-         home_logo, away_logo, event_date, market,
+         home_logo, away_logo, event_date, market, titulo,
          selection, odds, confidence, rationale, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
         (
             pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
-            home_logo, away_logo, event_date, market,
+            home_logo, away_logo, event_date, market, titulo,
             selection, odds, confidence, rationale, model,
             now_utc().date(), now_utc(),
         ),
