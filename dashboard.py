@@ -941,29 +941,42 @@ def resolver_picks_finalizados() -> dict:
 def resumen_dashboard(username: str) -> dict:
     """Bienvenida + stats del dashboard.
 
-    - pronosticos_del_dia: todos los picks de hoy (todos los deportes).
-    - acertados: SOLO los picks con resultado ACIERTO (los fallados nunca
-      se muestran al usuario).
+    - pronosticos_del_dia: SOLO los pendientes de hoy (los acertados se van
+      moviendo a la seccion de acertados; los fallados nunca se muestran).
+    - acertados: picks de hoy con resultado ACIERTO.
+    - efectividad_hoy: aciertos / resueltos de HOY (coherente con los KPIs).
+    - historico: acumulado de todos los dias (se muestra aparte).
     """
     picks = db.list_picks_hoy() or []
     aciertos = [p for p in picks if p.get("result") == "ACIERTO"]
+    fallados = [p for p in picks if p.get("result") == "FALLO"]
+    pendientes = [p for p in picks if p.get("result") == "PENDIENTE"]
+
     historial = db.count_aciertos_historico() or {}
 
+    resueltos_hoy = len(aciertos) + len(fallados)
+    efectividad_hoy = (
+        round(len(aciertos) / resueltos_hoy * 100) if resueltos_hoy else None
+    )
+
     por_deporte = {}
-    for p in picks:
+    for p in pendientes:
         key = p.get("sport_label") or p.get("sport")
         por_deporte[key] = por_deporte.get(key, 0) + 1
 
     return {
         "welcome": f"Bienvenido, {username}",
         "stats": {
-            "pronosticos_del_dia": len(picks),
+            "pronosticos_del_dia": len(pendientes),
             "pronosticos_acertados_por_la_ia": len(aciertos),
+            "fallados_hoy": len(fallados),
+            "resueltos_hoy": resueltos_hoy,
+            "efectividad_hoy": efectividad_hoy,
             "por_deporte": por_deporte,
             "historico_aciertos": historial.get("aciertos", 0),
             "historico_resueltos": historial.get("resueltos", 0),
         },
-        "pronosticos_del_dia": picks,
+        "pronosticos_del_dia": pendientes,
         "pronosticos_acertados": aciertos,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
