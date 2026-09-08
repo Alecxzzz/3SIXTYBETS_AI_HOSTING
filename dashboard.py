@@ -1,4 +1,4 @@
-"""
+﻿"""
 DASHBOARD - Motor de pronosticos automaticos de 3SIXTYBETS.
 
 Cada dia la IA genera picks para los partidos disponibles (todos los deportes)
@@ -20,6 +20,158 @@ import traceback
 from datetime import datetime, timezone
 
 import db
+
+# ============================================================
+# CUOTAS REALES (odds-api.io)
+# ============================================================
+
+ODDS_API_KEY = (
+    os.getenv("ODDS_API_KEY")
+    or os.getenv("AI36_ODDS_API_KEY")
+    or "629022e8c84bef4696b26fd180f45a503d5a5aec633e826ef3f051984648ae4b"
+)
+ODDS_API_BASE = "https://api.odds-api.io/v3"
+# Plan free: solo 2 bookmakers recreativos permitidos
+ODDS_BOOKMAKERS = "1xbet,Stake"
+# Mapeo de nuestros deportes a los slugs de odds-api.io
+ODDS_SPORT_SLUGS = {
+    "soccer": "football",
+    "nba": "basketball",
+    "mlb": "baseball",
+    "tennis": "tennis",
+}
+
+_odds_cache = {}  # clave -> (timestamp, data)
+_ODDS_CACHE_TTL = 600  # 10 min (respeta el rate limit de 100 req/hora)
+
+
+def _norm_texto(s: str) -> str:
+    s = (s or "").lower().strip()
+    reemplazos = {
+        "Ã¡": "a", "Ã©": "e", "Ã­": "i", "Ã³": "o", "Ãº": "u", "Ã¼": "u", "Ã±": "n",
+    }
+    for k, v in reemplazos.items():
+        s = s.replace(k, v)
+    return s
+
+
+def _odds_request(path: str, params: dict):
+    try:
+        import requests
+
+        params = {"apiKey": ODDS_API_KEY, **params}
+        r = requests.get(f"{ODDS_API_BASE}{path}", params=params, timeout=20)
+        if r.status_code != 200:
+            print(f"[Dashboard] odds-api.io {path} -> {r.status_code}: {r.text[:150]}")
+            # 403 de bookmakers: devolver los permitidos por la cuenta
+            if r.status_code == 403 and "Allowed:" in r.text:
+                permitidos = r.text.split("Allowed:", 1)[1]
+                permitidos = permitidos.split(".")[0].strip()
+                return {"__permitidos__": [p.strip() for p in permitidos.split(",")]}
+            return None
+        return r.json()
+    except Exception as exc:
+        print(f"[Dashboard] odds-api.io {path} error: {exc}")
+        return None
+
+
+def _bookmakers_permitidos(event_id=None):
+    """Bookmakers seleccionados en la cuenta (free plan: max 2)."""
+    return _odds_request("/odds", {"eventId": event_id, "bookmakers": ODDS_BOOKMAKERS})
+
+
+def _odds_eventos(sport_slug: str):
+    """Lista de eventos de un deporte, con cache de 10 min."""
+    ahora = time.time()
+    cached = _odds_cache.get(f"events:{sport_slug}")
+    if cached and ahora - cached[0] < _ODDS_CACHE_TTL:
+        return cached[1]
+    data = _odds_request("/events", {"sport": sport_slug})
+    if isinstance(data, list):
+        _odds_cache[f"events:{sport_slug}"] = (ahora, data)
+        return data
+    return []
+
+
+def _odds_evento(event_id):
+    """Mercados reales del evento, con cache. Autodetecta los bookmakers
+    permitidos por la cuenta si la seleccion inicial es rechazada (403)."""
+    ahora = time.time()
+    cached = _odds_cache.get(f"odds:{event_id}")
+    if cached and ahora - cached[0] < _ODDS_CACHE_TTL:
+        return cached[1]
+
+    global ODDS_BOOKMAKERS
+    books = ODDS_BOOKMAKERS
+    mercados = None
+
+    # Hasta 2 intentos: el 2º usa los bookmakers permitidos que reporte la API
+    for _ in range(2):
+        data = _odds_request("/odds", {"eventId": event_id, "bookmakers": books})
+        if data and data.get("__permitidos__"):
+            permitidos = [b for b in data["__permitidos__"] if b]
+            if permitidos:
+                books = ",".join(permitidos)
+                ODDS_BOOKMAKERS = books  # recordar para las siguientes llamadas
+                continue
+        if isinstance(data, dict):
+            for bookmaker in (data.get("bookmakers") or {}).values():
+                if isinstance(bookmaker, list) and bookmaker:
+                    mercados = bookmaker
+                    break
+        break
+
+    # Solo cacheamos resultados validos; los fallidos se reintentan
+    if mercados is not None:
+        _odds_cache[f"odds:{event_id}"] = (ahora, mercados)
+    return mercados
+
+
+def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
+    """Devuelve un texto con las cuotas reales (odds-api.io) del partido.
+
+    Matching difuso por nombre de equipos contra los eventos del deporte.
+    Devuelve "" si no hay coincidencia o no hay cuotas.
+    """
+    slug = ODDS_SPORT_SLUGS.get(sport)
+    if not slug:
+        return ""
+
+    eventos = _odds_eventos(slug)
+    nh, na = _norm_texto(home_name), _norm_texto(away_name)
+
+    def _coincide(a: str, b: str) -> bool:
+        a, b = _norm_texto(a), _norm_texto(b)
+        return bool(a) and bool(b) and (a == b or a in b or b in a)
+
+    evento = None
+    for e in eventos:
+        if e.get("status") not in ("pending", "live"):
+            continue
+        if _coincide(e.get("home", ""), home_name) and _coincide(
+            e.get("away", ""), away_name
+        ):
+            evento = e
+            break
+
+    if not evento:
+        return ""
+
+    mercados = _odds_evento(evento.get("id"))
+    if not mercados:
+        return ""
+
+    lineas = [f"CUOTAS REALES ({evento['home']} vs {evento['away']}, odds-api.io):"]
+    for m in mercados[:20]:
+        nombre = m.get("name", "?")
+        for o in m.get("odds", [])[:2]:
+            pares = [f"{k}={v}" for k, v in o.items() if v not in (None, "")]
+            lineas.append(f"- {nombre}: {', '.join(pares)}")
+    lineas.append(
+        "USA estas cuotas reales para calcular valor; la linea que elijas debe "
+        "respetar los minimos del catalogo."
+    )
+    return "\n".join(lineas)
 
 # ============================================================
 # MERCADOS DEFINIDOS POR DEPORTE (unico catalogo permitido)
@@ -187,11 +339,12 @@ REGLAS OBLIGATORIAS:
 7. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
 {
   "market": "<nombre del mercado del catalogo que elegiste (para validar)>",
-  "titulo": "<apuesta en lenguaje natural y corto para mostrar al usuario. Ejemplos: 'Corners de Club Brugge: Over 3.5', 'Total de corners del partido: Over 7.5', 'Ambos equipos marcan: SI', 'Hándicap asiatico Real Madrid -1.5', 'Total de puntos Lakers: Under 210.5'>",
+  "titulo": "<apuesta en lenguaje natural y corto para mostrar al usuario. Ejemplos: 'Corners de Club Brugge: Over 3.5', 'Total de corners del partido: Over 7.5', 'Ambos equipos marcan: SI', 'HÃ¡ndicap asiatico Real Madrid -1.5', 'Total de puntos Lakers: Under 210.5'>",
   "selection": "<seleccion concreta: equipo A/B, SI/NO, over/under X.X, etc>",
   "odds": <cuota decimal estimada o null>,
   "confidence": "<ALTA|MEDIA|BAJA>",
-  "rationale": "<1-2 frases del edge en espanol>"
+  "rationale": "<1-2 frases del edge en espanol>",
+  "stats": ["<dato corto 1 basado en los ultimos 5 partidos>", "<dato corto 2>", "<dato corto 3>", ...]
 }
 """
 
@@ -300,6 +453,54 @@ def _market_norm(market: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (market or "").lower())
 
 
+def _ultimos5(sport: str, event_id: str, home_name: str, away_name: str) -> dict:
+    """Ultimos 5 partidos reales (ESPN) de cada equipo del evento.
+
+    Devuelve {"away": ["G 2-1 vs X", ...], "home": [...]} con resultado
+    (G ganÃ³, P perdiÃ³, E empate), marcador y rival.
+    """
+    import sports
+
+    def _resultado(mi, mi_score, rival, rival_score):
+        if mi_score is None or rival_score is None:
+            return f"vs {rival} ({r.get('status', '')})"
+        try:
+            mi_s, ri_s = float(mi_score), float(rival_score)
+        except (TypeError, ValueError):
+            return f"vs {rival} ({r.get('status', '')})"
+        if mi_s > ri_s:
+            res = "G"
+        elif mi_s < ri_s:
+            res = "P"
+        else:
+            res = "E"
+        return f"{res} {mi_s:g}-{ri_s:g} vs {rival}"
+
+    salida = {"home": [], "away": []}
+    try:
+        detail = sports.get_game_detail(sport, event_id)
+    except Exception:
+        return salida
+
+    for lado, nombre in (("home", home_name), ("away", away_name)):
+        equipo = next(
+            (t for t in detail.get("teams", []) if t.get("name") == nombre), None
+        )
+        if not equipo:
+            continue
+        for r in (equipo.get("recent_games") or [])[:5]:
+            a = r.get("away") or {}
+            h = r.get("home") or {}
+            if (a.get("name") or "") == nombre:
+                fila = _resultado(nombre, a.get("score"), h.get("name", "?"), h.get("score"))
+            elif (h.get("name") or "") == nombre:
+                fila = _resultado(nombre, h.get("score"), a.get("name", "?"), a.get("score"))
+            else:
+                continue
+            salida[lado].append(fila)
+    return salida
+
+
 def generar_picks_dia(max_partidos: int = 40) -> dict:
     """Genera picks automaticos para los partidos de hoy.
 
@@ -327,21 +528,40 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             f"Deporte: {label}\nFecha/hora: {p['date']}\n"
         )
 
-        cuotas = p.get("odds") or {}
-        if cuotas.get("details") or cuotas.get("over_under"):
-            mensaje += (
-                "Cuotas REALES de ESPN: "
-                f"linea={cuotas.get('details') or 'N/A'}, "
-                f"ML local={cuotas.get('home_odds') or 'N/A'}, "
-                f"ML visitante={cuotas.get('away_odds') or 'N/A'}, "
-                f"total de la casa={cuotas.get('over_under') or 'N/A'}. "
-                "BASATE en estas cuotas reales para calcular valor; la linea que "
-                "elijas debe respetar los minimos del catalogo.\n"
-            )
+        # Cuotas reales: primero odds-api.io; si no hay, ESPN; si no, estima
+        cuotas_texto = _cuotas_reales(p["sport"], p["home_name"], p["away_name"])
+        if cuotas_texto:
+            mensaje += cuotas_texto + "\n"
         else:
+            cuotas = p.get("odds") or {}
+            if cuotas.get("details") or cuotas.get("over_under"):
+                mensaje += (
+                    "Cuotas REALES de ESPN: "
+                    f"linea={cuotas.get('details') or 'N/A'}, "
+                    f"ML local={cuotas.get('home_odds') or 'N/A'}, "
+                    f"ML visitante={cuotas.get('away_odds') or 'N/A'}, "
+                    f"total de la casa={cuotas.get('over_under') or 'N/A'}. "
+                    "BASATE en estas cuotas reales para calcular valor; la linea que "
+                    "elijas debe respetar los minimos del catalogo.\n"
+                )
+            else:
+                mensaje += (
+                    "No hay cuotas reales disponibles para este partido: estima la "
+                    "cuota y respetando los minimos del catalogo.\n"
+                )
+
+        # Ultimos 5 partidos reales de cada equipo (ESPN) para dar contexto
+        recientes = _ultimos5(p["sport"], p["event_id"], p["home_name"], p["away_name"])
+        if recientes.get("away") or recientes.get("home"):
             mensaje += (
-                "No hay cuotas reales disponibles para este partido: estima la "
-                "cuota y respetando los minimos del catalogo.\n"
+                f"\nULTIMOS 5 PARTIDOS REALES (ESPN) de {p['away_name']}: "
+                f"{'; '.join(recientes.get('away') or ['sin datos'])}\n"
+                f"ULTIMOS 5 PARTIDOS REALES (ESPN) de {p['home_name']}: "
+                f"{'; '.join(recientes.get('home') or ['sin datos'])}\n"
+                "Analiza esas tendencias y en el campo 'stats' devuelve de 3 a 5 "
+                "datos cortos (una linea cada uno) que sustenten ESTE pick, basados "
+                "UNICAMENTE en esos partidos reales. Ej: 'Gano 4 de sus ultimos 5', "
+                "'Marco en los ultimos 3 partidos', '2 de 3 con BTTS'.\n"
             )
 
         mensaje += (
@@ -385,6 +605,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             home_logo=p["home_logo"],
             away_logo=p["away_logo"],
             titulo=str(pick.get("titulo") or "").strip() or str(pick.get("selection", "")),
+            stats=json.dumps(
+                [str(s) for s in (pick.get("stats") or [])[:5]],
+                ensure_ascii=False,
+            ) if isinstance(pick.get("stats"), list) and pick.get("stats") else None,
         )
         if creado:
             generados += 1
@@ -424,7 +648,7 @@ def _resolver_pick_con_ia(pick: dict):
         f"Pick realizado: mercado '{pick['market']}' - seleccion '{pick['selection']}'.\n"
         f"Partido: {pick['event_name']} (deporte {pick.get('sport_label', '')}).\n"
         f"Resultado final: {marcador}.\n\n"
-        f"Con ese resultado final, ¿el pick fue ACIERTO o FALLO?\n"
+        f"Con ese resultado final, Â¿el pick fue ACIERTO o FALLO?\n"
         f"Responde SOLO una palabra: ACIERTO o FALLO. Si el mercado no se puede "
         f"determinar con ese marcador, responde INDETERMINADO."
     )

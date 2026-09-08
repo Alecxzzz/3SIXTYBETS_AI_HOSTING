@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
@@ -208,6 +209,7 @@ def init_db():
             odds decimal(10, 2) null,
             confidence varchar(10) null,
             rationale text null,
+            stats_ultimos5 text null,
             model varchar(40) null,
             pick_date date not null,
             result varchar(20) not null default 'PENDIENTE',
@@ -222,7 +224,7 @@ def init_db():
     for statement in statements:
         run_query(statement)
 
-    # Migracion ligera: columnas de logos/nombres para instalaciones previas.
+    # Migracion ligera: columnas para instalaciones previas.
     for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo"):
         exists = run_query(
             """
@@ -234,6 +236,16 @@ def init_db():
         )
         if exists and not exists.get("cnt"):
             run_query(f"alter table ai_picks add column {column} varchar(400) null")
+
+    stats_col = run_query(
+        """
+        select count(*) as cnt from information_schema.columns
+        where table_schema = database() and table_name = 'ai_picks' and column_name = 'stats_ultimos5'
+        """,
+        fetchone=True,
+    )
+    if stats_col and not stats_col.get("cnt"):
+        run_query("alter table ai_picks add column stats_ultimos5 text null")
 
     ensure_admin_user()
 
@@ -847,6 +859,13 @@ def delete_channel(channel_id):
 # ==============================
 
 def public_ai_pick(row):
+    stats_raw = row.get("stats_ultimos5")
+    try:
+        stats = json.loads(stats_raw) if stats_raw else []
+        if not isinstance(stats, list):
+            stats = []
+    except (ValueError, TypeError):
+        stats = []
     return {
         "id": row["id"],
         "sport": row["sport"],
@@ -861,6 +880,7 @@ def public_ai_pick(row):
         "market": row.get("market"),
         "titulo": row.get("titulo"),
         "selection": row.get("selection"),
+        "stats": stats,
         "odds": float(row["odds"]) if row.get("odds") is not None else None,
         "confidence": row.get("confidence"),
         "rationale": row.get("rationale"),
@@ -875,20 +895,20 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
                    home_name=None, away_name=None, home_logo=None, away_logo=None,
-                   titulo=None):
+                   titulo=None, stats=None):
     pick_id = secrets.token_urlsafe(8)
     ok = run_query(
         """
         insert into ai_picks
         (id, sport, sport_label, event_id, event_name, home_name, away_name,
          home_logo, away_logo, event_date, market, titulo,
-         selection, odds, confidence, rationale, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+         selection, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
         (
             pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
             home_logo, away_logo, event_date, market, titulo,
-            selection, odds, confidence, rationale, model,
+            selection, odds, confidence, rationale, stats, model,
             now_utc().date(), now_utc(),
         ),
     )
