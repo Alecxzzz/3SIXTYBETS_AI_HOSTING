@@ -43,6 +43,11 @@ ODDS_SPORT_SLUGS = {
 
 _odds_cache = {}  # clave -> (timestamp, data)
 _ODDS_CACHE_TTL = 600  # 10 min (respeta el rate limit de 100 req/hora)
+_odds_bloqueado_hasta = 0  # backoff cuando la API responde 429
+
+
+def _odds_bloqueado():
+    return time.time() < _odds_bloqueado_hasta
 
 
 def _norm_texto(s: str) -> str:
@@ -56,6 +61,8 @@ def _norm_texto(s: str) -> str:
 
 
 def _odds_request(path: str, params: dict):
+    if _odds_bloqueado():
+        return None
     try:
         import requests
 
@@ -63,6 +70,11 @@ def _odds_request(path: str, params: dict):
         r = requests.get(f"{ODDS_API_BASE}{path}", params=params, timeout=20)
         if r.status_code != 200:
             print(f"[Dashboard] odds-api.io {path} -> {r.status_code}: {r.text[:150]}")
+            # 429 (limite diario/horario): pausar 15 min para no quemar cuota
+            if r.status_code == 429:
+                global _odds_bloqueado_hasta
+                _odds_bloqueado_hasta = time.time() + 900
+                return None
             # 403 de bookmakers: devolver los permitidos por la cuenta
             if r.status_code == 403 and "Allowed:" in r.text:
                 permitidos = r.text.split("Allowed:", 1)[1]
@@ -90,6 +102,8 @@ def _odds_eventos(sport_slug: str):
     if isinstance(data, list):
         _odds_cache[f"events:{sport_slug}"] = (ahora, data)
         return data
+    # Respuesta vacia/fallida: cache corto para no machacar la API
+    _odds_cache[f"events:{sport_slug}"] = (ahora - _ODDS_CACHE_TTL + 60, [])
     return []
 
 
@@ -841,6 +855,40 @@ def _detalle_resolucion(pick: dict):
     return sports.get_game_detail(sport, eid)
 
 
+def _detalle_desde_oddsapi(pick: dict):
+    """Fallback: marcador final desde odds-api.io (eventos settled incluyen scores).
+
+    Permite resolver picks de partidos que ya no aparecen en ESPN.
+    """
+    slug = ODDS_SPORT_SLUGS.get(pick["sport"])
+    if not slug:
+        return None
+
+    eventos = _odds_eventos(slug)
+
+    def _coincide(a: str, b: str) -> bool:
+        a, b = _norm_texto(a), _norm_texto(b)
+        return bool(a) and bool(b) and (a == b or a in b or b in a)
+
+    for e in eventos:
+        if e.get("status") != "settled":
+            continue
+        scores = e.get("scores") or {}
+        if scores.get("home") is None or scores.get("away") is None:
+            continue
+        if _coincide(e.get("home", ""), pick.get("homeName") or "") and _coincide(
+            e.get("away", ""), pick.get("awayName") or ""
+        ):
+            return {
+                "state": "post",
+                "teams": [
+                    {"name": e["home"], "score": scores["home"], "homeAway": "home"},
+                    {"name": e["away"], "score": scores["away"], "homeAway": "away"},
+                ],
+            }
+    return None
+
+
 def resolver_picks_finalizados() -> dict:
     """Resuelve los picks pendientes cuyos partidos ya terminaron.
 
@@ -865,6 +913,9 @@ def resolver_picks_finalizados() -> dict:
 
         try:
             detail = _detalle_resolucion(pick)
+            # Fallback: marcador final desde odds-api.io si ESPN no lo tiene
+            if not detail or detail.get("state") not in ("post", "in"):
+                detail = _detalle_desde_oddsapi(pick) or detail
         except Exception:
             continue
 
