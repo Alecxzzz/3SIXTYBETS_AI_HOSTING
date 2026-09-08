@@ -385,6 +385,7 @@ def _partidos_hoy():
                     "away_logo": away.get("logo"),
                     "date": g.get("date", ""),
                     "odds": g.get("odds"),
+                    "league": g.get("league_code"),
                 })
         except Exception as exc:
             print(f"[Dashboard] Error trayendo partidos {sport}: {exc}")
@@ -605,6 +606,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             home_logo=p["home_logo"],
             away_logo=p["away_logo"],
             titulo=str(pick.get("titulo") or "").strip() or str(pick.get("selection", "")),
+            league=p.get("league"),
             stats=json.dumps(
                 [str(s) for s in (pick.get("stats") or [])[:5]],
                 ensure_ascii=False,
@@ -633,7 +635,7 @@ def _resolver_pick_con_ia(pick: dict):
     import sports
 
     try:
-        detail = sports.get_game_detail(pick["sport"], pick["event_id"])
+        detail = sports.get_game_detail(pick["sport"], pick["eventId"])
     except Exception:
         return None
 
@@ -645,8 +647,8 @@ def _resolver_pick_con_ia(pick: dict):
         f"{t.get('name', '?')} {t.get('score', '-')}" for t in teams
     )
     mensaje = (
-        f"Pick realizado: mercado '{pick['market']}' - seleccion '{pick['selection']}'.\n"
-        f"Partido: {pick['event_name']} (deporte {pick.get('sport_label', '')}).\n"
+        f"Pick realizado: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
+        f"Partido: {pick.get('eventName')} (deporte {pick.get('sportLabel', '')}).\n"
         f"Resultado final: {marcador}.\n\n"
         f"Con ese resultado final, Â¿el pick fue ACIERTO o FALLO?\n"
         f"Responde SOLO una palabra: ACIERTO o FALLO. Si el mercado no se puede "
@@ -688,17 +690,192 @@ def backfill_picks_metadata() -> int:
             partido["away_name"],
             partido["home_logo"],
             partido["away_logo"],
+            partido.get("league"),
         ):
             reparados += 1
     return reparados
 
 
+def _resolver_deterministico(pick: dict, detail: dict):
+    """Resuelve el pick con reglas directas sobre el marcador final (sin IA).
+
+    Cubre los mercados determinables: ganador, BTTS, over/under totales,
+    doble oportunidad, sin empate, equipo total de goles. Devuelve
+    ACIERTO/FALLO o None si el mercado no es determinable con el marcador.
+    """
+    teams = detail.get("teams") or []
+    if len(teams) < 2:
+        return None
+
+    home = next((t for t in teams if t.get("homeAway") == "home"), teams[0])
+    away = next((t for t in teams if t.get("homeAway") == "away"), teams[1])
+    try:
+        hs = float(home.get("score"))
+        as_ = float(away.get("score"))
+    except (TypeError, ValueError):
+        return None
+
+    total = hs + as_
+    market = (pick.get("market") or "").lower()
+    sel = (pick.get("selection") or "").lower()
+    titulo = (pick.get("titulo") or "").lower()
+    texto = f"{market} {titulo} {sel}"
+
+    home_name, away_name = (home.get("name") or "").lower(), (away.get("name") or "").lower()
+
+    def _equipo_de(sel_txt: str):
+        if home_name and home_name in sel_txt:
+            return home
+        if away_name and away_name in sel_txt:
+            return away
+        return None
+
+    # ---- Ganador / ML / "X gana" ----
+    if any(k in texto for k in ("ganador", " gana", "moneyline", " ml", "winner")) and \
+       "primera mitad" not in texto and "prorroga" not in texto and "1er" not in texto:
+        if hs == as_:
+            return "FALLO"  # empate: solo gana quien apostó empate, que no damos
+        ganador = home if hs > as_ else away
+        elegido = _equipo_de(sel + " " + titulo)
+        if elegido is None:
+            return None
+        return "ACIERTO" if elegido.get("name") == ganador.get("name") else "FALLO"
+
+    # ---- Ambos equipos marcan / BTTS ----
+    if "ambos" in texto and ("marcan" in texto or "anotan" in texto) or "btts" in texto:
+        si = (hs > 0) and (as_ > 0)
+        eligio_si = not sel.strip().startswith("no")
+        return "ACIERTO" if si == eligio_si else "FALLO"
+
+    # ---- Apuesta sin empate (Draw No Bet) ----
+    if "sin empate" in texto:
+        if hs == as_:
+            return "FALLO"
+        elegido = _equipo_de(sel + " " + titulo)
+        if elegido is None:
+            return None
+        ganador = home if hs > as_ else away
+        return "ACIERTO" if elegido.get("name") == ganador.get("name") else "FALLO"
+
+    # ---- Doble oportunidad ----
+    if "doble oportunidad" in texto or "doble oport" in texto:
+        codigo = sel.replace(" ", "")
+        if hs == as_:
+            return "ACIERTO" if codigo in ("1x", "x2") else "FALLO"
+        gana_local = hs > as_
+        if codigo == "1x":
+            return "ACIERTO" if gana_local else "FALLO"
+        if codigo == "x2":
+            return "ACIERTO" if not gana_local else "FALLO"
+        if codigo == "12":
+            return "ACIERTO"
+        return None
+
+    # ---- Over/Under de goles/puntos/corners (total o de un equipo) ----
+    match = re.search(
+        r"(over|m[áa]s de|under|menos de)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto
+    )
+    if match:
+        tipo = match.group(1).lower()
+        try:
+            linea = float(match.group(2).replace(",", "."))
+        except ValueError:
+            return None
+        es_over = tipo.startswith(("over", "m"))
+        # Si es un total de un equipo concreto, usar su marcador
+        if ("equipo" in texto or "total de goles" in texto or "totales" in texto) and \
+           "prorroga" not in texto:
+            equipo = _equipo_de(sel + " " + titulo)
+            if equipo is not None:
+                try:
+                    valor = float(equipo.get("score"))
+                except (TypeError, ValueError):
+                    return None
+                return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
+                       ("ACIERTO" if valor < linea else "FALLO")
+        return ("ACIERTO" if total > linea else "FALLO") if es_over else \
+               ("ACIERTO" if total < linea else "FALLO")
+
+    return None
+
+
+def _detalle_resolucion(pick: dict):
+    """Obtiene el detalle del partido para resolver el pick.
+
+    A diferencia de get_game_detail (que para soccer solo busca en el
+    scoreboard de hoy), usa la liga guardada en el pick para consultar el
+    summary de ESPN aunque el partido sea de dias anteriores.
+    """
+    import sports
+
+    sport = pick["sport"]
+    eid = pick["eventId"]
+
+    # Futbol: summary con la liga guardada
+    if sport == "soccer":
+        league = pick.get("league")
+        if not league:
+            return sports.get_game_detail(sport, eid)
+        try:
+            import requests as http_requests
+
+            from sports import ESPN_BASE, _parse_number
+
+            url = f"{ESPN_BASE}/soccer/{league}/summary?event={eid}"
+            data = http_requests.get(url, timeout=20).json()
+            header = data.get("header") or {}
+            comps = (header.get("competitions") or [{}])[0]
+            state = ((comps.get("status") or {}).get("type") or {}).get("state")
+            teams = []
+            for c in comps.get("competitors", []):
+                teams.append({
+                    "name": (c.get("team") or {}).get("displayName", "?"),
+                    "score": _parse_number(c.get("score")),
+                    "homeAway": c.get("homeAway"),
+                })
+            return {"state": state, "teams": teams}
+        except Exception:
+            return sports.get_game_detail(sport, eid)
+
+    # Resto de deportes: get_game_detail funciona directo
+    return sports.get_game_detail(sport, eid)
+
+
 def resolver_picks_finalizados() -> dict:
-    """Resuelve los picks pendientes cuyos partidos ya terminaron."""
+    """Resuelve los picks pendientes cuyos partidos ya terminaron.
+
+    Primero intenta resolucion deterministica con el marcador final; si el
+    mercado no es determinable, pregunta a la IA.
+    """
+    import sports
+
     pendientes = db.list_picks_pendientes() or []
     resueltos = 0
     for pick in pendientes:
-        resultado = _resolver_pick_con_ia(pick)
+        # Expirar picks antiguos que ya no se pueden resolver (sin liga,
+        # evento fuera de ESPN, etc.) para no bloquear la cola de pendientes
+        try:
+            creado = datetime.fromisoformat(pick.get("createdAt") or "")
+            horas = (datetime.now(timezone.utc).replace(tzinfo=None) - creado).total_seconds() / 3600
+        except (ValueError, TypeError):
+            horas = 0
+        if horas > 24:
+            db.update_pick_result(pick["id"], "ANULADO")
+            continue
+
+        try:
+            detail = _detalle_resolucion(pick)
+        except Exception:
+            continue
+
+        if detail.get("state") != "post" or len(detail.get("teams") or []) < 2:
+            continue
+
+        # 1) Reglas directas con el marcador
+        resultado = _resolver_deterministico(pick, detail)
+        # 2) IA solo si el mercado no es determinable con el marcador
+        if resultado is None:
+            resultado = _resolver_pick_con_ia(pick)
         if resultado:
             db.update_pick_result(pick["id"], resultado)
             resueltos += 1

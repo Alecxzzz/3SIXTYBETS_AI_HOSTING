@@ -205,6 +205,7 @@ def init_db():
             event_date varchar(60) null,
             market varchar(200) not null,
             titulo varchar(200) null,
+            league varchar(40) null,
             selection varchar(200) not null,
             odds decimal(10, 2) null,
             confidence varchar(10) null,
@@ -225,7 +226,7 @@ def init_db():
         run_query(statement)
 
     # Migracion ligera: columnas para instalaciones previas.
-    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo"):
+    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league"):
         exists = run_query(
             """
             select count(*) as cnt from information_schema.columns
@@ -879,6 +880,7 @@ def public_ai_pick(row):
         "eventDate": row.get("event_date"),
         "market": row.get("market"),
         "titulo": row.get("titulo"),
+        "league": row.get("league"),
         "selection": row.get("selection"),
         "stats": stats,
         "odds": float(row["odds"]) if row.get("odds") is not None else None,
@@ -907,7 +909,7 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
         """,
         (
             pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
-            home_logo, away_logo, event_date, market, titulo,
+            home_logo, away_logo, event_date, market, titulo, league,
             selection, odds, confidence, rationale, stats, model,
             now_utc().date(), now_utc(),
         ),
@@ -937,7 +939,7 @@ def list_picks_hoy():
 
 def list_picks_pendientes():
     rows = run_query(
-        "select * from ai_picks where result = 'PENDIENTE' order by created_at asc limit 20"
+        "select * from ai_picks where result = 'PENDIENTE' order by created_at asc limit 40"
     )
     return [public_ai_pick(r) for r in (rows or [])]
 
@@ -951,7 +953,7 @@ def picks_sin_equipo():
 
 
 def update_pick_result(pick_id, result):
-    if result not in ("ACIERTO", "FALLO"):
+    if result not in ("ACIERTO", "FALLO", "ANULADO"):
         return False
     return bool(run_query(
         "update ai_picks set result = %s, updated_at = %s where id = %s",
@@ -959,14 +961,14 @@ def update_pick_result(pick_id, result):
     ))
 
 
-def update_pick_metadata(pick_id, home_name, away_name, home_logo, away_logo):
+def update_pick_metadata(pick_id, home_name, away_name, home_logo, away_logo, league=None):
     return bool(run_query(
         """
         update ai_picks
-        set home_name = %s, away_name = %s, home_logo = %s, away_logo = %s
+        set home_name = %s, away_name = %s, home_logo = %s, away_logo = %s, league = %s
         where id = %s
         """,
-        (home_name, away_name, home_logo, away_logo, pick_id),
+        (home_name, away_name, home_logo, away_logo, league, pick_id),
     ))
 
 
