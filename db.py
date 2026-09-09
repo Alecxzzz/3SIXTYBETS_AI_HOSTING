@@ -897,15 +897,15 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
                    home_name=None, away_name=None, home_logo=None, away_logo=None,
-                   titulo=None, stats=None):
+                   titulo=None, league=None, stats=None):
     pick_id = secrets.token_urlsafe(8)
     ok = run_query(
         """
         insert into ai_picks
         (id, sport, sport_label, event_id, event_name, home_name, away_name,
-         home_logo, away_logo, event_date, market, titulo,
+         home_logo, away_logo, event_date, market, titulo, league,
          selection, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
         (
             pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
@@ -921,9 +921,14 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
 
 
 def pick_existe(event_id):
+    """True si el evento ya tiene un pick generado HOY.
+
+    Sin el filtro de fecha, picks de dias anteriores con el mismo event_id
+    bloqueaban la generacion de picks nuevos para siempre.
+    """
     row = run_query(
-        "select id from ai_picks where event_id = %s limit 1",
-        (event_id,),
+        "select id from ai_picks where event_id = %s and pick_date = %s limit 1",
+        (event_id, now_utc().date()),
         fetchone=True,
     )
     return bool(row)
