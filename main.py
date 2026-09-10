@@ -246,11 +246,17 @@ def listar_modelos():
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
     modelo_id = (data.modelo or "you").strip().lower()
-    # Contexto ESPN (estadisticas reales) compartido por las dos IAs
-    try:
-        ctx_espn = contexto_espn(data.mensaje)
-    except Exception:
-        ctx_espn = ""
+    # Contexto ESPN (estadisticas reales) compartido por las dos IAs.
+    # Solo se busca cuando el mensaje parece de un partido: evita escanear
+    # todos los scoreboards de ESPN en saludos/preguntas generales.
+    msg_norm = (data.mensaje or "").strip().lower()
+    parece_partido = "vs" in msg_norm or len(msg_norm.split()) >= 3
+    ctx_espn = ""
+    if parece_partido:
+        try:
+            ctx_espn = contexto_espn(data.mensaje)
+        except Exception:
+            ctx_espn = ""
     bloque_espn = (
         f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
         if ctx_espn else ""
@@ -544,7 +550,11 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         respuesta = respuesta.replace("*", "").replace("#", "")
     if fallo_365:
         if respuesta:
-            return f"(365AI saturada, respondido con Demian tipster)\n\n{respuesta}"
+            return (
+                f"{respuesta}\n\n"
+                "(Nota: 365AI estaba saturada en este momento, el analisis fue "
+                "respondido por Demian tipster)."
+            )
         return (
             "365AI esta saturada y Demian tampoco pudo responder en este momento. "
             "Intenta de nuevo en unos segundos."
