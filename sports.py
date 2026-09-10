@@ -329,6 +329,67 @@ def _parse_team(team: dict) -> dict:
     }
 
 
+def get_team_schedule_results(sport: str, league: str | None, team_id, limit: int = 10) -> list:
+    """Ultimos partidos finalizados de un equipo via /teams/{id}/schedule.
+
+    Devuelve la temporada completa del equipo en su competicion (los pasados
+    con marcador), normalizada como [{away: {name, score}, home: {...}}, ...]
+    ordenada de mas antigua a mas reciente. Lista vacia si no hay datos.
+    """
+    path, _label = SPORTS[sport]
+    if not team_id:
+        return []
+    es_soccer = path.startswith("soccer")
+    if es_soccer and not league:
+        return []
+    url = (
+        f"{ESPN_BASE}/{path}/{league}/teams/{team_id}/schedule"
+        if es_soccer
+        else f"{ESPN_BASE}/{path}/teams/{team_id}/schedule"
+    )
+    cache_key = f"team_sched:{sport}:{league or ''}:{team_id}:{limit}"
+    cached = _cache_get(cache_key, ttl=1800)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _espn_get(url, timeout=12)
+        data = resp.json()
+    except Exception:
+        _cache_set(cache_key, [])
+        return []
+
+    def _score(valor):
+        if isinstance(valor, dict):
+            valor = valor.get("value")
+        if isinstance(valor, list):
+            valor = valor[0].get("value") if valor else None
+        return _parse_number(valor)
+
+    eventos = []
+    for ev in data.get("events") or []:
+        comp0 = (ev.get("competitions") or [{}])[0]
+        estado = ((comp0.get("status") or {}).get("type") or {}).get("state", "")
+        if estado != "post":
+            continue
+        norm = {"date": ev.get("date", "")}
+        for c in comp0.get("competitors", []):
+            lado = c.get("homeAway")
+            if lado not in ("home", "away"):
+                continue
+            norm[lado] = {
+                "name": (c.get("team") or {}).get("displayName", "?"),
+                "score": _score(c.get("score")),
+            }
+        if "home" in norm and "away" in norm:
+            eventos.append(norm)
+
+    eventos.sort(key=lambda e: e.get("date", ""))
+    eventos = eventos[-limit:]
+    _cache_set(cache_key, eventos)
+    return eventos
+
+
 def get_team_recent_events(sport: str, league: str | None, team_id, limit: int = 6) -> list:
     """Ultimos eventos finalizados de un equipo, via scoreboard por rango de fechas.
 

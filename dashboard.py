@@ -93,7 +93,7 @@ ODDS_API_KEY = (
 ODDS_API_BASE = "https://api.odds-api.io/v3"
 # Plan free: solo 2 bookmakers permitidos por la cuenta: Bet365 y Winpot MX.
 # (1xbet/Stake daban 403 "Access denied" y por eso faltaban cuotas reales.)
-ODDS_BOOKMAKERS = "Bet365"
+ODDS_BOOKMAKERS = os.getenv("ODDS_BOOKMAKERS", "Bet365")
 # Mapeo de nuestros deportes a los slugs de odds-api.io
 ODDS_SPORT_SLUGS = {
     "soccer": "football",
@@ -203,9 +203,32 @@ def _odds_evento(event_id):
     return mercados
 
 
-def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
-    """Devuelve un texto con las cuotas reales (odds-api.io) del partido.
+def _cuotas_sportradar(sport: str, home_name: str, away_name: str) -> str:
+    """Fallback: cuotas reales desde Sportradar Odds Comparison (trial).
 
+    Solo soccer. Devuelve "" si la key es invalida o no hay match.
+    """
+    try:
+        from engine import sportradar
+
+        fecha = _hora_nicaragua().date().isoformat()
+        evento, mercados = sportradar.cuotas_partido(sport, home_name, away_name, fecha)
+        if not evento or not mercados:
+            # Segundo intento sin filtro de fecha (por diferencias de zona horaria)
+            evento, mercados = sportradar.cuotas_partido(sport, home_name, away_name)
+        if not evento or not mercados:
+            return ""
+        return sportradar.formato_cuotas(evento, mercados)
+    except Exception as exc:
+        print(f"[Dashboard] sportradar cuotas error: {exc}")
+        return ""
+
+
+def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
+    """Devuelve un texto con las cuotas reales del partido.
+
+    Fuente primaria: odds-api.io (Bet365). Fallback: Sportradar
+    Odds Comparison (cuotas de multiples bookmakers).
     Matching difuso por nombre de equipos contra los eventos del deporte.
     Devuelve "" si no hay coincidencia o no hay cuotas.
     """
@@ -231,11 +254,11 @@ def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
             break
 
     if not evento:
-        return ""
+        return _cuotas_sportradar(sport, home_name, away_name)
 
     mercados = _odds_evento(evento.get("id"))
     if not mercados:
-        return ""
+        return _cuotas_sportradar(sport, home_name, away_name)
 
     lineas = [f"CUOTAS REALES ({evento['home']} vs {evento['away']}, odds-api.io):"]
     for m in mercados[:20]:
@@ -542,54 +565,179 @@ def _market_norm(market: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (market or "").lower())
 
 
-def _ultimos5(sport: str, event_id: str, home_name: str, away_name: str) -> dict:
-    """Ultimos 5 partidos reales (ESPN) de cada equipo del evento.
+def _analisis_previo(sport: str, event_id: str, home_name: str, away_name: str, league=None) -> str:
+    """Analisis previo REAL (ESPN) para el prompt del pick.
 
-    Devuelve {"away": ["G 2-1 vs X", ...], "home": [...]} con resultado
-    (G ganÃ³, P perdiÃ³, E empate), marcador y rival.
+    - Ultimos 10 partidos de cada equipo (resultado, marcador, rival, L/V).
+    - Impacto local/visitante: record y promedios como local vs visitante.
+    - H2H: ultimos enfrentamientos directos entre los dos equipos.
+    Si el summary de ESPN trae pocos partidos recientes (pasa en futbol),
+    se completa con el scoreboard de los ultimos 45 dias del equipo.
     """
     import sports
 
-    def _resultado(mi, mi_score, rival, rival_score):
-        if mi_score is None or rival_score is None:
-            return f"vs {rival} ({r.get('status', '')})"
-        try:
-            mi_s, ri_s = float(mi_score), float(rival_score)
-        except (TypeError, ValueError):
-            return f"vs {rival} ({r.get('status', '')})"
-        if mi_s > ri_s:
-            res = "G"
-        elif mi_s < ri_s:
-            res = "P"
-        else:
-            res = "E"
-        return f"{res} {mi_s:g}-{ri_s:g} vs {rival}"
+    def _normalizar(ev_raw: dict, nombre: str):
+        """Convierte un evento crudo de ESPN al formato {away, home}."""
+        comp0 = (ev_raw.get("competitions") or [{}])[0]
+        salida = {}
+        for c in comp0.get("competitors", []):
+            lado = c.get("homeAway")
+            if lado not in ("home", "away"):
+                continue
+            t = c.get("team", {})
+            salida[lado] = {
+                "name": t.get("displayName", "?"),
+                "score": sports._parse_number(c.get("score")),
+            }
+        if "home" in salida and "away" in salida:
+            return salida
+        return None
 
-    salida = {"home": [], "away": []}
     try:
         detail = sports.get_game_detail(sport, event_id)
     except Exception:
-        return salida
+        detail = {}
+    if not detail:
+        return ""
 
-    for lado, nombre in (("home", home_name), ("away", away_name)):
+    lineas = []
+    for nombre in (away_name, home_name):
         equipo = next(
             (t for t in detail.get("teams", []) if t.get("name") == nombre), None
         )
         if not equipo:
             continue
-        for r in (equipo.get("recent_games") or [])[:5]:
+
+        recientes = list(equipo.get("recent_games") or [])
+
+        # Complemento 1: scoreboard de 45 dias para llegar a 10 partidos
+        if len(recientes) < 10:
+            try:
+                raws = sports.get_team_recent_events(
+                    sport, league, equipo.get("id"), limit=10
+                )
+                extra = []
+                vistos = {
+                    (r.get("away", {}).get("name"), r.get("home", {}).get("name"))
+                    for r in recientes
+                }
+                for ev in reversed(raws):  # mas recientes primero
+                    norm = _normalizar(ev, nombre)
+                    if not norm:
+                        continue
+                    clave = (norm["away"].get("name"), norm["home"].get("name"))
+                    if clave in vistos:
+                        continue
+                    vistos.add(clave)
+                    extra.append(norm)
+                    if len(recientes) + len(extra) >= 10:
+                        break
+                recientes.extend(extra)
+            except Exception:
+                pass
+
+        # Complemento 2: schedule de temporada (futbol suele necesitarlo)
+        if len(recientes) < 10:
+            try:
+                previos = sports.get_team_schedule_results(
+                    sport, league, equipo.get("id"), limit=10
+                )
+                vistos = {
+                    (
+                        r.get("away", {}).get("name"),
+                        r.get("home", {}).get("name"),
+                        r.get("date", ""),
+                    )
+                    for r in recientes
+                }
+                ya = {
+                    (r.get("away", {}).get("name"), r.get("home", {}).get("name"))
+                    for r in recientes
+                    if not r.get("date")
+                }
+                for ev in reversed(previos):
+                    clave = (
+                        ev.get("away", {}).get("name"),
+                        ev.get("home", {}).get("name"),
+                        ev.get("date", ""),
+                    )
+                    if clave in vistos:
+                        continue
+                    par = (clave[0], clave[1])
+                    if par in ya:
+                        continue
+                    vistos.add(clave)
+                    ya.add(par)
+                    recientes.append(ev)
+                    if len(recientes) >= 10:
+                        break
+                # ordenar por fecha si esta disponible (mas recientes ultimo)
+                con_fecha = [r for r in recientes if r.get("date")]
+                sin_fecha = [r for r in recientes if not r.get("date")]
+                recientes = sin_fecha + con_fecha
+            except Exception:
+                pass
+
+        recientes = recientes[:10]
+        filas, g, e, p_ = [], 0, 0, 0
+        lg = le = lp = lf = lc = 0  # split como local
+        vg = ve = vp = vf = vc = 0  # split como visitante
+        for r in recientes:
             a = r.get("away") or {}
             h = r.get("home") or {}
-            if (a.get("name") or "") == nombre:
-                fila = _resultado(nombre, a.get("score"), h.get("name", "?"), h.get("score"))
-            elif (h.get("name") or "") == nombre:
-                fila = _resultado(nombre, h.get("score"), a.get("name", "?"), a.get("score"))
-            else:
+            es_local = (a.get("name") or "") != nombre
+            propio = (h if es_local else a).get("score")
+            rival_d = (a if es_local else h)
+            rival_s = rival_d.get("score")
+            rival = rival_d.get("name", "?")
+            if propio is None or rival_s is None:
                 continue
-            salida[lado].append(fila)
-    return salida
+            try:
+                pr, rs = float(propio), float(rival_s)
+            except (TypeError, ValueError):
+                continue
+            if pr > rs:
+                res, g = "G", g + 1
+            elif pr < rs:
+                res, p_ = "P", p_ + 1
+            else:
+                res, e = "E", e + 1
+            if es_local:
+                lg += res == "G"
+                lp += res == "P"
+                lf += pr
+                lc += rs
+            else:
+                vg += res == "G"
+                vp += res == "P"
+                vf += pr
+                vc += rs
+            filas.append(f"{res} {pr:g}-{rs:g} {'vs' if es_local else '@'} {rival}")
 
+        if not filas:
+            continue
+        n = len(filas)
+        lineas.append(f"{nombre} - ultimos {n} partidos: {'; '.join(filas)}")
+        lineas.append(
+            f"{nombre} total: {g}G-{e}E-{p_}P en {n} | "
+            f"COMO LOCAL: {lg}G-{le}E-{lp}P, {lf / n:.1f} gf, {lc / n:.1f} gc | "
+            f"COMO VISITANTE: {vg}G-{ve}E-{vp}P, {vf / n:.1f} gf, {vc / n:.1f} gc"
+        )
 
+    # H2H: ultimos enfrentamientos directos (ESPN)
+    h2h = (detail.get("head_to_head") or [])[:5]
+    if h2h:
+        filas = []
+        for m in h2h:
+            a, h = m.get("away") or {}, m.get("home") or {}
+            fecha = str(m.get("date") or "")[:10]
+            filas.append(
+                f"{fecha}: {h.get('name', '?')} {h.get('score', '?')}-{a.get('score', '?')} {a.get('name', '?')}"
+            )
+        lineas.append("H2H (enfrentamientos directos): " + "; ".join(filas))
+
+    return "\n".join(lineas)
+
 def generar_picks_dia(max_partidos: int = 40) -> dict:
     """Genera picks automaticos para los partidos de hoy.
 
@@ -641,18 +789,19 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
                     "cuota y respetando los minimos del catalogo.\n"
                 )
 
-        # Ultimos 5 partidos reales de cada equipo (ESPN) para dar contexto
-        recientes = _ultimos5(p["sport"], p["event_id"], p["home_name"], p["away_name"])
-        if recientes.get("away") or recientes.get("home"):
+        # Analisis previo REAL (ESPN): ultimos 10 + local/visitante + H2H
+        analisis = _analisis_previo(
+            p["sport"], p["event_id"], p["home_name"], p["away_name"], p.get("league")
+        )
+        if analisis:
             mensaje += (
-                f"\nULTIMOS 5 PARTIDOS REALES (ESPN) de {p['away_name']}: "
-                f"{'; '.join(recientes.get('away') or ['sin datos'])}\n"
-                f"ULTIMOS 5 PARTIDOS REALES (ESPN) de {p['home_name']}: "
-                f"{'; '.join(recientes.get('home') or ['sin datos'])}\n"
-                "Analiza esas tendencias y en el campo 'stats' devuelve de 3 a 5 "
-                "datos cortos (una linea cada uno) que sustenten ESTE pick, basados "
-                "UNICAMENTE en esos partidos reales. Ej: 'Gano 4 de sus ultimos 5', "
-                "'Marco en los ultimos 3 partidos', '2 de 3 con BTTS'.\n"
+                f"\nANALISIS PREVIO REAL (ESPN) de {p['away_name']} vs {p['home_name']}:\n"
+                f"{analisis}\n"
+                "Basate en estas tendencias reales. En el campo 'stats' devuelve de 4 a 6 "
+                "datos cortos (una linea cada uno) que cubran: forma reciente, el IMPACTO "
+                "de jugar de local o visitante para la apuesta elegida, y el H2H si esta "
+                "disponible. Ej: 'Gano 6 de sus ultimos 10', 'Como local: 4G-1P, promedio "
+                "2.5 goles a favor', 'H2H: gano los ultimos 2 enfrentamientos'.\n"
             )
 
         mensaje += (
