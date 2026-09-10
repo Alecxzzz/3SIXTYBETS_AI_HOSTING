@@ -46,7 +46,19 @@ GROQ_MODELS_URL = os.getenv("AI36_GROQ_MODELS_URL", "https://api.groq.com/openai
 ODDS_URL = os.getenv("AI36_ODDS_URL", "https://odds-api.io/api/v1/odds")
 
 MODELO_DEFAULT = os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b")
-MODELO_FALLBACK = os.getenv("AI36_GROQ_FALLBACK", "llama-3.3-70b-versatile")
+# Cadena de fallback con modelos REALES disponibles en la cuenta de Groq
+# (llama-3.3-70b-versatile fue deprecado y devolvia 404 -> timeouts).
+MODELO_FALLBACK = os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b")
+MODELOS_FALLBACK_CADENA = [
+    os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b"),
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "groq/compound-mini",
+]
+
+# Esfuerzo de razonamiento para modelos gpt-oss (low = respuestas ~40-50% mas rapidas).
+# Solo aplica a modelos "openai/gpt-oss-*": llama y demas NO soportan el parametro.
+REASONING_EFFORT = os.getenv("AI36_GROQ_REASONING_EFFORT", "low")
 
 MODELOS_PREFERIDOS = [
     os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
@@ -57,8 +69,8 @@ MAX_TOKENS = int(os.getenv("AI36_MAX_TOKENS", "2500"))
 MAX_CHARS_HERRAMIENTA = int(os.getenv("AI36_MAX_CHARS_HERRAMIENTA", "600"))
 MAX_CHARS_MENSAJES = int(os.getenv("AI36_MAX_CHARS_MENSAJES", "12000"))
 
-MAX_ITERACIONES = int(os.getenv("AI36_MAX_ITERACIONES", "6"))
-ITERACION_FORZAR_RESPUESTA = int(os.getenv("AI36_ITERACION_FORZAR", "4"))
+MAX_ITERACIONES = int(os.getenv("AI36_MAX_ITERACIONES", "4"))
+ITERACION_FORZAR_RESPUESTA = int(os.getenv("AI36_ITERACION_FORZAR", "2"))
 MAX_REINTENTOS = int(os.getenv("AI36_MAX_REINTENTOS", "6"))
 
 # Debug: cambiar a True para ver qué devuelve el modelo
@@ -314,6 +326,19 @@ def seleccionar_modelo():
     return MODELO_DEFAULT
 
 
+def _siguiente_modelo(actual: str):
+    """Siguiente modelo de la cadena de fallback (default -> fallbacks)."""
+    cadena = []
+    for m in [MODELO_DEFAULT] + MODELOS_FALLBACK_CADENA:
+        if m and m not in cadena:
+            cadena.append(m)
+    try:
+        idx = cadena.index(actual)
+    except ValueError:
+        return cadena[0]
+    return cadena[idx + 1] if idx + 1 < len(cadena) else None
+
+
 def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, modelo_actual=None, max_tokens=None):
     """Llama a Groq chat completions con reintentos, fallback de modelo y compactación."""
     modelo = modelo_actual or seleccionar_modelo()
@@ -325,6 +350,9 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
     if usar_tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    # Recortar razonamiento en modelos gpt-oss (~40-50% mas rapido, misma calidad)
+    if modelo.startswith("openai/gpt-oss"):
+        payload["reasoning_effort"] = REASONING_EFFORT
 
     ultimo_error = "Error desconocido"
 
@@ -380,6 +408,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             if modelo != MODELO_FALLBACK:
                 modelo = MODELO_FALLBACK
                 payload["model"] = modelo
+                payload.pop("reasoning_effort", None)  # llama no soporta reasoning_effort
                 if usar_tools:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
@@ -393,6 +422,29 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                 payload.pop("tool_choice", None)
                 usar_tools = False
                 time.sleep(2)
+                continue
+
+        # Modelo inexistente/deprecado (404 o model_not_found) -> saltar al
+        # siguiente de la cadena de fallback en vez de morir con None.
+        if response.status_code in (400, 404) and (
+            "model" in ultimo_error.lower()
+            or "decommission" in ultimo_error.lower()
+            or "not exist" in ultimo_error.lower()
+        ):
+            siguiente = _siguiente_modelo(modelo)
+            if siguiente and siguiente != modelo:
+                if DEBUG:
+                    print(f"[36AI] Modelo {modelo} no disponible. Cambiando a: {siguiente}")
+                modelo = siguiente
+                payload["model"] = modelo
+                if modelo.startswith("openai/gpt-oss"):
+                    payload["reasoning_effort"] = REASONING_EFFORT
+                else:
+                    payload.pop("reasoning_effort", None)
+                # Reponer herramientas: el nuevo modelo puede si soportarlas
+                if usar_tools and "tools" not in payload:
+                    payload["tools"] = tools
+                    payload["tool_choice"] = "auto"
                 continue
 
         if DEBUG:
@@ -486,7 +538,7 @@ def analizar_36ai(mensaje_usuario, system_prompt):
                     "content": resultado
                 })
 
-            time.sleep(1.5)
+            time.sleep(0.5)
             continue
 
         # Si estamos forzando respuesta pero el modelo devolvió tool_calls sin contenido,

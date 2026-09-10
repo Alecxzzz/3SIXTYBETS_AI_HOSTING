@@ -617,3 +617,14 @@ REGLA CRÍTICA DE FORMATO:
 - No uses asteriscos ni ningún markdown de formato.
 - Respuestas cortas y directas.
 """
+
+
+# ============================================================
+# ALIAS DE COMPATIBILIDAD
+# Los consumidores (main.py, ai/ia36.py) importan con los nombres
+# "construir_prompt_*"; las funciones reales son las "construir_walter_*".
+# ============================================================
+construir_prompt_sistema = construir_walter_sistema
+construir_prompt_usuario = construir_walter_usuario
+construir_prompt_sistema_36ai = construir_walter_sistema_36ai
+construir_prompt_conversacional = construir_walter_conversacional
