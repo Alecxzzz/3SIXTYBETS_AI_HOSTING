@@ -69,7 +69,7 @@ def get(path: str, ttl: int = 900):
         try:
             r = requests.get(
                 f"{base}/{path}",
-                params={"api_key": API_KEY},
+                headers={"x-api-key": API_KEY, "accept": "application/json"},
                 timeout=20,
             )
             if r.status_code == 200:
