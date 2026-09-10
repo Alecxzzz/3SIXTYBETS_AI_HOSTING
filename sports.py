@@ -8,7 +8,7 @@ mas de lo necesario (ESPN refresca sus marcadores cada ~15s).
 
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests as http_requests
 
@@ -185,11 +185,34 @@ def _cache_set(key, data):
 
 
 def _date_range() -> str:
-    """Rango de fechas hoy+manana para que salgan proximos partidos."""
+    """Rango de fechas ayer..pasado-manana para que salgan finalizados, en vivo y proximos."""
     from datetime import timedelta
     today = datetime.now(timezone.utc)
-    tomorrow = today + timedelta(days=1)
-    return f"{today.strftime('%Y%m%d')}-{tomorrow.strftime('%Y%m%d')}"
+    start = today - timedelta(days=1)
+    end = today + timedelta(days=2)
+    return f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+
+
+TZ_NIC = timezone(timedelta(hours=-6), "America/Managua")
+
+_DAY_LABELS = {-1: "Ayer", 0: "Hoy", 1: "Mañana", 2: "Pasado mañana"}
+
+
+def _day_label(date_str: str | None) -> str | None:
+    """Etiqueta del dia del partido en hora Nicaragua: Hoy/Mañana/Pasado mañana/Ayer."""
+    if not date_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+        local = dt.astimezone(TZ_NIC)
+        hoy = datetime.now(timezone.utc).astimezone(TZ_NIC).date()
+        delta = (local.date() - hoy).days
+        if delta in _DAY_LABELS:
+            return _DAY_LABELS[delta]
+        return local.strftime("%d/%m")
+    except (ValueError, TypeError):
+        return None
+
 
 
 # Cabeceras de navegador: ESPN/Akamai bloquea el User-Agent por defecto de
@@ -589,9 +612,22 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
 
         for g in games:
             g["sport_path"] = path
+            g["dayLabel"] = _day_label(g.get("date"))
     except Exception as exc:
         return {"sport": sport, "label": label, "games": [], "error": str(exc),
                 "updated_at": datetime.now(timezone.utc).isoformat()}
+
+    # Deduplicar (el rango de fechas puede repetir eventos entre dias)
+    unicos = []
+    vistos_ids = set()
+    for g in games:
+        gid = str(g.get("id") or "")
+        if gid and gid in vistos_ids:
+            continue
+        if gid:
+            vistos_ids.add(gid)
+        unicos.append(g)
+    games = unicos
 
     # Ordenar: en vivo primero, luego proximos, luego finalizados
     state_order = {"in": 0, "pre": 1, "post": 2}

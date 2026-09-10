@@ -394,6 +394,7 @@ def _partidos_hoy():
     """Trae los partidos de hoy de todos los deportes del dashboard."""
     import sports
 
+    ahora_local = datetime.now(timezone.utc).astimezone(sports.TZ_NIC)
     partidos = []
     for sport in DEPORTES_DASHBOARD:
         try:
@@ -401,6 +402,17 @@ def _partidos_hoy():
             for g in data.get("games", []):
                 if g.get("state") == "post":
                     continue  # ya finalizados: no generar pick nuevo
+                # Solo partidos de HOY (hora Nicaragua) o que esten en vivo:
+                # el scoreboard ahora trae tambien manana y pasado manana.
+                if g.get("state") != "in":
+                    try:
+                        fecha = datetime.fromisoformat(
+                            str(g.get("date", "")).replace("Z", "+00:00")
+                        ).astimezone(sports.TZ_NIC).date()
+                    except (ValueError, TypeError):
+                        fecha = ahora_local.date()
+                    if fecha != ahora_local.date():
+                        continue
                 home = g.get("home") or {}
                 away = g.get("away") or {}
                 # Fallback tenis/MMA: 'teams' si no hay home/away
