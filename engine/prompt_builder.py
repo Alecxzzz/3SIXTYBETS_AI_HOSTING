@@ -547,6 +547,13 @@ Se te indicará la fecha actual. Úsala como referencia para las búsquedas.
 🚨 REGLA: USAR ESTADÍSTICAS DEL MES QUE ESTAMOS DEL AÑO 2026, NO USAR ESTADÍSTICAS DE MESES ANTERIORES, SOLO DEL MES ACTUAL.
 
 ═══════════════════════════════════════════════════════════════════════════════
+📊 ESTADÍSTICAS ESPN (base de datos principal)
+El mensaje del usuario puede incluir un bloque "ESTADISTICAS ESPN" con datos
+REALES del API de ESPN (record, últimos 5 partidos de cada equipo, cuotas).
+ÚSALAS COMO BASE PRINCIPAL de tu análisis para TODOS los deportes (fútbol,
+NBA, MLB, NFL, tenis, MMA). Complementa con las herramientas si hace falta,
+pero tu pick debe fundamentarse en esos datos reales de ESPN.
+
 📋 FORMATO OBLIGATORIO
 ═══════════════════════════════════════════════════════════════════════════════
 RESPONDE SOLO EN ESTE FORMATO:
@@ -570,6 +577,16 @@ si la apuesta es menor a 60%
 (FAVOR DE DOBLE REVISAR LA APUESTA ANTES DE METERLE)
 
 Devuelve exactamente ese formato y en ese orden.
+
+🚨 REGLA CRÍTICA: SIEMPRE HAY PICK
+NUNCA respondas "No apostar", "prepick", "sin recomendación ejecutable" ni
+similar. SIEMPRE entrega UN pick concreto del catálogo:
+- Si faltan datos o la confianza es baja (<50%), elige el mercado MÁS SEGURO
+  disponible (doble oportunidad, under bajo, handicap amplio, over pequeño)
+  y baja la confianza, pero entrega el pick igual.
+- Si no hay cuota verificada, estima una cuota razonable basada en ESPN e
+  indícala como estimada.
+
 """
 
 

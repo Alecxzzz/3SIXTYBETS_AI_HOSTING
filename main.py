@@ -145,6 +145,94 @@ Contenido: {contenido}
 
     return contexto_final
 
+def _norm_txt(t: str) -> str:
+    """Normaliza texto para matching: sin acentos, minusculas, alfanumerico."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9 ]", " ", t.lower())
+
+def contexto_espn(mensaje: str) -> str:
+    """Busca el partido del mensaje en ESPN y devuelve estadisticas reales.
+
+    Es la base de datos de estadisticas que usan las dos IAs (Demian y 365AI):
+    estado, cuotas, record, ultimos 5 partidos de cada equipo y stats del juego.
+    Nunca lanza excepcion: devuelve '' si no hay datos.
+    """
+    try:
+        import sports
+
+        norm_msg = _norm_txt(mensaje)
+        tokens = {t for t in norm_msg.split() if len(t) >= 4}
+        if not tokens:
+            return ""
+
+        mejor, mejor_score, mejor_sport = None, 0, None
+        for sport in sports.SPORTS:
+            try:
+                data = sports.get_sport_games(sport)
+            except Exception:
+                continue
+            for g in data.get("games", []):
+                nombre = _norm_txt(g.get("name", ""))
+                if not nombre:
+                    continue
+                score = sum(1 for t in tokens if t in nombre)
+                if score > mejor_score:
+                    mejor, mejor_score, mejor_sport = g, score, sport
+
+        if not mejor or mejor_score < 1:
+            return ""
+
+        lineas = [
+            f"Partido encontrado en ESPN: {mejor.get('name')}",
+            f"Liga: {mejor.get('league') or '-'} | Fecha: {mejor.get('date')} | "
+            f"Estado: {mejor.get('state')} | {mejor.get('status') or ''} {mejor.get('clock') or ''}".rstrip(),
+        ]
+        odds = mejor.get("odds") or {}
+        if odds.get("details") or odds.get("over_under") or odds.get("home_odds"):
+            lineas.append(
+                f"Cuotas ESPN: linea={odds.get('details') or 'N/A'}, "
+                f"total={odds.get('over_under') or 'N/A'}, "
+                f"ML local={odds.get('home_odds') or 'N/A'}, "
+                f"ML visitante={odds.get('away_odds') or 'N/A'}"
+            )
+
+        try:
+            detail = sports.get_game_detail(mejor_sport, mejor["id"])
+        except Exception:
+            detail = {}
+
+        for t in (detail.get("teams") or []):
+            nombre = t.get("name") or "?"
+            records = ", ".join(r for r in (t.get("records") or []) if r) or "N/A"
+            lineas.append(f"\n{nombre} (record: {records})")
+            for s in (t.get("statistics") or [])[:8]:
+                if s.get("displayValue"):
+                    lineas.append(f"  - {s.get('name')}: {s.get('displayValue')}")
+            for r in (t.get("recent_games") or [])[:5]:
+                a = r.get("away") or {}
+                h = r.get("home") or {}
+                a_s = a.get("score") if a.get("score") is not None else "?"
+                h_s = h.get("score") if h.get("score") is not None else "?"
+                lineas.append(f"  - reciente: {a.get('name','?')} {a_s} @ {h.get('name','?')} {h_s}")
+
+        if detail.get("head_to_head"):
+            try:
+                h2h = detail["head_to_head"]
+                if isinstance(h2h, list) and h2h:
+                    lineas.append("\nHead-to-head reciente (ESPN):")
+                    for m in h2h[:3]:
+                        lineas.append(f"  - {str(m)[:160]}")
+            except Exception:
+                pass
+
+        if not lineas:
+            return ""
+        return "\n".join(lineas)
+    except Exception as exc:
+        print(f"[ESPN-contexto] error: {exc}", flush=True)
+        return ""
+
 @app.get("/", response_class=PlainTextResponse)
 def inicio():
     return "Test"
@@ -158,12 +246,22 @@ def listar_modelos():
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat):
     modelo_id = (data.modelo or "you").strip().lower()
+    # Contexto ESPN (estadisticas reales) compartido por las dos IAs
+    try:
+        ctx_espn = contexto_espn(data.mensaje)
+    except Exception:
+        ctx_espn = ""
+    bloque_espn = (
+        f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
+        if ctx_espn else ""
+    )
     # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
     if modelo_id in ("36ai", "36", "ia36", "groq"):
         from ai.ia36 import procesar_36ai
         # procesar_36ai clasifica solo: conversación -> respuesta natural,
         # partido -> análisis agéntico con formato EDGE.
-        return procesar_36ai(data.mensaje)
+        # Se inyectan las estadisticas reales de ESPN como base del análisis.
+        return procesar_36ai(data.mensaje + bloque_espn)
 
     if not YOU_API_KEY:
         return (
@@ -216,7 +314,8 @@ PASO 3: EVALUACIÓN DE MERCADO
 PASO 4: DECISIÓN CON CONFIANZA
 - Si confianza >= 65%: pick recomendado
 - Si confianza 50-65%: doble revisar antes
-- Si confianza < 50%: no apostar
+- Si confianza < 50%: elige el mercado MAS SEGURO disponible (doble oportunidad, under bajo, handicap amplio) y bajale al stake
+- PROHIBIDO decir "No apostar" o "prepick": SIEMPRE entrega UN pick concreto, aunque la confianza sea baja
 
 ═══════════════════════════════════════════════════════════════════════════════
 📊 TIPOS DE PICKS - FÚTBOL
@@ -380,6 +479,9 @@ Cuando algo NO aparece en las fuentes web:
 ❌ NO asumir: que las bajas confirmadas afectan (hay suplentes)
 ✓ SÍ reconocer: "Alineaciones definitivas no confirmadas" → reduce confianza
 ✓ SÍ usar: datos que SÍ aparecen en web (forma, goles, cuotas visibles)
+✓ SIEMPRE: entrega UN pick concreto. Si faltan datos, elige el mercado más
+  seguro (doble oportunidad, under bajo, handicap amplio) y baja la confianza,
+  pero NUNCA respondas "No apostar" ni "sin recomendación ejecutable".
 
 ═══════════════════════════════════════════════════════════════════════════════
 📋 FORMATO OBLIGATORIO
@@ -399,7 +501,7 @@ Cuota: [X.XX] | Probabilidad implícita: [XX%] | Confianza: [XX%]
 [Riesgos, datos faltantes, condiciones]
 
 VEREDICTO:
-[Recomendar apuesta / Doble revisar / No apostar]
+[Recomendar apuesta / Doble revisar] — NUNCA "No apostar": siempre entrega el pick
 
 ═══════════════════════════════════════════════════════════════════════════════
 🚨 REGLA CLAVE
@@ -417,6 +519,14 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         contexto_web = buscar_web(data.mensaje)
         # Agregar contexto de búsqueda al prompt del sistema
         reglas = reglas + f"\n\nCONTEXTO DE BUSQUEDA WEB OBTENIDO:\n{contexto_web}"
+
+    # Estadisticas reales de ESPN como base de datos del analisis
+    if ctx_espn:
+        reglas = reglas + (
+            f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
+            "\n\nUSA ESTAS ESTADISTICAS ESPN como fuente principal (forma reciente, "
+            "records, cuotas). Basa tu pick en estos datos reales."
+        )
 
     respuesta = SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
     # Limpiar asteriscos de formato markdown

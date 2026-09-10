@@ -59,7 +59,7 @@ MAX_CHARS_MENSAJES = int(os.getenv("AI36_MAX_CHARS_MENSAJES", "12000"))
 
 MAX_ITERACIONES = int(os.getenv("AI36_MAX_ITERACIONES", "6"))
 ITERACION_FORZAR_RESPUESTA = int(os.getenv("AI36_ITERACION_FORZAR", "4"))
-MAX_REINTENTOS = int(os.getenv("AI36_MAX_REINTENTOS", "4"))
+MAX_REINTENTOS = int(os.getenv("AI36_MAX_REINTENTOS", "6"))
 
 # Debug: cambiar a True para ver qué devuelve el modelo
 DEBUG = os.getenv("AI36_DEBUG", "false").lower() == "true"
@@ -364,7 +364,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             ultimo_error = f"{response.status_code}: {response.text or '(sin cuerpo de error)'}"
 
         if response.status_code == 429:
-            time.sleep(20)
+            time.sleep(25)
             continue
         if response.status_code == 413:
             messages = compactar_messages(messages)
