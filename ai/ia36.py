@@ -393,6 +393,23 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
 
         if response.status_code == 429:
             time.sleep(12)
+            # Tras el primer reintento fallido, saltar a otro modelo: los
+            # limites de tasa de Groq son POR MODELO (gpt-oss-20b suele
+            # tener mas RPM que el 120b y qwen/compound otros buckets).
+            if intento >= 1:
+                siguiente = _siguiente_modelo(modelo)
+                if siguiente and siguiente != modelo:
+                    if DEBUG:
+                        print(f"[36AI] 429 en {modelo}. Cambiando a: {siguiente}")
+                    modelo = siguiente
+                    payload["model"] = modelo
+                    if modelo.startswith("openai/gpt-oss"):
+                        payload["reasoning_effort"] = REASONING_EFFORT
+                    else:
+                        payload.pop("reasoning_effort", None)
+                    if usar_tools and "tools" not in payload:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
             continue
         if response.status_code == 413:
             messages = compactar_messages(messages)
