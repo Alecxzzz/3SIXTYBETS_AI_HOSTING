@@ -91,8 +91,9 @@ ODDS_API_KEY = (
     or "629022e8c84bef4696b26fd180f45a503d5a5aec633e826ef3f051984648ae4b"
 )
 ODDS_API_BASE = "https://api.odds-api.io/v3"
-# Plan free: solo 2 bookmakers recreativos permitidos
-ODDS_BOOKMAKERS = "1xbet,Stake"
+# Plan free: solo 2 bookmakers permitidos por la cuenta: Bet365 y Winpot MX.
+# (1xbet/Stake daban 403 "Access denied" y por eso faltaban cuotas reales.)
+ODDS_BOOKMAKERS = "Bet365"
 # Mapeo de nuestros deportes a los slugs de odds-api.io
 ODDS_SPORT_SLUGS = {
     "soccer": "football",
@@ -102,7 +103,8 @@ ODDS_SPORT_SLUGS = {
 }
 
 _odds_cache = {}  # clave -> (timestamp, data)
-_ODDS_CACHE_TTL = 600  # 10 min (respeta el rate limit de 100 req/hora)
+_ODDS_CACHE_TTL = 600  # 10 min para cuotas de un evento (respeta rate limit)
+_ODDS_EVENTS_TTL = 1800  # 30 min para la lista de eventos (la cuota diaria es de 500 req)
 _odds_bloqueado_hasta = 0  # backoff cuando la API responde 429
 
 
@@ -153,10 +155,10 @@ def _bookmakers_permitidos(event_id=None):
 
 
 def _odds_eventos(sport_slug: str):
-    """Lista de eventos de un deporte, con cache de 10 min."""
+    """Lista de eventos de un deporte, con cache de 30 min (ahorra cuota diaria)."""
     ahora = time.time()
     cached = _odds_cache.get(f"events:{sport_slug}")
-    if cached and ahora - cached[0] < _ODDS_CACHE_TTL:
+    if cached and ahora - cached[0] < _ODDS_EVENTS_TTL:
         return cached[1]
     data = _odds_request("/events", {"sport": sport_slug})
     if isinstance(data, list):
