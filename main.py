@@ -728,8 +728,15 @@ def dashboard_home(user=Depends(get_current_user)):
 
 @app.get("/dashboard/picks")
 def dashboard_picks(user=Depends(get_current_user)):
-    """Pronosticos del dia de todos los deportes."""
-    return {"picks": db.list_picks_hoy() or []}
+    """Pronosticos del dia: solo pendientes vigentes y con datos reales."""
+    picks = db.list_picks_hoy() or []
+    validos = [
+        p for p in picks
+        if p.get("result") == "PENDIENTE"
+        and dashboard._pick_calidad_ok(p)
+        and dashboard._evento_vigente(p)
+    ]
+    return {"picks": validos}
 
 
 @app.get("/dashboard/acertados")

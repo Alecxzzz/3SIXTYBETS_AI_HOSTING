@@ -43,6 +43,44 @@ def _cuota_valida(pick):
     except (TypeError, ValueError):
         return True
 
+
+# Frases que delatan picks generados SIN datos reales (basura que no se muestra)
+_FRASES_SIN_DATOS = (
+    "sin datos", "no disponible", "no disponibles", "no especificad",
+    "no identificad", "no verifiable", "sin cuota", "linea no disponible",
+    "n/d", "no apostar", "prepick", "sin recomendacion", "sin recomendación",
+)
+
+_NOMBRES_INVALIDOS = {"", "?", "n/a", "na", "jugador a", "jugador b",
+                      "equipo a", "equipo b", "local", "visitante",
+                      "team a", "team b", "home", "away", "jugador 1", "jugador 2"}
+
+
+def _nombre_valido(nombre) -> bool:
+    return bool(nombre) and str(nombre).strip().lower() not in _NOMBRES_INVALIDOS
+
+
+def _texto_sin_datos(texto) -> bool:
+    t = (texto or "").lower()
+    return any(f in t for f in _FRASES_SIN_DATOS)
+
+
+def _pick_calidad_ok(pick: dict) -> bool:
+    """Gate de calidad para MOSTRAR un pick (pendientes y aciertos).
+
+    Rechaza: equipos '?', nombres genericos, sin cuota, cuota <= 1.20
+    y rationale/titulo con frases de 'sin datos'.
+    """
+    if not (_nombre_valido(pick.get("homeName")) and _nombre_valido(pick.get("awayName"))):
+        return False
+    if not _cuota_valida(pick) or pick.get("odds") is None:
+        return False
+    if _texto_sin_datos(pick.get("rationale")) or _texto_sin_datos(pick.get("titulo")):
+        return False
+    if _texto_sin_datos(pick.get("eventName")):
+        return False
+    return True
+
 # ============================================================
 # CUOTAS REALES (odds-api.io)
 # ============================================================
@@ -561,6 +599,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
     omitidos = 0
     errores = 0
     rechazados_cuota = 0
+    rechazados_calidad = 0
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
 
@@ -620,6 +659,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             f"Recuerda: el campo 'market' es para validar contra el catalogo; el campo "
             f"'titulo' es la apuesta en lenguaje natural (ej: 'Corners de "
             f"{p['home_name']}: Over 3.5'). Devuelve el JSON del pick."
+            f"\nIMPORTANTE: usa los nombres REALES de los equipos/jugadores "
+            f"({p['home_name']} y {p['away_name']}); PROHIBIDO picks genericos tipo "
+            f"'Jugador A', 'Local' o 'equipo B'. Si de verdad no tienes datos del "
+            f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
         )
 
         texto, modelo = _preguntar_ia(mensaje)
@@ -643,8 +686,20 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             odds_pick = float(pick.get("odds") or 0)
         except (TypeError, ValueError):
             odds_pick = 0
-        if odds_pick and odds_pick <= ODDS_MINIMA:
+        if not odds_pick or odds_pick <= ODDS_MINIMA:
             rechazados_cuota += 1
+            continue
+
+        # Gate de calidad: nada de picks genericos o sin datos reales
+        # (equipos '?', 'Jugador A', rationale 'sin datos...', sin cuota).
+        rationale_txt = str(pick.get("rationale") or "") + " " + str(pick.get("titulo") or "")
+        if (
+            not _nombre_valido(p["home_name"])
+            or not _nombre_valido(p["away_name"])
+            or _texto_sin_datos(rationale_txt)
+            or _texto_sin_datos(p["event_name"])
+        ):
+            rechazados_calidad += 1
             continue
 
         creado = db.create_ai_pick(
@@ -680,6 +735,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
         "omitidos_ya_con_pick": omitidos,
         "errores": errores,
         "rechazados_cuota": rechazados_cuota,
+        "rechazados_calidad": rechazados_calidad,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -956,6 +1012,17 @@ def resolver_picks_finalizados() -> dict:
             db.update_pick_result(pick["id"], "ANULADO")
             continue
 
+        # Expirar pendientes cuyo EVENTO ya paso hace mas de 3h y sigue sin
+        # resolverse (eventos fantasma de ESPN, tenis sin datos, etc.)
+        try:
+            ev = datetime.fromisoformat(str(pick.get("eventDate") or "").replace("Z", "+00:00"))
+            horas_evento = (datetime.now(timezone.utc) - ev).total_seconds() / 3600
+        except (ValueError, TypeError):
+            horas_evento = 0
+        if horas_evento > 3:
+            db.update_pick_result(pick["id"], "ANULADO")
+            continue
+
         try:
             detail = _detalle_resolucion(pick)
             # Fallback: marcador final desde odds-api.io si ESPN no lo tiene
@@ -995,13 +1062,30 @@ def aciertos_visibles() -> list:
     mostrar_ayer = ahora_local.hour < HORA_CORTE_ACERTADOS
     visibles = []
     for p in aciertos:
-        if not _cuota_valida(p):
+        if not _pick_calidad_ok(p):
             continue
         es_ayer = (p.get("pickDate") or "") < ahora_local.date().isoformat()
         if es_ayer and not mostrar_ayer:
             continue
         visibles.append(p)
     return visibles
+
+
+def _evento_vigente(pick: dict) -> bool:
+    """True si el evento del pick es de HOY (Nicaragua) o futuro.
+
+    Los pendientes cuyo partido ya paso (ej. '09 sept') salen del dashboard:
+    quedan en la BD para el historico, pero no se muestran como 'del dia'.
+    """
+    fecha_raw = pick.get("eventDate")
+    if not fecha_raw:
+        return True  # sin fecha no podemos descartarlo
+    try:
+        dt = datetime.fromisoformat(str(fecha_raw).replace("Z", "+00:00"))
+        fecha_evento = dt.astimezone(TZ_NICARAGUA).date()
+    except (ValueError, TypeError):
+        return True
+    return fecha_evento >= _hora_nicaragua().date()
 
 
 def resumen_dashboard(username: str) -> dict:
@@ -1020,7 +1104,12 @@ def resumen_dashboard(username: str) -> dict:
     picks = db.list_picks_hoy() or []
     aciertos_hoy = [p for p in picks if p.get("result") == "ACIERTO"]
     fallados = [p for p in picks if p.get("result") == "FALLO"]
-    pendientes = [p for p in picks if p.get("result") == "PENDIENTE" and _cuota_valida(p)]
+    pendientes = [
+        p for p in picks
+        if p.get("result") == "PENDIENTE"
+        and _pick_calidad_ok(p)
+        and _evento_vigente(p)
+    ]
 
     # Aciertos visibles: hoy + ayer (hasta 23:00 Nicaragua), sin cuotas bajas
     aciertos_visibles_lista = aciertos_visibles()
