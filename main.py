@@ -757,6 +757,15 @@ def dashboard_resolve(user=Depends(get_admin)):
     return dashboard.resolver_picks_finalizados()
 
 
+@app.get("/dashboard/revisar")
+def dashboard_revisar(user=Depends(get_admin), corregir: bool = False):
+    """Re-verifica los picks de hoy contra el marcador/estadisticas reales.
+
+    corregir=true corrige automaticamente los resultados mal guardados.
+    """
+    return dashboard.revisar_picks_hoy(corregir=corregir)
+
+
 @app.post("/dashboard/reset")
 def dashboard_reset(user=Depends(get_admin)):
     """Borra TODOS los picks para regenerarlos con equipos/logos (admin)."""

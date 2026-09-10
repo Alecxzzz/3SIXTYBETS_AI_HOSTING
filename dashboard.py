@@ -1088,6 +1088,84 @@ def _evento_vigente(pick: dict) -> bool:
     return fecha_evento >= _hora_nicaragua().date()
 
 
+def revisar_picks_hoy(corregir: bool = False) -> dict:
+    """Re-verifica TODOS los picks de HOY contra las estadisticas reales.
+
+    - ACIERTO/FALLO: recalcula el resultado del mercado con el marcador/stats
+      del partido (ESPN; fallback odds-api.io) y marca SOSPECHOSO si no
+      coincide con el resultado guardado.
+    - PENDIENTE: si el partido esta EN VIVO reporta el marcador actual y si el
+      pick va ganando o perdiendo; si ya termino y sigue pendiente, alerta.
+    - corregir=True: corrige automaticamente los resultados mal guardados
+      (partido post: aplica el recalculado; en vivo: reinicia a PENDIENTE
+      para que el resolver lo procese al terminar).
+    """
+    picks = db.list_picks_hoy() or []
+    revisados, sospechosos, en_vivo = 0, [], []
+
+    for pick in picks:
+        estado = pick.get("result")
+        try:
+            detail = _detalle_resolucion(pick)
+            if not detail or detail.get("state") not in ("post", "in"):
+                detail = _detalle_desde_oddsapi(pick) or detail
+        except Exception:
+            continue
+        if not detail:
+            continue
+        state = detail.get("state")
+        if not state:
+            continue
+
+        revisados += 1
+        marcador = " | ".join(
+            f"{(t.get('name') or '?')}: {t.get('score')}"
+            for t in (detail.get("teams") or [])
+        )
+        item = {
+            "id": pick.get("id"),
+            "titulo": pick.get("titulo"),
+            "market": pick.get("market"),
+            "evento": pick.get("eventName"),
+            "estado_guardado": estado,
+            "estado_partido": state,
+            "marcador": marcador,
+            "resultado_recalculado": None,
+        }
+
+        try:
+            recalculado = _resolver_deterministico(pick, detail)
+        except Exception:
+            recalculado = None
+        item["resultado_recalculado"] = recalculado
+
+        if estado == "PENDIENTE":
+            if state == "in":
+                item["va_ganando"] = (
+                    f" provisional: {recalculado}" if recalculado else " mercado no decidible con marcador"
+                )
+                en_vivo.append(item)
+            elif state == "post" and recalculado:
+                sospechosos.append({
+                    **item,
+                    "nota": "partido TERMINADO pero el pick sigue PENDIENTE (resolver no lo proceso)",
+                })
+        elif recalculado and recalculado != estado:
+            item["nota"] = f"guardado como {estado} pero el marcador real indica {recalculado}"
+            if corregir and recalculado in ("ACIERTO", "FALLO"):
+                if state == "post":
+                    db.update_pick_result(pick["id"], recalculado)
+                    item["corregido"] = True
+                elif state == "in":
+                    # En vivo con resultado guardado equivocado: reiniciar a
+                    # PENDIENTE para que el resolver lo procese al terminar.
+                    db.update_pick_result(pick["id"], "PENDIENTE")
+                    item["reiniciado"] = True
+            sospechosos.append(item)
+
+    return {"revisados": revisados, "sospechosos": sospechosos, "en_vivo": en_vivo}
+
+
 def resumen_dashboard(username: str) -> dict:
     """Bienvenida + stats del dashboard.
 
