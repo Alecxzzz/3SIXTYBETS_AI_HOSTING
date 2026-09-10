@@ -859,6 +859,23 @@ def delete_channel(channel_id):
 # AI PICKS (dashboard)
 # ==============================
 
+TZ_NICARAGUA = timezone(timedelta(hours=-6), "America/Managua")
+
+
+def _fecha_label_nic(created_at):
+    """Etiqueta legible en hora Nicaragua: 'Hoy 13:00' o 'Ayer 10:45'."""
+    if not created_at:
+        return None
+    try:
+        dt = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(str(created_at))
+        local = dt.replace(tzinfo=timezone.utc).astimezone(TZ_NICARAGUA)
+        ahora_local = datetime.now(timezone.utc).astimezone(TZ_NICARAGUA)
+        prefijo = "Hoy" if local.date() == ahora_local.date() else "Ayer"
+        return f"{prefijo} {local.strftime('%H:%M')}"
+    except (ValueError, TypeError):
+        return None
+
+
 def public_ai_pick(row):
     stats_raw = row.get("stats_ultimos5")
     try:
@@ -890,7 +907,21 @@ def public_ai_pick(row):
         "pickDate": row["pick_date"].isoformat() if row.get("pick_date") else None,
         "result": row.get("result") or "PENDIENTE",
         "createdAt": row["created_at"].isoformat() if row.get("created_at") else None,
+        "fechaLabel": _fecha_label_nic(row.get("created_at")),
     }
+
+
+def list_picks_aciertos_hoy_ayer():
+    """Picks ACIERTO de hoy y ayer (para mostrarlos hasta las 11pm Nicaragua)."""
+    hoy = now_utc().date()
+    ayer = hoy - timedelta(days=1)
+    rows = run_query(
+        "select * from ai_picks "
+        "where result = 'ACIERTO' and pick_date in (%s, %s) "
+        "order by created_at desc",
+        (hoy, ayer),
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
 
 
 def create_ai_pick(sport, sport_label, event_id, event_name, event_date,

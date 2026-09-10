@@ -17,9 +17,31 @@ import re
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import db
+
+# Cuota minima aceptada para mostrar/generar un pick (todo debe estar ARRIBA de 1.20)
+ODDS_MINIMA = 1.20
+# Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
+HORA_CORTE_ACERTADOS = 23
+
+TZ_NICARAGUA = db.TZ_NICARAGUA
+
+
+def _hora_nicaragua():
+    return datetime.now(timezone.utc).astimezone(TZ_NICARAGUA)
+
+
+def _cuota_valida(pick):
+    """True si el pick no tiene cuota (se permite) o su cuota es > ODDS_MINIMA."""
+    odds = pick.get("odds")
+    if odds is None:
+        return True
+    try:
+        return float(odds) > ODDS_MINIMA
+    except (TypeError, ValueError):
+        return True
 
 # ============================================================
 # CUOTAS REALES (odds-api.io)
@@ -526,6 +548,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
     generados = 0
     omitidos = 0
     errores = 0
+    rechazados_cuota = 0
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
 
@@ -603,6 +626,15 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             errores += 1
             continue
 
+        # Rechazar picks con cuota demasiado baja (debe estar arriba de 1.20)
+        try:
+            odds_pick = float(pick.get("odds") or 0)
+        except (TypeError, ValueError):
+            odds_pick = 0
+        if odds_pick and odds_pick <= ODDS_MINIMA:
+            rechazados_cuota += 1
+            continue
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -635,6 +667,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
         "generados": generados,
         "omitidos_ya_con_pick": omitidos,
         "errores": errores,
+        "rechazados_cuota": rechazados_cuota,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -938,25 +971,55 @@ def resolver_picks_finalizados() -> dict:
 # ============================================================
 
 
+def aciertos_visibles() -> list:
+    """Aciertos que se muestran en el dashboard.
+
+    - Los de HOY siempre.
+    - Los de AYER solo hasta las 23:00 hora Nicaragua (con etiqueta 'Ayer').
+    - Nunca muestra picks con cuota <= ODDS_MINIMA.
+    """
+    aciertos = db.list_picks_aciertos_hoy_ayer() or []
+    ahora_local = _hora_nicaragua()
+    mostrar_ayer = ahora_local.hour < HORA_CORTE_ACERTADOS
+    visibles = []
+    for p in aciertos:
+        if not _cuota_valida(p):
+            continue
+        es_ayer = (p.get("pickDate") or "") < ahora_local.date().isoformat()
+        if es_ayer and not mostrar_ayer:
+            continue
+        visibles.append(p)
+    return visibles
+
+
 def resumen_dashboard(username: str) -> dict:
     """Bienvenida + stats del dashboard.
 
     - pronosticos_del_dia: SOLO los pendientes de hoy (los acertados se van
       moviendo a la seccion de acertados; los fallados nunca se muestran).
-    - acertados: picks de hoy con resultado ACIERTO.
+      Nunca se muestran picks con cuota <= ODDS_MINIMA (1.20).
+    - acertados: picks de HOY y de AYER con resultado ACIERTO (los de ayer solo
+      hasta las 23:00 Nicaragua). Cada pick trae fechaLabel ('Hoy HH:MM' /
+      'Ayer HH:MM') en hora Nicaragua.
     - efectividad_hoy: aciertos / resueltos de HOY (coherente con los KPIs).
-    - historico: acumulado de todos los dias (se muestra aparte).
+    - historico: acumulado de todos los dias (se muestra aparte). Se limpia
+      automaticamente cuando se borran todos los picks (/dashboard/reset).
     """
     picks = db.list_picks_hoy() or []
-    aciertos = [p for p in picks if p.get("result") == "ACIERTO"]
+    aciertos_hoy = [p for p in picks if p.get("result") == "ACIERTO"]
     fallados = [p for p in picks if p.get("result") == "FALLO"]
-    pendientes = [p for p in picks if p.get("result") == "PENDIENTE"]
+    pendientes = [p for p in picks if p.get("result") == "PENDIENTE" and _cuota_valida(p)]
+
+    # Aciertos visibles: hoy + ayer (hasta 23:00 Nicaragua), sin cuotas bajas
+    aciertos_visibles_lista = aciertos_visibles()
+    ids_hoy = {p["id"] for p in aciertos_hoy}
+    aciertos_de_ayer = [p for p in aciertos_visibles_lista if p["id"] not in ids_hoy]
 
     historial = db.count_aciertos_historico() or {}
 
-    resueltos_hoy = len(aciertos) + len(fallados)
+    resueltos_hoy = len(aciertos_hoy) + len(fallados)
     efectividad_hoy = (
-        round(len(aciertos) / resueltos_hoy * 100) if resueltos_hoy else None
+        round(len(aciertos_hoy) / resueltos_hoy * 100) if resueltos_hoy else None
     )
 
     por_deporte = {}
@@ -968,7 +1031,8 @@ def resumen_dashboard(username: str) -> dict:
         "welcome": f"Bienvenido, {username}",
         "stats": {
             "pronosticos_del_dia": len(pendientes),
-            "pronosticos_acertados_por_la_ia": len(aciertos),
+            "pronosticos_acertados_por_la_ia": len(aciertos_visibles_lista),
+            "aciertos_ayer": len(aciertos_de_ayer),
             "fallados_hoy": len(fallados),
             "resueltos_hoy": resueltos_hoy,
             "efectividad_hoy": efectividad_hoy,
@@ -977,7 +1041,7 @@ def resumen_dashboard(username: str) -> dict:
             "historico_resueltos": historial.get("resueltos", 0),
         },
         "pronosticos_del_dia": pendientes,
-        "pronosticos_acertados": aciertos,
+        "pronosticos_acertados": aciertos_visibles_lista,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

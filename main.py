@@ -597,9 +597,8 @@ def dashboard_picks(user=Depends(get_current_user)):
 
 @app.get("/dashboard/acertados")
 def dashboard_acertados(user=Depends(get_current_user)):
-    """Solo los pronosticos ACERTADOS por la IA (los fallados no se muestran)."""
-    picks = db.list_picks_hoy() or []
-    return {"acertados": [p for p in picks if p.get("result") == "ACIERTO"]}
+    """Aciertos de HOY y de AYER (hasta las 23:00 Nicaragua), sin cuotas bajas."""
+    return {"acertados": dashboard.aciertos_visibles()}
 
 
 @app.post("/dashboard/generate")
