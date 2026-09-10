@@ -26,6 +26,9 @@ except ImportError:
     pass
 
 API_KEY = os.getenv("SPORTRADAR_API_KEY", "")
+# Algunos servicios (ej. Odds Comparison) usan key propia si se define
+ODDS_API_KEY = os.getenv("SPORTRADAR_ODDS_API_KEY", "") or API_KEY
+NBA_API_KEY = os.getenv("SPORTRADAR_NBA_API_KEY", "") or API_KEY
 BASES = ["https://api.sportradar.com", "https://api.sportradar.us"]
 QPS_THROTTLE = 1.1  # segundos minimos entre llamadas (plan 1 QPS)
 KEY_BACKOFF = 900  # 15 min sin llamar cuando la key da 403
@@ -52,10 +55,11 @@ def _throttle():
     _last_call = time.time()
 
 
-def get(path: str, ttl: int = 900):
+def get(path: str, ttl: int = 900, api_key: str | None = None):
     """GET contra Sportradar con cache y throttle. None si falla."""
     global _key_rechazada_hasta
-    if not API_KEY:
+    api_key = api_key or API_KEY
+    if not api_key:
         return None
     if time.time() < _key_rechazada_hasta:
         return None  # key rechazada hace poco: no insistir
@@ -69,7 +73,7 @@ def get(path: str, ttl: int = 900):
         try:
             r = requests.get(
                 f"{base}/{path}",
-                headers={"x-api-key": API_KEY, "accept": "application/json"},
+                headers={"x-api-key": api_key, "accept": "application/json"},
                 timeout=20,
             )
             if r.status_code == 200:
@@ -101,9 +105,16 @@ def soccer_summary(event_id: str):
 
 
 def nba_schedule(fecha: str):
-    """Calendario NBA del dia (fecha 'YYYY/MM/DD')."""
+    """Calendario NBA del dia (fecha 'YYYY/MM/DD').
+
+    Ruta correcta del trial v8: /games/{Y}/{M}/{D}/schedule.json
+    Devuelve {'date', 'league', 'games': [{'home', 'away', 'status'...}]}
+    """
     for version in ("v8", "v7"):
-        data = get(f"nba/trial/{version}/en/{fecha}/schedule.json")
+        data = get(
+            f"nba/trial/{version}/en/games/{fecha}/schedule.json",
+            api_key=NBA_API_KEY,
+        )
         if data:
             return data
     return None
@@ -124,7 +135,7 @@ def _norm(nombre: str) -> str:
 def odds_eventos_torneo(sport_path: str):
     """Eventos con cuotas de un torneo (sport_path ej 'soccer/eng.1')."""
     for plantilla in _RUTAS_ODDS:
-        data = get(plantilla.format(sport_path=sport_path), ttl=1800)
+        data = get(plantilla.format(sport_path=sport_path), ttl=1800, api_key=ODDS_API_KEY)
         if data:
             return data
     return None
@@ -174,7 +185,7 @@ def cuotas_partido(sport: str, home_name: str, away_name: str, fecha: str | None
         "oddscomparison-regular/trial/v2/en/sports/{torneo}/events/{eid}/markets.json",
         "oddscomparison/trial/v2/en/sports/{torneo}/events/{eid}/markets.json",
     ):
-        data = get(plantilla.format(torneo=torneo_encontrado, eid=evento.get("id")), ttl=600)
+        data = get(plantilla.format(torneo=torneo_encontrado, eid=evento.get("id")), ttl=600, api_key=ODDS_API_KEY)
         if data and data.get("markets"):
             mercados = data["markets"]
             break
