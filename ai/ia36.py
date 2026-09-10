@@ -364,7 +364,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             ultimo_error = f"{response.status_code}: {response.text or '(sin cuerpo de error)'}"
 
         if response.status_code == 429:
-            time.sleep(25)
+            time.sleep(12)
             continue
         if response.status_code == 413:
             messages = compactar_messages(messages)
@@ -439,7 +439,8 @@ def analizar_36ai(mensaje_usuario, system_prompt):
 
         messages = compactar_messages(messages)
         data, modelo_en_uso = llamar_modelo(
-            messages, usar_tools=not forzar_respuesta, modelo_actual=modelo_en_uso
+            messages, usar_tools=not forzar_respuesta, modelo_actual=modelo_en_uso,
+            max_reintentos=2
         )
 
         if data is None:
@@ -572,7 +573,7 @@ def clasificar_36ai(mensaje: str) -> str:
         {"role": "user", "content": f"Mensaje: {mensaje}\nEtiqueta:"},
     ]
 
-    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=20)
+    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=20, max_reintentos=1)
     if not data:
         return "CONVERSACION"
 
@@ -593,7 +594,7 @@ def responder_conversacion_36ai(mensaje: str, system_prompt: str) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": mensaje},
     ]
-    data, _ = llamar_modelo(messages, usar_tools=False)
+    data, _ = llamar_modelo(messages, usar_tools=False, max_reintentos=2)
     if not data:
         return None
 
@@ -621,4 +622,5 @@ def procesar_36ai(mensaje: str) -> str:
 
     if respuesta:
         respuesta = respuesta.replace("*", "").replace("#", "")
-    return respuesta or "365AI no pudo generar una respuesta. Intenta de nuevo."
+    # None -> el caller decide (ej: /chat hace fallback a Demian si Groq esta saturado)
+    return respuesta or None

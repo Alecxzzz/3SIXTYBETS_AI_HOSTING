@@ -256,14 +256,24 @@ def chat(data: Chat):
         if ctx_espn else ""
     )
     # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
+    fallo_365 = False
     if modelo_id in ("36ai", "36", "ia36", "groq"):
         from ai.ia36 import procesar_36ai
         # procesar_36ai clasifica solo: conversación -> respuesta natural,
         # partido -> análisis agéntico con formato EDGE.
         # Se inyectan las estadisticas reales de ESPN como base del análisis.
-        return procesar_36ai(data.mensaje + bloque_espn)
+        respuesta_36 = procesar_36ai(data.mensaje + bloque_espn)
+        if respuesta_36:
+            return respuesta_36
+        # 365AI saturada o sin respuesta -> fallback automatico a Demian (abajo)
+        fallo_365 = True
 
     if not YOU_API_KEY:
+        if fallo_365:
+            return (
+                "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
+                "YOU_API_KEY configurada para Demian. Revisa las API keys en Render."
+            )
         return (
             "ERROR: Falta YOU_API_KEY o YOU_SEARCH_API_KEY.\n"
             "En Render agrega la clave de You.com y la variable YOU_BASE_URL."
@@ -532,6 +542,13 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
     # Limpiar asteriscos de formato markdown
     if respuesta:
         respuesta = respuesta.replace("*", "").replace("#", "")
+    if fallo_365:
+        if respuesta:
+            return f"(365AI saturada, respondido con Demian tipster)\n\n{respuesta}"
+        return (
+            "365AI esta saturada y Demian tampoco pudo responder en este momento. "
+            "Intenta de nuevo en unos segundos."
+        )
     return respuesta
 
 # ==============================
