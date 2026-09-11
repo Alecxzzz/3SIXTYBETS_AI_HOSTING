@@ -5,10 +5,67 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>threesixtybets-chat</title>
-    <script type="module" crossorigin src="/assets/index-KkOo2M37.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CQTfAbHs.css">
+    <script type="module" crossorigin src="/assets/index-CJ9FEvj0.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DMCstA-I.css">
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Boton flotante: Pick del dia + extras (3SIXTYBETS)
+      (function () {
+        if (window.__sbExtras) return;
+        window.__sbExtras = 1;
+        var API = "https://site--threesixtybetssz--qytms2wflqbs.code.run";
+        function ses() { try { return JSON.parse(localStorage.getItem("threesixtybets_session")) || {}; } catch (e) { return {}; } }
+        function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+        var btn = document.createElement("button");
+        btn.textContent = "Pick del dia";
+        btn.setAttribute("aria-label", "Pick del dia y extras");
+        btn.style.cssText = "position:fixed;bottom:18px;right:18px;z-index:9999;background:linear-gradient(135deg,#7c5ce7,#6c5ce7);color:#fff;border:none;border-radius:999px;padding:12px 18px;font-weight:700;font-size:.9rem;cursor:pointer;box-shadow:0 6px 20px #0008;";
+        document.body.appendChild(btn);
+        var modal = document.createElement("div");
+        modal.style.cssText = "position:fixed;inset:0;z-index:10000;background:#000a;display:none;align-items:center;justify-content:center;padding:16px;";
+        document.body.appendChild(modal);
+        function cerrar() { modal.style.display = "none"; modal.innerHTML = ""; }
+        modal.addEventListener("click", function (e) { if (e.target === modal) cerrar(); });
+        btn.addEventListener("click", function () {
+          modal.style.display = "flex";
+          modal.innerHTML = '<div style="background:#141826;border:1px solid #2a3352;border-radius:16px;max-width:520px;width:100%;max-height:86vh;overflow:auto;padding:18px;color:#e8eaf6;font-family:Segoe UI,system-ui,sans-serif">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+            '<b style="color:#a78bfa;font-size:1.05rem">Pick del dia</b>' +
+            '<span data-cerrar style="cursor:pointer;color:#8b93b5;font-size:1.2rem">&times;</span></div>' +
+            '<div id="sbpd" style="min-height:60px;color:#8b93b5">La IA esta eligiendo el pick estrella...</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px">' +
+            '<a href="' + API + '/parlay" style="background:#232a42;border-radius:10px;padding:10px;text-align:center;color:#e8eaf6;text-decoration:none;font-weight:600;font-size:.88rem">Simulador Parlay</a>' +
+            '<a href="' + API + '/track" style="background:#232a42;border-radius:10px;padding:10px;text-align:center;color:#e8eaf6;text-decoration:none;font-weight:600;font-size:.88rem">Track Record IA</a>' +
+            '<a href="' + API + '/perfil" style="background:#232a42;border-radius:10px;padding:10px;text-align:center;color:#e8eaf6;text-decoration:none;font-weight:600;font-size:.88rem">Mi perfil</a>' +
+            '<a href="/" style="background:#232a42;border-radius:10px;padding:10px;text-align:center;color:#e8eaf6;text-decoration:none;font-weight:600;font-size:.88rem">Chat IA</a></div></div>';
+          modal.querySelector("[data-cerrar]").addEventListener("click", cerrar);
+          var box = modal.querySelector("#sbpd");
+          var h = { "Content-Type": "application/json" };
+          var s = ses();
+          if (s.access_token) h["Authorization"] = "Bearer " + s.access_token;
+          fetch(API + "/dashboard/pick-del-dia", { headers: h })
+            .then(function (r) { return r.json().catch(function () { return {}; }); })
+            .then(function (d) {
+              if (!d || !d.pick) {
+                box.innerHTML = '<p style="margin:0">Todavia no hay pick estrella del dia. Vuelve mas tarde o revisa los pronosticos del dia.</p>';
+                return;
+              }
+              var p = d.pick;
+              box.innerHTML = '<div style="background:#1b1f36;border:1px solid #3a3360;border-radius:12px;padding:12px">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+                '<b>' + esc(p.eventName) + '</b>' +
+                '<span style="background:#14532d;color:#4ade80;border-radius:999px;padding:2px 10px;font-size:.75rem;font-weight:700;white-space:nowrap">cuota ' + esc(p.odds) + '</span></div>' +
+                '<p style="margin:8px 0 4px;color:#c7cbe8">' + esc(p.titulo) + ' - <b>' + esc(p.selection) + '</b></p>' +
+                '<p style="margin:6px 0 0;color:#8b93b5;font-size:.85rem">' + esc(d.justificacion) + '</p>' +
+                '<p style="margin:8px 0 0;color:#6b7399;font-size:.75rem">' + (d.elegido_por === "ia" ? "Elegido y justificado por la IA" : "Pick con mayor confianza del dia") + (p.league ? " - " + esc(p.league) : "") + '</p></div>';
+            })
+            .catch(function () {
+              box.innerHTML = '<p style="margin:0">No pude cargar el pick del dia ahora. Intenta de nuevo.</p>';
+            });
+        });
+      })();
+    </script>
   </body>
 </html>
