@@ -5,7 +5,7 @@ from urllib.parse import urljoin, quote
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response, FileResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response, FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 import db
@@ -771,6 +771,63 @@ def dashboard_reset(user=Depends(get_admin)):
     """Borra TODOS los picks para regenerarlos con equipos/logos (admin)."""
     db.run_query("delete from ai_picks")
     return {"ok": True, "message": "Picks borrados. Se regeneraran en el proximo ciclo."}
+
+
+# ==============================
+# EXTRAS: track record / pick del dia / parlay / paginas
+# ==============================
+
+import extras
+
+
+class ParlayIn(BaseModel):
+    ids: list[str]
+    stake: float = 10.0
+
+
+@app.get("/dashboard/track-record")
+def track_record_publico():
+    """Track record agregado por mercado/deporte/liga (publico: es marketing)."""
+    return db.track_record()
+
+
+@app.get("/dashboard/pick-del-dia")
+def pick_del_dia_endpoint(user=Depends(get_current_user)):
+    """El pick estrella del dia elegido y justificado por la IA (cache 1h)."""
+    return extras.pick_del_dia()
+
+
+@app.post("/dashboard/parlay")
+def parlay_simular(data: ParlayIn, user=Depends(get_current_user)):
+    """Simulador de parlay: cuota combinada + probabilidad + pago potencial."""
+    return extras.simular_parlay(data.ids, data.stake)
+
+
+@app.post("/dashboard/parlay/opinion")
+def parlay_opinion(data: ParlayIn, user=Depends(get_current_user)):
+    """Veredicto corto de la IA sobre el parlay armado."""
+    r = extras.simular_parlay(data.ids, data.stake)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "Parlay invalido"))
+    return {"opinion": extras.opinion_ia_parlay(r)}
+
+
+@app.get("/perfil", response_class=HTMLResponse)
+def pagina_perfil():
+    """Pagina de perfil: plan, expiracion e historial de pagos."""
+    return HTMLResponse(extras.html_perfil())
+
+
+@app.get("/parlay", response_class=HTMLResponse)
+def pagina_parlay():
+    """Simulador de parlay (pagina propia)."""
+    return HTMLResponse(extras.html_parlay())
+
+
+@app.get("/track", response_class=HTMLResponse)
+def pagina_track():
+    """Track record de la IA (pagina publica)."""
+    return HTMLResponse(extras.html_track())
 
 
 # ==============================

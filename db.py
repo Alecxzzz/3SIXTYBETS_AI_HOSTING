@@ -1032,3 +1032,128 @@ def count_aciertos_historico():
         return {"aciertos": 0, "resueltos": 0}
     return {"aciertos": int(row["aciertos"]), "resueltos": int(row["resueltos"])}
 
+
+# ============================================================
+# TRACK RECORD POR MERCADO / DEPORTE / LIGA
+# ============================================================
+
+def _categoria_mercado(market: str, titulo: str) -> str:
+    """Clasifica un pick en una familia de mercado legible."""
+    t = f"{market or ''} {titulo or ''}".lower()
+    if "ambos" in t or "btts" in t:
+        return "Ambos marcan (BTTS)"
+    if "handicap" in t or "hándicap" in t:
+        return "Hándicap"
+    if "corner" in t:
+        return "Corners"
+    if "ganador" in t or "moneyline" in t or "match winner" in t or "win" in t:
+        return "Ganador (ML)"
+    if "over" in t or "under" in t or "más de" in t or "menos de" in t or "mas de" in t or "menos de" in t:
+        return "Over/Under"
+    if "total" in t:
+        return "Over/Under"
+    return "Otros"
+
+
+def _subcategoria_deporte(sport: str, familia: str) -> str:
+    """Over/Under se separa por deporte (goles vs puntos vs carreras)."""
+    if familia != "Over/Under":
+        return ""
+    return {
+        "soccer": " (goles)",
+        "basketball": " (puntos)",
+        "baseball": " (carreras)",
+        "football": " (puntos)",
+        "hockey": " (goles)",
+        "tennis": " (juegos)",
+    }.get(sport, "")
+
+
+def track_record(min_resueltos: int = 3):
+    """Track record agrupado por familia de mercado, deporte y liga.
+
+    Solo picks resueltos (ACIERTO/FALLO). Ordena por efectividad con
+    un minimo de muestras para que los % sean honestos.
+    """
+    rows = run_query(
+        "select market, titulo, sport, sport_label, league, result "
+        "from ai_picks where result in ('ACIERTO', 'FALLO')"
+    )
+    if not rows:
+        return {"total": {"resueltos": 0, "aciertos": 0, "efectividad": 0}, "mercados": [], "deportes": [], "ligas": []}
+
+    def _nueva():
+        return {"resueltos": 0, "aciertos": 0}
+
+    mercados, deportes, ligas = {}, {}, {}
+    for r in rows:
+        familia = _categoria_mercado(r.get("market"), r.get("titulo")) + _subcategoria_deporte(r.get("sport"), _categoria_mercado(r.get("market"), r.get("titulo")))
+        acierto = 1 if r.get("result") == "ACIERTO" else 0
+        for grupo, clave in (
+            (mercados, familia),
+            (deportes, r.get("sport_label") or r.get("sport") or "?"),
+            (ligas, r.get("league") or "Otra"),
+        ):
+            d = grupo.setdefault(clave, _nueva())
+            d["resueltos"] += 1
+            d["aciertos"] += acierto
+
+    def _formar(grupo: dict) -> list:
+        salida = []
+        for nombre, d in grupo.items():
+            if d["resueltos"] < 1:
+                continue
+            salida.append({
+                "nombre": nombre,
+                "resueltos": d["resueltos"],
+                "aciertos": d["aciertos"],
+                "efectividad": round(100 * d["aciertos"] / d["resueltos"]),
+                "confiable": d["resueltos"] >= min_resueltos,
+            })
+        salida.sort(key=lambda x: (-x["efectividad"], -x["resueltos"]))
+        return salida
+
+    total = {"resueltos": len(rows), "aciertos": sum(1 for r in rows if r.get("result") == "ACIERTO")}
+    total["efectividad"] = round(100 * total["aciertos"] / total["resueltos"]) if total["resueltos"] else 0
+    return {
+        "total": total,
+        "mercados": _formar(mercados),
+        "deportes": _formar(deportes),
+        "ligas": _formar(ligas),
+    }
+
+
+def list_picks_por_ids(ids: list) -> list:
+    """Picks por id (para el simulador de parlay). Solo de hoy y pendientes."""
+    if not ids:
+        return []
+    placeholders = ", ".join(["%s"] * len(ids))
+    rows = run_query(
+        f"select * from ai_picks where id in ({placeholders}) and pick_date = %s",
+        (*ids, now_utc().date()),
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
+
+
+def list_ordenes_usuario(user_id: str, limit: int = 25) -> list:
+    """Historial de ordenes Pagadito del usuario (mas recientes primero)."""
+    rows = run_query(
+        "select ern, plan_code, amount, currency, status, reference, created_at "
+        "from pagadito_orders where user_id = %s "
+        "order by created_at desc limit " + str(int(limit)),
+        (user_id,),
+    )
+    salida = []
+    for r in (rows or []):
+        salida.append({
+            "ern": r.get("ern"),
+            "plan": r.get("plan_code"),
+            "monto": float(r["amount"]) if r.get("amount") is not None else None,
+            "moneda": r.get("currency"),
+            "estado": r.get("status"),
+            "referencia": r.get("reference"),
+            "fecha": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return salida
+
+
