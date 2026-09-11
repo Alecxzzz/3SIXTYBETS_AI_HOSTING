@@ -235,7 +235,7 @@ def _pagina(titulo: str, cuerpo: str, script: str = "") -> str:
 <body><div class="wrap">{cuerpo}</div>
 <script>
 const TK_KEY = "sb_token";
-function tk() {{ return localStorage.getItem(TK_KEY) || ""; }}
+function tk() {{ const q = new URLSearchParams(location.search).get("token"); if (q) {{ localStorage.setItem(TK_KEY, q); return q; }} return localStorage.getItem(TK_KEY) || ""; }}
 function setTk(t) {{ localStorage.setItem(TK_KEY, t); }}
 async function api(path, opts={{}}) {{
   const h = {{"Content-Type": "application/json"}};
