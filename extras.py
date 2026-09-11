@@ -7,6 +7,7 @@ Los endpoints los registra main.py importando desde aqui.
 
 import json
 import re
+import threading
 import time
 
 # ------------------------------------------------------------------
@@ -44,10 +45,58 @@ def _conf_num(p: dict) -> float:
         return 0.0
 
 
-def pick_del_dia(force: bool = False) -> dict:
-    """El pick estrella del dia elegido por la IA (cache 1 hora)."""
-    import dashboard
+def _ia_elegir(candidatos: list, cache_key: str):
+    """Eleccion de la IA en segundo plano; actualiza la cache al terminar."""
+    try:
+        import dashboard
 
+        resumen = [
+            {
+                "id": p["id"],
+                "partido": p.get("eventName"),
+                "liga": p.get("league") or p.get("sportLabel"),
+                "apuesta": f"{p.get('titulo')} -> {p.get('selection')}",
+                "cuota": p.get("odds"),
+                "confianza": p.get("confidence"),
+                "razon": (p.get("rationale") or "")[:200],
+            }
+            for p in candidatos
+        ]
+        prompt = (
+            "Eres el analista jefe de 3SIXTYBETS. De estos picks generados hoy:\n"
+            f"{json.dumps(resumen, ensure_ascii=False, indent=1)}\n\n"
+            "Elige UN SOLO pick como 'PICK DEL DIA' (el que mejor combina valor, "
+            "probabilidad y confiabilidad). Responde SOLO JSON:\n"
+            '{"pickId": "...", "justificacion": "2-3 frases concretas explicando '
+            'por que es el mejor, mencionando la razon estadistica principal"}'
+        )
+        texto, _modelo = dashboard._preguntar_ia(prompt)
+        if not texto:
+            return
+        m = re.search(r"\{.*\}", texto, re.DOTALL)
+        if not m:
+            return
+        eleccion = json.loads(m.group(0))
+        match = next((p for p in candidatos if p["id"] == eleccion.get("pickId")), None)
+        if not match:
+            return
+        _pick_del_dia_cache.update(
+            key=cache_key,
+            data={
+                "pick": match,
+                "justificacion": (eleccion.get("justificacion") or "").strip(),
+                "elegido_por": "ia",
+            },
+        )
+    except Exception as exc:
+        print(f"[Extras] pick del dia IA error: {exc}")
+
+
+def pick_del_dia(force: bool = False) -> dict:
+    """El pick estrella del dia. Responde INSTANTANEO con el pick de mayor
+    confianza y lanza la eleccion de la IA en un hilo de fondo: el proximo
+    fetch (minuto siguiente) ya trae la justificacion de la IA.
+    """
     ahora_hora = time.strftime("%Y%m%d%H")
     candidatos = _picks_candidatos_hoy()
     if not candidatos:
@@ -61,51 +110,17 @@ def pick_del_dia(force: bool = False) -> dict:
     if not force and _pick_del_dia_cache["key"] == cache_key:
         return _pick_del_dia_cache["data"]
 
-    elegido = None
-    justificacion = ""
-    elegido_por = "confianza"
-
-    resumen = [
-        {
-            "id": p["id"],
-            "partido": p.get("eventName"),
-            "liga": p.get("league") or p.get("sportLabel"),
-            "apuesta": f"{p.get('titulo')} -> {p.get('selection')}",
-            "cuota": p.get("odds"),
-            "confianza": p.get("confidence"),
-            "razon": (p.get("rationale") or "")[:200],
-        }
-        for p in candidatos[:12]
-    ]
-
-    prompt = (
-        "Eres el analista jefe de 3SIXTYBETS. De estos picks generados hoy:\n"
-        f"{json.dumps(resumen, ensure_ascii=False, indent=1)}\n\n"
-        "Elige UN SOLO pick como 'PICK DEL DIA' (el que mejor combina valor, "
-        "probabilidad y confiabilidad). Responde SOLO JSON:\n"
-        '{"pickId": "...", "justificacion": "2-3 frases concretas explicando '
-        'por que es el mejor, mencionando la razon estadistica principal"}'
-    )
-    texto, _modelo = dashboard._preguntar_ia(prompt)
-    if texto:
-        m = re.search(r"\{.*\}", texto, re.DOTALL)
-        if m:
-            try:
-                eleccion = json.loads(m.group(0))
-                match = next((p for p in candidatos if p["id"] == eleccion.get("pickId")), None)
-                if match:
-                    elegido = match
-                    justificacion = (eleccion.get("justificacion") or "").strip()
-                    elegido_por = "ia"
-            except (ValueError, TypeError):
-                pass
-
-    if not elegido:
-        elegido = candidatos[0]
-        justificacion = (elegido.get("rationale") or "").strip()
-
-    data = {"pick": elegido, "justificacion": justificacion, "elegido_por": elegido_por}
+    # Respuesta inmediata: pick de mayor confianza con su rationale real
+    elegido = candidatos[0]
+    data = {
+        "pick": elegido,
+        "justificacion": (elegido.get("rationale") or "").strip(),
+        "elegido_por": "confianza",
+    }
     _pick_del_dia_cache.update(key=cache_key, data=data)
+
+    # La IA elige en segundo plano (no bloquea la respuesta)
+    threading.Thread(target=_ia_elegir, args=(candidatos[:12], cache_key), daemon=True).start()
     return data
 
 
