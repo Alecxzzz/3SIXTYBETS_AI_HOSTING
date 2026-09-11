@@ -444,22 +444,32 @@ def ensure_admin_user():
             """,
             (hash_password(password), access_expires_at, existing["id"]),
         )
-        return
-
-    run_query(
-        """
-        insert into users
-        (id, username, password_hash, role, access_expires_at, created_at)
-        values (%s, %s, %s, 'admin', %s, %s)
-        """,
-        (
-            secrets.token_urlsafe(16),
-            username,
-            hash_password(password),
-            access_expires_at,
-            now_utc(),
+    else:
+        run_query(
+            """
+            insert into users
+            (id, username, password_hash, role, access_expires_at, created_at)
+            values (%s, %s, %s, 'admin', %s, %s)
+            """,
+            (
+                secrets.token_urlsafe(16),
+                username,
+                hash_password(password),
+                access_expires_at,
+                now_utc(),
         ),
     )
+
+    # Admins adicionales (ADMIN_EXTRA_USERS, separados por coma): se promociona
+    # a role='admin' con acceso ILIMITADO sin tocar su contrasena.
+    extra = os.getenv("ADMIN_EXTRA_USERS", "")
+    for nombre in (u.strip() for u in extra.split(",") if u.strip()):
+        usuario = get_user_by_username(nombre)
+        if usuario and usuario.get("role") != "admin":
+            run_query(
+                "update users set role = 'admin', access_expires_at = %s where id = %s",
+                (access_expires_at, usuario["id"]),
+            )
 
 
 def get_user_by_username(username):
