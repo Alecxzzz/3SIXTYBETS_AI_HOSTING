@@ -785,6 +785,16 @@ class ParlayIn(BaseModel):
     stake: float = 10.0
 
 
+class SoporteIn(BaseModel):
+    mensaje: str
+
+
+@app.post("/support/chat")
+def soporte_chat_endpoint(data: SoporteIn, user=Depends(get_current_user)):
+    """Soporte con IA: responde amable con datos reales del usuario (BD)."""
+    return extras.soporte_chat(user, data.mensaje)
+
+
 @app.get("/dashboard/track-record")
 def track_record_publico():
     """Track record agregado por mercado/deporte/liga (publico: es marketing)."""

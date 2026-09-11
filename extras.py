@@ -194,6 +194,96 @@ def opinion_ia_parlay(data: dict) -> str:
 
 
 # ------------------------------------------------------------------
+# SOPORTE CON IA (usa datos reales de la BD del usuario)
+# ------------------------------------------------------------------
+
+WHATSAPP = "50588287489"
+
+
+def _contexto_usuario(user: dict) -> str:
+    """Datos reales del usuario para que la IA responda con hechos."""
+    import db
+    import json as _json
+
+    pu = db.public_user(user)
+    exp = pu.get("access_expires_at")
+    if exp:
+        from datetime import datetime
+
+        try:
+            dt = datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
+            ilimitado = dt.year >= 9999
+            dias = max((dt - datetime.utcnow().replace(tzinfo=dt.tzinfo)).days, 0)
+        except (ValueError, TypeError):
+            ilimitado, dias = False, 0
+    else:
+        ilimitado, dias = False, 0
+
+    ordenes = db.list_pagadito_orders_for_user(user["id"]) or []
+    pagos = [
+        {
+            "plan": o.get("plan_code"),
+            "monto": float(o["amount"]) if o.get("amount") is not None else None,
+            "estado": o.get("status"),
+            "fecha": o["created_at"].isoformat()[:10] if o.get("created_at") else None,
+        }
+        for o in ordenes[:5]
+    ]
+    hist = db.count_aciertos_historico()
+
+    return _json.dumps(
+        {
+            "usuario": pu.get("username"),
+            "rol": pu.get("role"),
+            "plan": "ILIMITADO" if ilimitado else f"{dias} dias restantes",
+            "expira": None if ilimitado else str(exp)[:10] if exp else None,
+            "efectividad_historica_ia": f"{hist['aciertos']}/{hist['resueltos']} ({round(100 * hist['aciertos'] / hist['resueltos']) if hist['resueltos'] else 0}%)",
+            "ultimos_pagos": pagos,
+        },
+        ensure_ascii=False,
+    )
+
+
+def soporte_chat(user: dict, mensaje: str) -> dict:
+    """Respuesta de la IA de soporte, amable y con datos reales del usuario."""
+    import dashboard
+
+    mensaje = (mensaje or "").strip()[:600]
+    if not mensaje:
+        return {"respuesta": "Cuentame en que te ayudo :)"}
+
+    contexto = _contexto_usuario(user)
+    prompt = (
+        "Eres el asistente de soporte de 3SIXTYBETS (plataforma de pronosticos "
+        "deportivos con IA, canales de TV en vivo y suscripciones pagadas con "
+        "Pagadito). Escribe MUY amable, con emojis discretos, en espanol, "
+        "maximo 4 frases, sin listas.\n"
+        "DATOS REALES del usuario (usalos, no los inventes, no los muestres "
+        "en crudo a menos que sirvan):\n"
+        f"{contexto}\n\n"
+        "Funciona de la plataforma: picks diarios generados por IA y resueltos "
+        "automaticamente con resultados reales; dashboard con efectividad; "
+        "simulador de parlay en /parlay; track record en /track; suscripcion "
+        "por Pagadito (los pagos COMPLETED activan los dias automaticamente); "
+        "acceso con dias ilimitados para admins.\n"
+        "REGLA IMPORTANTE: si el problema es grave o tecnico y tu no puedes "
+        "resolverlo (pago rechazado, dinero no acreditado, falla del canal de "
+        "TV, reclamo), termina recomendando con carino escribir al WhatsApp de "
+        f"soporte: 50588287489 (wa.me/{WHATSAPP}).\n\n"
+        f"El usuario pregunta: {mensaje}"
+    )
+    texto, _modelo = dashboard._preguntar_ia(prompt)
+    respuesta = (texto or "").strip()
+    if not respuesta:
+        respuesta = (
+            "Ahora mismo estoy teniendo problemas para procesar tu mensaje 😅. "
+            f"Escribenos directo al WhatsApp {WHATSAPP} y te ayudamos al instante."
+        )
+    return {"respuesta": respuesta[:700]}
+
+
+
+# ------------------------------------------------------------------
 # PAGINAS HTML (perfil / parlay / track) - tema oscuro del sitio
 # ------------------------------------------------------------------
 
