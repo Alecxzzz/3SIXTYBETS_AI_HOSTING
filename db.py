@@ -220,6 +220,18 @@ def init_db():
             index ai_picks_date_idx (pick_date)
         )
         """,
+        """
+        create table if not exists support_chats (
+            id int auto_increment primary key,
+            user_id varchar(64) not null,
+            username varchar(40) not null,
+            mensaje text not null,
+            respuesta text not null,
+            created_at datetime not null,
+            index support_chats_user_idx (user_id),
+            index support_chats_date_idx (created_at)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -1136,7 +1148,6 @@ def list_picks_por_ids(ids: list) -> list:
 
 
 def list_ordenes_usuario(user_id: str, limit: int = 25) -> list:
-    """Historial de ordenes Pagadito del usuario (mas recientes primero)."""
     rows = run_query(
         "select ern, plan_code, amount, currency, status, reference, created_at "
         "from pagadito_orders where user_id = %s "
@@ -1152,6 +1163,36 @@ def list_ordenes_usuario(user_id: str, limit: int = 25) -> list:
             "moneda": r.get("currency"),
             "estado": r.get("status"),
             "referencia": r.get("reference"),
+            "fecha": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return salida
+
+
+def save_support_chat(user_id: str, username: str, mensaje: str, respuesta: str) -> bool:
+    """Guarda una conversacion de soporte (dataset para mejorar la IA)."""
+    return bool(run_query(
+        "insert into support_chats (user_id, username, mensaje, respuesta, created_at) "
+        "values (%s, %s, %s, %s, %s)",
+        (user_id, username, mensaje[:2000], respuesta[:2000], now_utc()),
+    ))
+
+
+def list_support_chats(limit: int = 100, user_id: str | None = None) -> list:
+    """Conversaciones de soporte (mas recientes primero). Para el admin."""
+    where = "where user_id = %s " if user_id else ""
+    params = (user_id, int(limit)) if user_id else (int(limit),)
+    rows = run_query(
+        f"select id, user_id, username, mensaje, respuesta, created_at "
+        f"from support_chats {where}order by created_at desc limit %s",
+        params,
+    )
+    salida = []
+    for r in (rows or []):
+        salida.append({
+            "id": r.get("id"),
+            "user": r.get("username"),
+            "mensaje": r.get("mensaje"),
+            "respuesta": r.get("respuesta"),
             "fecha": r["created_at"].isoformat() if r.get("created_at") else None,
         })
     return salida

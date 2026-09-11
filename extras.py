@@ -6,6 +6,7 @@ Los endpoints los registra main.py importando desde aqui.
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -198,6 +199,32 @@ def opinion_ia_parlay(data: dict) -> str:
 # ------------------------------------------------------------------
 
 WHATSAPP = "50588287489"
+KB_FILE = os.path.join(os.path.dirname(__file__), "soporte_kb.json")
+KB_DEFAULT = {
+    "planes": {
+        "plan15": "suscripcion de 15 dias ($5)",
+        "plan30": "suscripcion de 30 dias ($10)",
+    },
+    "faq": [
+        "P: ¿Como activo mi suscripcion? R: Pagas con Pagadito desde el boton de planes; al confirmarse el pago (estado COMPLETED) los dias se activan automaticamente.",
+        "P: Pague y no se activaron mis dias R: Los pagos tardan 1-3 minutos en confirmarse; si tras 5 minutos no se activaron, es un caso para WhatsApp.",
+        "P: ¿Cada cuanto se generan los picks? R: La IA genera picks del dia automaticamente cada ciclo del scheduler y los resuelve con el marcador real al terminar cada partido.",
+        "P: ¿Por que no veo todos los picks? R: Los picks con cuota menor a 1.20 o datos incompletos se descartan automaticamente por calidad.",
+        "P: ¿Puedo ver el historial de aciertos? R: Si, en el dashboard (pestaña Acertados) y el track record completo en /track.",
+        "P: ¿Los picks garantizan ganar? R: No. Es analisis estadistico con ~67% de efectividad historica; apuesta con responsabilidad.",
+    ],
+    "reglas": "Nunca prometas resultados de apuestas. Nunca des picks de apuestas en el soporte (para eso esta la IA principal).",
+}
+
+
+def _kb() -> dict:
+    """Base de conocimiento de soporte (editable sin tocar codigo)."""
+    try:
+        with open(KB_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else KB_DEFAULT
+    except (OSError, ValueError):
+        return KB_DEFAULT
 
 
 def _contexto_usuario(user: dict) -> str:
@@ -245,27 +272,31 @@ def _contexto_usuario(user: dict) -> str:
 
 
 def soporte_chat(user: dict, mensaje: str) -> dict:
-    """Respuesta de la IA de soporte, amable y con datos reales del usuario."""
+    """Respuesta de la IA de soporte exclusiva: prompt dedicado + base de
+    conocimiento propia + datos reales del usuario. Cada conversacion se
+    guarda en la BD (dataset para futuras mejoras/fine-tuning).
+    """
     import dashboard
+    import db
 
     mensaje = (mensaje or "").strip()[:600]
     if not mensaje:
         return {"respuesta": "Cuentame en que te ayudo :)"}
 
     contexto = _contexto_usuario(user)
+    kb = _kb()
     prompt = (
-        "Eres el asistente de soporte de 3SIXTYBETS (plataforma de pronosticos "
-        "deportivos con IA, canales de TV en vivo y suscripciones pagadas con "
-        "Pagadito). Escribe MUY amable, con emojis discretos, en espanol, "
-        "maximo 4 frases, sin listas.\n"
+        "Eres el asistente EXCLUSIVO de soporte de 3SIXTYBETS (plataforma de "
+        "pronosticos deportivos con IA, canales de TV en vivo y suscripciones "
+        "pagadas con Pagadito). Escribe MUY amable, con emojis discretos, en "
+        "espanol, maximo 4 frases, sin listas.\n\n"
+        "BASE DE CONOCIMIENTO OFICIAL (respeta esto, no inventes):\n"
+        f"Planes: {json.dumps(kb.get('planes', {}), ensure_ascii=False)}\n"
+        "FAQ:\n- " + "\n- ".join(kb.get("faq", [])) + "\n"
+        f"Reglas: {kb.get('reglas', '')}\n\n"
         "DATOS REALES del usuario (usalos, no los inventes, no los muestres "
         "en crudo a menos que sirvan):\n"
         f"{contexto}\n\n"
-        "Funciona de la plataforma: picks diarios generados por IA y resueltos "
-        "automaticamente con resultados reales; dashboard con efectividad; "
-        "simulador de parlay en /parlay; track record en /track; suscripcion "
-        "por Pagadito (los pagos COMPLETED activan los dias automaticamente); "
-        "acceso con dias ilimitados para admins.\n"
         "REGLA IMPORTANTE: si el problema es grave o tecnico y tu no puedes "
         "resolverlo (pago rechazado, dinero no acreditado, falla del canal de "
         "TV, reclamo), termina recomendando con carino escribir al WhatsApp de "
@@ -279,7 +310,15 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
             "Ahora mismo estoy teniendo problemas para procesar tu mensaje 😅. "
             f"Escribenos directo al WhatsApp {WHATSAPP} y te ayudamos al instante."
         )
-    return {"respuesta": respuesta[:700]}
+    respuesta = respuesta[:700]
+
+    # Dataset: cada conversacion queda guardada para futuras mejoras
+    try:
+        db.save_support_chat(user["id"], user.get("username", "?"), mensaje, respuesta)
+    except Exception as exc:
+        print(f"[Extras] save_support_chat error: {exc}")
+
+    return {"respuesta": respuesta}
 
 
 

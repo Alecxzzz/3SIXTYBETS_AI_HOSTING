@@ -795,6 +795,28 @@ def soporte_chat_endpoint(data: SoporteIn, user=Depends(get_current_user)):
     return extras.soporte_chat(user, data.mensaje)
 
 
+@app.get("/admin/soporte/historial")
+def admin_soporte_historial(user=Depends(get_admin), limit: int = 100):
+    """Conversaciones de soporte (dataset para mejorar/fine-tunear la IA)."""
+    return {"conversaciones": db.list_support_chats(limit=min(limit, 500))}
+
+
+@app.get("/admin/soporte/kb")
+def admin_soporte_kb(user=Depends(get_admin)):
+    """Base de conocimiento actual del soporte."""
+    return extras._kb()
+
+
+@app.post("/admin/soporte/kb")
+def admin_soporte_kb_update(data: dict, user=Depends(get_admin)):
+    """Actualiza la base de conocimiento del soporte (planes, faq, reglas)."""
+    import json as _json
+
+    with open(extras.KB_FILE, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "kb": extras._kb()}
+
+
 @app.get("/dashboard/track-record")
 def track_record_publico():
     """Track record agregado por mercado/deporte/liga (publico: es marketing)."""
