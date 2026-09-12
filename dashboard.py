@@ -49,6 +49,7 @@ _FRASES_SIN_DATOS = (
     "sin datos", "no disponible", "no disponibles", "no especificad",
     "no identificad", "no verifiable", "sin cuota", "linea no disponible",
     "n/d", "no apostar", "prepick", "sin recomendacion", "sin recomendación",
+    "sin pick",
 )
 
 _NOMBRES_INVALIDOS = {"", "?", "n/a", "na", "jugador a", "jugador b",
@@ -58,6 +59,37 @@ _NOMBRES_INVALIDOS = {"", "?", "n/a", "na", "jugador a", "jugador b",
 
 def _nombre_valido(nombre) -> bool:
     return bool(nombre) and str(nombre).strip().lower() not in _NOMBRES_INVALIDOS
+
+
+def _titulo_contradice(pick: dict, p: dict) -> bool:
+    """True si el titulo contradice la seleccion de doble oportunidad.
+
+    Bug real detectado: titulo 'Alaves no pierde (1X)' con seleccion '2X'
+    (apuestas opuestas). Solo aplica a doble oportunidad; otros mercados
+    devuelven False.
+    """
+    sel = str(pick.get("selection") or "").upper().replace(" ", "")
+    codigo_sel = {"2X": "X2", "21": "12"}.get(sel, sel)
+    if codigo_sel not in ("1X", "X2", "12"):
+        return False
+    titulo = str(pick.get("titulo") or "").upper()
+
+    # Codigo explicito en el titulo (1X, 2X, X2, 12, 21)
+    m = re.search(r"\b(1X|X2|2X|12|21)\b", titulo)
+    if m:
+        cod = {"2X": "X2", "21": "12"}.get(m.group(1), m.group(1))
+        return cod != codigo_sel
+
+    # Frases "X no pierde" / "X no gana" con el nombre del equipo
+    local = str(p.get("home_name") or "").upper()
+    visitante = str(p.get("away_name") or "").upper()
+    for nombre, cod_no_pierde in ((local, "1X"), (visitante, "X2")):
+        if nombre and nombre in titulo and "NO PIERDE" in titulo:
+            return cod_no_pierde != codigo_sel
+    for nombre, cod_no_gana in ((local, "X2"), (visitante, "1X")):
+        if nombre and nombre in titulo and "NO GANA" in titulo:
+            return cod_no_gana != codigo_sel
+    return False
 
 
 def _texto_sin_datos(texto) -> bool:
@@ -853,6 +885,11 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             rechazados_calidad += 1
             continue
 
+        # Coherencia titulo vs seleccion (bug real: 'no pierde (1X)' con 2X)
+        if _titulo_contradice(pick, p):
+            rechazados_calidad += 1
+            continue
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -1025,7 +1062,9 @@ def _resolver_deterministico(pick: dict, detail: dict):
 
     # ---- Doble oportunidad ----
     if "doble oportunidad" in texto or "doble oport" in texto:
-        codigo = sel.replace(" ", "")
+        codigo = sel.replace(" ", "").upper()
+        # Normalizar variantes del catalogo (2X == X2, 21 == 12)
+        codigo = {"2X": "X2", "21": "12"}.get(codigo, codigo).lower()
         if hs == as_:
             return "ACIERTO" if codigo in ("1x", "x2") else "FALLO"
         gana_local = hs > as_

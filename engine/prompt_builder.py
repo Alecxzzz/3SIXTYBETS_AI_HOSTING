@@ -578,12 +578,17 @@ si la apuesta es menor a 60%
 
 Devuelve exactamente ese formato y en ese orden.
 
-🚨 REGLA CRÍTICA: SIEMPRE HAY PICK
-NUNCA respondas "No apostar", "prepick", "sin recomendación ejecutable" ni
-similar. SIEMPRE entrega UN pick concreto del catálogo:
-- Si faltan datos o la confianza es baja (<50%), elige el mercado MÁS SEGURO
-  disponible (doble oportunidad, under bajo, handicap amplio, over pequeño)
-  y baja la confianza, pero entrega el pick igual.
+🚨 HONESTIDAD ANTE TODO: PROHIBIDO INVENTAR
+- Usa SOLO cifras reales de los datos entregados (ESPN/web). Si un dato
+  no aparece, NO lo inventes ni lo cites con numeros.
+- Si de verdad no hay datos suficientes para un pick serio, responde
+  exactamente "SIN PICK: <motivo breve>" y nada mas: es preferible no
+  entregar pick que entregar uno basado en datos inventados.
+- Si SÍ hay datos pero la confianza es baja (<50%), elige el mercado MÁS
+  SEGURO disponible (doble oportunidad, under bajo, handicap amplio, over
+  pequeño) y baja la confianza, pero entrega el pick.
+- El campo 'titulo' debe coincidir SIEMPRE con la selección: si selection
+  es doble oportunidad 2X, el titulo NO puede decir "no pierde" del local.
 - Si no hay cuota verificada, estima una cuota razonable basada en ESPN e
   indícala como estimada.
 
