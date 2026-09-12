@@ -27,7 +27,7 @@ DATABASE_URL=postgres://usuario:password@host:puerto/database?sslmode=require
 # 36AI (Groq + tools + cuotas reales) - segunda IA del ecosistema
 AI36_GROQ_API_KEY=tu_groq_key
 AI36_GROQ_MODEL=openai/gpt-oss-120b
-AI36_GROQ_FALLBACK=llama-3.3-70b-versatile
+AI36_GROQ_FALLBACK=openai/gpt-oss-20b
 AI36_ODDS_API_KEY=tu_odds_api_key
 AI36_ODDS_URL=https://odds-api.io/api/v1/odds
 

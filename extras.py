@@ -276,8 +276,9 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
     conocimiento propia + datos reales del usuario. Cada conversacion se
     guarda en la BD (dataset para futuras mejoras/fine-tuning).
     """
-    import dashboard
     import db
+
+    from ai.soporte import responder as ia_soporte
 
     mensaje = (mensaje or "").strip()[:600]
     if not mensaje:
@@ -290,6 +291,10 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
         "pronosticos deportivos con IA, canales de TV en vivo y suscripciones "
         "pagadas con Pagadito). Escribe MUY amable, con emojis discretos, en "
         "espanol, maximo 4 frases, sin listas.\n\n"
+        "FORMATO DE RESPUESTA (obligatorio): texto conversacional plano. "
+        "NUNCA respondas con JSON, diccionarios, codigo ni razonamiento; "
+        "NUNCA uses asteriscos, numerales ni markdown. El bloque 'DATOS "
+        "REALES' es interno: no lo repitas ni imites su formato.\n\n"
         "BASE DE CONOCIMIENTO OFICIAL (respeta esto, no inventes):\n"
         f"Planes: {json.dumps(kb.get('planes', {}), ensure_ascii=False)}\n"
         "FAQ:\n- " + "\n- ".join(kb.get("faq", [])) + "\n"
@@ -303,7 +308,9 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
         f"soporte: 50588287489 (wa.me/{WHATSAPP}).\n\n"
         f"El usuario pregunta: {mensaje}"
     )
-    texto, _modelo = dashboard._preguntar_ia(prompt)
+    # Modelo APARTE de soporte (ai/soporte.py): no comparte codigo ni
+    # modelos con 36AI ni Demian. Si no responde, cae al aviso de WhatsApp.
+    texto = ia_soporte(prompt)
     respuesta = (texto or "").strip()
     if not respuesta:
         respuesta = (
