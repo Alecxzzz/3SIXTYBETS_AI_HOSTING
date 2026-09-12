@@ -43,6 +43,31 @@ def _session_dir(key: str) -> str:
     return os.path.join(tempfile.gettempdir(), f"live_{key}")
 
 
+def _stderr_tail(key: str, max_chars: int = 400) -> str:
+    """Ultimas lineas del log de ffmpeg (para diagnosticar por que fallo)."""
+    path = os.path.join(_session_dir(key), "ffmpeg_err.log")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            texto = fh.read().strip()
+    except OSError:
+        return "sin log de ffmpeg"
+    if not texto:
+        return "sin salida de error de ffmpeg"
+    texto = " | ".join(
+        line.strip() for line in texto.splitlines()[-6:] if line.strip()
+    )
+    return texto[-max_chars:]
+
+
+def _cerrar_err_fh(sess: dict):
+    fh = sess.pop("err_fh", None)
+    if fh:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
 def _janitor():
     """Apaga sesiones sin actividad y limpia sus archivos."""
     while True:
@@ -55,6 +80,7 @@ def _janitor():
             ]
             for k in dead:
                 sess = _sessions.pop(k)
+                _cerrar_err_fh(sess)
                 try:
                     sess["proc"].terminate()
                 except Exception:
@@ -82,6 +108,7 @@ def start_session(url: str, referer: str | None = None) -> str:
             return key
         # Sesion muerta o inexistente: limpiar y arrancar de nuevo
         if sess:
+            _cerrar_err_fh(sess)
             try:
                 sess["proc"].kill()
             except Exception:
@@ -133,10 +160,21 @@ def _spawn(key: str):
             os.path.join(out_dir, "index.m3u8"),
         ]
         try:
+            # stderr de ffmpeg a archivo: si la fuente falla (geobloqueo,
+            # token vencido, codec no soportado), get_playlist devuelve el
+            # motivo real en el error en vez de un mensaje generico.
+            viejo = sess.pop("err_fh", None)
+            if viejo:
+                try:
+                    viejo.close()
+                except Exception:
+                    pass
+            err_fh = open(os.path.join(out_dir, "ffmpeg_err.log"), "wb")
+            sess["err_fh"] = err_fh
             sess["proc"] = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=err_fh,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -182,7 +220,9 @@ def get_playlist(key: str) -> str:
         if not is_alive(key):
             break
         time.sleep(0.5)
-    raise RuntimeError("El transcodificador no pudo iniciar para esta fuente.")
+    raise RuntimeError(
+        "ffmpeg no pudo iniciar con esta fuente: " + _stderr_tail(key)
+    )
 
 
 def get_segment_path(key: str, name: str) -> str | None:
