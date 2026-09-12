@@ -35,6 +35,8 @@ Despliegue (en el VPS del pais permitido):
 import base64
 import os
 import re
+import time
+from urllib.parse import urljoin
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -42,6 +44,21 @@ from fastapi.responses import Response, StreamingResponse
 
 # Token anti-abuso. CAMBIALO en produccion (env RELAY_TOKEN).
 RELAY_TOKEN = os.getenv("RELAY_TOKEN", "3SIXTY-RELE-CAMBIA-ESTO")
+
+# URL publica de este rele (ej. el tunel de cloudflared o la IP del VPS).
+# Necesaria para que las BaseURL del manifiesto sean ABSOLUTAS: el demuxer
+# DASH de ffmpeg ignora BaseURL relativas.
+RELAY_PUBLIC_URL = os.getenv("RELAY_PUBLIC_URL", "").rstrip("/")
+
+ACCESOS_LOG = os.path.join(os.path.dirname(__file__), "_rele_accesos.log")
+
+
+def _log(msg: str):
+    try:
+        with open(ACCESOS_LOG, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("[%H:%M:%S] ") + msg + "\n")
+    except OSError:
+        pass
 
 # El CDN exige un User-Agent de navegador real.
 UPSTREAM_UA = (
@@ -77,32 +94,105 @@ def manifiesto(k: str, u: str):
     if not u.startswith(("http://", "https://")):
         raise HTTPException(400, "url invalida")
 
-    r = requests.get(u, headers=HDRS, timeout=TIMEOUT)
-    if r.status_code != 200:
-        raise HTTPException(502, f"upstream {r.status_code}")
+    ultimo = None
+    r = None
+    for _intento in range(3):
+        try:
+            r = requests.get(u, headers=HDRS, timeout=TIMEOUT)
+            if r.status_code == 200:
+                break
+            ultimo = f"upstream {r.status_code}"
+        except requests.exceptions.RequestException as exc:
+            ultimo = f"error de conexion: {exc}"
+        r = None
+        time.sleep(2)
+    if r is None:
+        raise HTTPException(502, ultimo or "upstream sin respuesta")
 
     xml = r.text
-    # Directorio del .mpd: ahi viven init y segmentos (rutas relativas)
     base_dir = u.rsplit("/", 1)[0] + "/"
-    blob = base64.urlsafe_b64encode(base_dir.encode()).decode().rstrip("=")
-    base_rele = f"/r/{k}/{blob}/"
 
-    # Sustituir la BaseURL existente (si hay) o insertarla tras el tag raiz
-    if "<BaseURL" in xml:
-        xml = re.sub(
-            r"<BaseURL[^>]*>.*?</BaseURL>",
-            f"<BaseURL>{base_rele}</BaseURL>",
-            xml,
-            flags=re.DOTALL,
-        )
-    else:
-        xml = re.sub(
-            r"(<MPD\b[^>]*>)",
-            r"\1<BaseURL>" + base_rele + "</BaseURL>",
-            xml,
-            count=1,
-        )
+    def _b64(txt):
+        return base64.urlsafe_b64encode(txt.encode()).decode().rstrip("=")
 
+    def _destino(base):
+        if not base.endswith("/"):
+            base += "/"
+        bb = _b64(base)
+        if RELAY_PUBLIC_URL:
+            return f"{RELAY_PUBLIC_URL}/r/{k}/{bb}/"
+        return f"r/{k}/{bb}/"
+
+    def _attr_factory(destino):
+        def _attr(m2):
+            actual = m2.group(2)
+            if actual.startswith("http") or actual.startswith("/r/"):
+                return m2.group(0)  # ya reescrita, no tocar
+            return f'{m2.group(1)}="{destino}{actual}"'
+        return _attr
+
+    def _quitar_baseurls(bloque):
+        return re.sub(r"<BaseURL[^>]*>[^<]*</BaseURL>", "", bloque)
+
+    def _clonar_st_en_reps(bloque, st_xml, base_default):
+        """Copia el SegmentTemplate (nivel AdaptationSet) dentro de cada
+        Representation, reescrito con la base ABSOLUTA de cada una. Necesario
+        porque el dashdec de ffmpeg viejo ignora los <BaseURL> anidados."""
+        reps = list(re.finditer(r"<Representation\b.*?</Representation>", bloque, re.DOTALL))
+        if not reps:
+            return None
+        salida, ultimo = [], 0
+        for rep in reps:
+            salida.append(bloque[ultimo:rep.start()])
+            rb = rep.group(0)
+            m_base = re.search(r"<BaseURL[^>]*>([^<]+)</BaseURL>", rb)
+            base = m_base.group(1).strip() if m_base else base_default
+            att = _attr_factory(_destino(base))
+            st_copia = re.sub(r'(initialization)="([^"]+)"', att, st_xml)
+            st_copia = re.sub(r'(\bmedia)="([^"]+)"', att, st_copia)
+            rb = _quitar_baseurls(rb)
+            rb = re.sub(r"(<Representation\b[^>]*>)", lambda mm: mm.group(1) + st_copia, rb, count=1)
+            salida.append(rb)
+            ultimo = rep.end()
+        salida.append(bloque[ultimo:])
+        return "".join(salida)
+
+    def _procesar_set(m):
+        bloque = m.group(0)
+        m_st = re.search(r"<SegmentTemplate\b.*?</SegmentTemplate>", bloque, re.DOTALL)
+        if not m_st:
+            # Sin SegmentTemplate en el set
+            return _quitar_baseurls(bloque)
+        # Base del set: su propia BaseURL (los reps del set la comparten);
+        # si no tiene, el directorio del manifiesto.
+        b = re.search(r"<BaseURL[^>]*>([^<]+)</BaseURL>", bloque)
+        base = b.group(1).strip() if b else base_dir
+        att = _attr_factory(_destino(base))
+        # Reescribir el ST UNA vez (donde este: nivel set o dentro del set).
+        # FFmpeg viejo ignora <BaseURL> anidados, por eso va en la plantilla.
+        bloque = re.sub(r'(initialization)="([^"]+)"', att, bloque)
+        bloque = re.sub(r'(\bmedia)="([^"]+)"', att, bloque)
+        return _quitar_baseurls(bloque)
+
+    xml = re.sub(r"<AdaptationSet\b.*?</AdaptationSet>", _procesar_set, xml, flags=re.DOTALL)
+
+    def _procesar_rep(m):
+        # Representations con SegmentTemplate propio y BaseURL heredada
+        bloque = m.group(0)
+        if "<SegmentTemplate" not in bloque:
+            return bloque
+        m_base = re.search(r"<BaseURL[^>]*>([^<]+)</BaseURL>", bloque)
+        base = m_base.group(1).strip() if m_base else base_dir
+        att = _attr_factory(_destino(base))
+        bloque = re.sub(r'(initialization)="([^"]+)"', att, bloque)
+        bloque = re.sub(r'(\bmedia)="([^"]+)"', att, bloque)
+        return _quitar_baseurls(bloque)
+
+    xml = re.sub(r"<Representation\b.*?</Representation>", _procesar_rep, xml, flags=re.DOTALL)
+    # BaseURLs restantes (nivel MPD): fuera
+    xml = re.sub(r"<BaseURL[^>]*>[^<]*</BaseURL>", "", xml)
+
+    _log(f"/mpd servido: {len(xml)} bytes, BaseURL reescritas ok, init/media absolutas al rele")
     return Response(
         xml,
         media_type="application/dash+xml",
@@ -111,6 +201,7 @@ def manifiesto(k: str, u: str):
 
 
 @app.get("/r/{k}/{blob}/{path:path}")
+@app.get("/mpd/{k}/r/{blob}/{path:path}")
 def segmento(k: str, blob: str, path: str, request: Request):
     """Sirve init/segmentos: upstream = base64url + ruta (stateless)."""
     _autorizado(k)
@@ -125,9 +216,22 @@ def segmento(k: str, blob: str, path: str, request: Request):
     if request.url.query:
         upstream += "?" + request.url.query
 
-    r = requests.get(upstream, headers=HDRS, timeout=TIMEOUT, stream=True)
-    if r.status_code != 200:
-        return Response(f"upstream {r.status_code}", status_code=502)
+    _log(f"seg pedido: base={base[:70]} path={path[:70]}")
+
+    r = None
+    for _intento in range(2):
+        try:
+            r = requests.get(upstream, headers=HDRS, timeout=TIMEOUT, stream=True)
+            if r.status_code == 200:
+                break
+            print(f"[rele] segmento upstream {r.status_code}: {upstream[:100]}...")
+            _log(f"seg upstream {r.status_code}: {upstream[:140]}")
+        except requests.exceptions.RequestException as exc:
+            print(f"[rele] segmento error: {exc}")
+        r = None
+        time.sleep(1)
+    if r is None:
+        return Response("upstream sin respuesta", status_code=502)
 
     return StreamingResponse(
         r.iter_content(chunk_size=64 * 1024),
