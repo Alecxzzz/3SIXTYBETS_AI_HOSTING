@@ -278,11 +278,11 @@ def chat(data: Chat):
         if fallo_365:
             return (
                 "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
-                "YOU_API_KEY configurada para Demian. Revisa las API keys en Render."
+                "YOU_API_KEY configurada para Demian. Revisa las API keys en Northflank."
             )
         return (
             "ERROR: Falta YOU_API_KEY o YOU_SEARCH_API_KEY.\n"
-            "En Render agrega la clave de You.com y la variable YOU_BASE_URL."
+            "En Northflank agrega la clave de You.com y la variable YOU_BASE_URL."
         )
 
     # Demian (You.com): clasificar para diferenciar conversación de análisis.

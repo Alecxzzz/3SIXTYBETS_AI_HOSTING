@@ -6,7 +6,7 @@ de aprobacion guardado (pagos procesados antes del fix): consulta get_status
 con el token_trans almacenado en la DB y actualiza cada orden.
 
 Uso (en un entorno con PAGADITO_UID / PAGADITO_WSK y acceso a la DB, ej.
-Render Shell):
+Northflank Shell):
     python backfill_approvals.py
 """
 import sys

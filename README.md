@@ -1,6 +1,6 @@
 # 3SIXTYBETS AI WORKSPOT
 
-## Render
+## Northflank
 
 Build Command:
 `pip install -r requirements.txt`
