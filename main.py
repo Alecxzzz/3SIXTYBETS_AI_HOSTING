@@ -951,6 +951,18 @@ class ChannelUpdateIn(BaseModel):
     geoRestriction: str | None = None
 
 
+class EventIn(BaseModel):
+    sport: str
+    name: str
+    stream: str
+    referer: str | None = None
+
+
+class EventsIn(BaseModel):
+    """Lista completa de eventos del dia (el scraper la manda entera)."""
+    events: list[EventIn]
+
+
 def get_pagadito_plans():
     raw = os.getenv("PAGADITO_PLANS", "").strip()
     if raw:
@@ -1946,4 +1958,31 @@ def admin_delete_channel(channel_id: str, user=Depends(get_admin)):
     if not ok:
         raise HTTPException(404, "Canal no encontrado.")
     return {"ok": True}
+
+
+# ==============================
+# EVENTOS / PARTIDOS DEL DIA (TV)
+# ==============================
+
+@app.get("/events")
+def list_tv_events(user=Depends(get_current_user)):
+    """Partidos del dia con links vigentes (< 6h) para la pagina de TV."""
+    db.purge_events()
+    return {"events": db.list_events()}
+
+
+@app.post("/admin/events")
+def admin_replace_events(data: EventsIn, user=Depends(get_admin)):
+    """Reemplaza TODA la lista de eventos (lo llama el scraper en cada corrida)."""
+    count = db.replace_events([ev.model_dump() for ev in data.events])
+    if count == 0:
+        raise HTTPException(400, "Ningun evento valido en la lista.")
+    return {"ok": True, "count": count}
+
+
+@app.delete("/admin/events")
+def admin_delete_events(user=Depends(get_admin)):
+    """Borra todos los eventos (manual, por si la fuente se rompio)."""
+    ok = db.run_query("delete from events")
+    return {"ok": bool(ok)}
 

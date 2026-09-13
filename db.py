@@ -192,6 +192,17 @@ def init_db():
         )
         """,
         """
+        create table if not exists events (
+            id varchar(64) primary key,
+            sport varchar(80) not null,
+            name varchar(200) not null,
+            stream text not null,
+            referer text null,
+            type varchar(20) not null default 'm3u8',
+            created_at datetime not null
+        )
+        """,
+        """
         create table if not exists ai_picks (
             id varchar(64) primary key,
             sport varchar(20) not null,
@@ -875,6 +886,79 @@ def update_channel(channel_id, **fields):
 
 def delete_channel(channel_id):
     return bool(run_query("delete from channels where id = %s", (channel_id,)))
+
+
+# ==============================
+# EVENTOS / PARTIDOS DEL DIA (TV)
+# ==============================
+# Los links vencen en ~5h: list_events() solo devuelve eventos frescos
+# (EVENT_MAX_AGE) y purge_events() los borra de la tabla.
+
+EVENT_MAX_AGE_S = 6 * 3600
+
+
+def public_event(row):
+    return {
+        "id": row["id"],
+        "sport": row["sport"],
+        "name": row["name"],
+        "stream": row["stream"],
+        "referer": row.get("referer") or None,
+        "type": row.get("type") or "m3u8",
+        "createdAt": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+def list_events():
+    rows = run_query(
+        """
+        select * from events
+        where created_at > %s
+        order by name asc
+        """,
+        (now_utc() - timedelta(seconds=EVENT_MAX_AGE_S),),
+    )
+    return [public_event(r) for r in (rows or [])]
+
+
+def purge_events():
+    """Borra eventos con mas de EVENT_MAX_AGE_S de antiguedad (tokens vencidos)."""
+    run_query(
+        "delete from events where created_at <= %s",
+        (now_utc() - timedelta(seconds=EVENT_MAX_AGE_S),),
+    )
+
+
+def replace_events(events: list) -> int:
+    """Reemplaza TODA la lista de eventos (el scraper manda la jornada nueva)."""
+    purge_events()
+    run_query("delete from events")
+    count = 0
+    for ev in events:
+        sport = (ev.get("sport") or "").strip()
+        name = (ev.get("name") or "").strip()
+        stream = (ev.get("stream") or "").strip()
+        referer = (ev.get("referer") or "").strip() or None
+        if not sport or not name or not stream.startswith(("http://", "https://")):
+            continue
+        ok = run_query(
+            """
+            insert into events (id, sport, name, stream, referer, type, created_at)
+            values (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                secrets.token_urlsafe(8),
+                sport[:80],
+                name[:200],
+                stream,
+                referer,
+                "m3u8",
+                now_utc(),
+            ),
+        )
+        if ok:
+            count += 1
+    return count
 
 
 # ==============================
