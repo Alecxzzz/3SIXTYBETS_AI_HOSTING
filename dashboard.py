@@ -66,9 +66,49 @@ def _limpiar_artefactos(txt) -> str:
     if not txt:
         return txt or ""
     txt = str(txt)
-    txt = re.sub(r"[\[\(\{【][\s\d|.,-]{0,6}[\]\)\}】]{1,2}", "", txt)
+    # Admite bloques dobles [[1]], [|2|], [(2|], 【2】, [[3]]... (el contenido
+    # puede incluir corchetes, por eso el interior usa "cualquier cosa que no
+    # sea cierre" en vez de solo espacios/digitos).
+    txt = re.sub(r"[\[\(\{【]{1,2}[^\]\)\}】]{0,8}[\]\)\}】]{1,3}", "", txt)
     txt = re.sub(r"\s{2,}", " ", txt)
     return txt.strip()
+
+
+def _porque_no_duplicado(porque, stats, rationale) -> str:
+    """El 'porque' NO debe repetir una linea del cuadro de datos (bug visual:
+    la linea verde decia exactamente lo mismo que el primer punto de stats).
+
+    Si 'porque' duplica una stat, se sustituye por la primera frase del
+    razonamiento (informacion que NO esta en el cuadro de datos).
+    """
+    porque = (str(porque) or "").strip()
+    if not porque:
+        return ""
+    palabras = set(re.findall(r"[a-z0-9]{3,}", porque.lower()))
+    for s in (stats or []):
+        st = str(s or "")
+        if not st:
+            continue
+        st_norm = re.sub(r"[\[\(\{【]{1,2}[^\]\)\}】]{0,8}[\]\)\}】]{1,3}", "", st)
+        if porque.lower()[:60] in st_norm.lower() or st_norm.lower()[:60] in porque.lower():
+            duplicado = True
+            break
+        if palabras and len(palabras & set(re.findall(r"[a-z0-9]{3,}", st_norm.lower()))) / len(palabras) > 0.6:
+            duplicado = True
+            break
+    else:
+        duplicado = False
+    if not duplicado:
+        return porque
+    # Fallback: primera frase del razonamiento (no aparece en el cuadro)
+    razon = (str(rationale) or "").strip()
+    if razon:
+        frase = re.split(r"(?<=[.!?])\s", razon)[0]
+        frase = _limpiar_artefactos(frase)
+        if frase and len(frase) <= 160:
+            return frase
+        return frase[:157] + "..." if frase else ""
+    return ""
 
 
 def _titulo_contradice(pick: dict, p: dict) -> bool:
@@ -861,9 +901,11 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             f"el mes y el ano actual en tus busquedas y analisis, ej: 'equipo vs "
             f"equipo septiembre 2026'); descarta estadisticas de temporadas pasadas."
             f"\nIncluye el campo \"porque\": UNA linea corta (maximo 70 caracteres) "
-            f"con la razon principal del pick usando datos reales con numeros, "
-            f"ej: 'Over 1.5 en 5 de los ultimos 6 H2H' o 'Vino over 2.5 en 4 de 5 "
-            f"de local'. Nada generico, con cifras."
+            f"con la CONCLUSION que justifica el pick: la implicacion de la "
+            f"tendencia para esta apuesta, con cifras reales. PROHIBIDO copiar "
+            f"literal una linea de los datos/stats: debe ser la sintesis de la "
+            f"tendencia (ej: 'Over 1.5 en 5 de los ultimos 6 H2H' o 'Vino over "
+            f"2.5 en 4 de 5 de local'), no un dato suelto repetido."
         )
 
         texto, modelo = _preguntar_ia(mensaje)
@@ -916,7 +958,11 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             event_date=p["date"],
             market=market,
             selection=str(pick.get("selection", "")),
-            porque=_limpiar_artefactos(pick.get("porque", ""))[:160],
+            porque=_porque_no_duplicado(
+                _limpiar_artefactos(pick.get("porque", "")),
+                pick.get("stats") or [],
+                pick.get("rationale", ""),
+            )[:160],
             odds=pick.get("odds"),
             confidence=pick.get("confidence", "MEDIA"),
             rationale=_limpiar_artefactos(pick.get("rationale", "")),
