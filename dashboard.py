@@ -1204,8 +1204,23 @@ def _detalle_desde_oddsapi(pick: dict):
         a, b = _norm_texto(a), _norm_texto(b)
         return bool(a) and bool(b) and (a == b or a in b or b in a)
 
+    def _parse_fecha(txt) -> "datetime":
+        t = str(txt).replace("Z", "").replace("T", " ").strip()
+        t = re.sub(r"\+00:00$", "", t)
+        return datetime.fromisoformat(t)
+
     for e in eventos:
         if e.get("status") != "settled":
+            continue
+        # Debe ser EL MISMO partido: en las series (MLB/NBA) los mismos
+        # equipos juegan varios dias seguidos y el matching solo por nombre
+        # llego a resolver picks de HOY con el marcador de AYER.
+        try:
+            ev_odds = _parse_fecha(e.get("date"))
+            ev_pick = _parse_fecha(pick.get("eventDate"))
+        except (ValueError, TypeError):
+            continue
+        if abs((ev_odds - ev_pick).total_seconds()) > 12 * 3600:
             continue
         scores = e.get("scores") or {}
         if scores.get("home") is None or scores.get("away") is None:
