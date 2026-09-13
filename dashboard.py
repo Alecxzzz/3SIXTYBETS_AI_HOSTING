@@ -860,6 +860,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             f"El analisis y los datos deben ser de la temporada EN CURSO (incluye "
             f"el mes y el ano actual en tus busquedas y analisis, ej: 'equipo vs "
             f"equipo septiembre 2026'); descarta estadisticas de temporadas pasadas."
+            f"\nIncluye el campo \"porque\": UNA linea corta (maximo 70 caracteres) "
+            f"con la razon principal del pick usando datos reales con numeros, "
+            f"ej: 'Over 1.5 en 5 de los ultimos 6 H2H' o 'Vino over 2.5 en 4 de 5 "
+            f"de local'. Nada generico, con cifras."
         )
 
         texto, modelo = _preguntar_ia(mensaje)
@@ -912,6 +916,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             event_date=p["date"],
             market=market,
             selection=str(pick.get("selection", "")),
+            porque=_limpiar_artefactos(pick.get("porque", ""))[:160],
             odds=pick.get("odds"),
             confidence=pick.get("confidence", "MEDIA"),
             rationale=_limpiar_artefactos(pick.get("rationale", "")),

@@ -921,6 +921,7 @@ def public_ai_pick(row):
         "titulo": row.get("titulo"),
         "league": row.get("league"),
         "selection": row.get("selection"),
+        "porque": row.get("porque"),
         "stats": stats,
         "odds": float(row["odds"]) if row.get("odds") is not None else None,
         "confidence": row.get("confidence"),
@@ -950,20 +951,20 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
                    home_name=None, away_name=None, home_logo=None, away_logo=None,
-                   titulo=None, league=None, stats=None):
+                   titulo=None, league=None, stats=None, porque=None):
     pick_id = secrets.token_urlsafe(8)
     ok = run_query(
         """
         insert into ai_picks
         (id, sport, sport_label, event_id, event_name, home_name, away_name,
          home_logo, away_logo, event_date, market, titulo, league,
-         selection, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+         selection, porque, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
         (
             pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
             home_logo, away_logo, event_date, market, titulo, league,
-            selection, odds, confidence, rationale, stats, model,
+            selection, porque, odds, confidence, rationale, stats, model,
             now_utc().date(), now_utc(),
         ),
     )
