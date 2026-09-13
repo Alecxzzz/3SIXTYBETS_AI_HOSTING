@@ -61,6 +61,16 @@ def _nombre_valido(nombre) -> bool:
     return bool(nombre) and str(nombre).strip().lower() not in _NOMBRES_INVALIDOS
 
 
+def _limpiar_artefactos(txt) -> str:
+    """Quita marcas de citacion del modelo ([[2]], [|2|], [(2|], 【2】...)."""
+    if not txt:
+        return txt or ""
+    txt = str(txt)
+    txt = re.sub(r"[\[\(\{【][\s\d|.,-]{0,6}[\]\)\}】]{1,2}", "", txt)
+    txt = re.sub(r"\s{2,}", " ", txt)
+    return txt.strip()
+
+
 def _titulo_contradice(pick: dict, p: dict) -> bool:
     """True si el titulo contradice la seleccion de doble oportunidad.
 
@@ -846,6 +856,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             f"({p['home_name']} y {p['away_name']}); PROHIBIDO picks genericos tipo "
             f"'Jugador A', 'Local' o 'equipo B'. Si de verdad no tienes datos del "
             f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
+            f"\nFECHA ACTUAL: {datetime.now(timezone.utc).strftime('%d/%m/%Y')}. "
+            f"El analisis y los datos deben ser de la temporada EN CURSO (incluye "
+            f"el mes y el ano actual en tus busquedas y analisis, ej: 'equipo vs "
+            f"equipo septiembre 2026'); descarta estadisticas de temporadas pasadas."
         )
 
         texto, modelo = _preguntar_ia(mensaje)
@@ -900,16 +914,16 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             selection=str(pick.get("selection", "")),
             odds=pick.get("odds"),
             confidence=pick.get("confidence", "MEDIA"),
-            rationale=pick.get("rationale", ""),
+            rationale=_limpiar_artefactos(pick.get("rationale", "")),
             model=modelo or "IA",
             home_name=p["home_name"],
             away_name=p["away_name"],
             home_logo=p["home_logo"],
             away_logo=p["away_logo"],
-            titulo=str(pick.get("titulo") or "").strip() or str(pick.get("selection", "")),
+            titulo=_limpiar_artefactos(str(pick.get("titulo") or "").strip()) or str(pick.get("selection", "")),
             league=p.get("league"),
             stats=json.dumps(
-                [str(s) for s in (pick.get("stats") or [])[:5]],
+                [_limpiar_artefactos(str(s)) for s in (pick.get("stats") or [])[:5]],
                 ensure_ascii=False,
             ) if isinstance(pick.get("stats"), list) and pick.get("stats") else None,
         )
@@ -933,9 +947,32 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 # ============================================================
 
 
+# Mercados que NO se pueden verificar solo con el marcador final (props de
+# jugador, tarjetas, ponches, corners...): la IA no debe adivinarlos.
+_MERCADOS_NO_VERIFICABLES = (
+    "tiros de esquina", "esquina", "corner", "corners",
+    "tarjeta", "tarjetas", "en cualquier momento",
+    "ponche", "strikeout", "ponches",
+    "pases", "asistencia", "tiros a puerta", "tiros totales",
+)
+
+
+def _resolucion_posible_con_marcador(pick: dict) -> bool:
+    """False si el mercado requiere datos que el marcador final no da."""
+    texto = f"{pick.get('market') or ''} {pick.get('titulo') or ''}".lower()
+    return not any(palabra in texto for palabra in _MERCADOS_NO_VERIFICABLES)
+
+
 def _resolver_pick_con_ia(pick: dict):
-    """Pregunta a la IA si el pick fue ACIERTO o FALLO con el resultado final."""
+    """Pregunta a la IA si el pick fue ACIERTO o FALLO con el resultado final.
+
+    DOBLE VERIFICACION: se pregunta 2 veces y ambas respuestas deben coincidir
+    para marcar ACIERTO (la IA tiende a decir que todo fue acierto)."""
     import sports
+
+    if not _resolucion_posible_con_marcador(pick):
+        # Props/tarjetas/corners: el marcador final no alcanza para verificar
+        return None
 
     try:
         detail = sports.get_game_detail(pick["sport"], pick["eventId"])
@@ -952,22 +989,28 @@ def _resolver_pick_con_ia(pick: dict):
     mensaje = (
         f"Pick realizado: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
         f"Partido: {pick.get('eventName')} (deporte {pick.get('sportLabel', '')}).\n"
-        f"Resultado final: {marcador}.\n\n"
+        f"Resultado final: {marcador}.\n"
+        f"NO adivines: si con el marcador no puedes determinarlo con certeza "
+        f"(props de jugador, tarjetas, corners, ponches...), responde INDETERMINADO.\n\n"
         f"Con ese resultado final, Â¿el pick fue ACIERTO o FALLO?\n"
         f"Responde SOLO una palabra: ACIERTO o FALLO. Si el mercado no se puede "
         f"determinar con ese marcador, responde INDETERMINADO."
     )
 
-    texto, _ = _preguntar_ia(mensaje)
-    if not texto:
-        return None
-    upper = texto.upper()
-    if "INDETERMINADO" in upper:
-        return None
-    if "ACIERTO" in upper:
-        return "ACIERTO"
-    if "FALLO" in upper:
-        return "FALLO"
+    votos = []
+    for _ in range(2):
+        texto, _ = _preguntar_ia(mensaje)
+        if not texto:
+            continue
+        upper = texto.upper()
+        if "INDETERMINADO" in upper:
+            return None
+        if "ACIERTO" in upper and "FALLO" not in upper:
+            votos.append("ACIERTO")
+        elif "FALLO" in upper and "ACIERTO" not in upper:
+            votos.append("FALLO")
+    if len(votos) == 2 and votos[0] == votos[1]:
+        return votos[0]
     return None
 
 

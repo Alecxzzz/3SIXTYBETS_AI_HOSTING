@@ -202,12 +202,21 @@ def limpiar_respuesta(content):
 
 
 def buscar_web(query, max_resultados=3):
-    """Búsqueda web vía DuckDuckGo (ddgs)."""
+    """Búsqueda web vía DuckDuckGo (ddgs).
+
+    Siempre añade el mes y el año actual a la consulta: los datos de
+    temporadas pasadas no sirven para el análisis.
+    """
     if DDGS is None:
         return "Búsqueda web no disponible (falta el paquete ddgs)."
+    _MESES = ("enero", "febrero", "marzo", "abril", "mayo", "junio",
+              "julio", "agosto", "septiembre", "octubre", "noviembre",
+              "diciembre")
+    ahora = datetime.now()
+    consulta = f"{query} {_MESES[ahora.month - 1]} {ahora.year}"
     try:
         with DDGS() as ddgs:
-            resultados = list(ddgs.text(query, max_results=max_resultados))
+            resultados = list(ddgs.text(consulta, max_results=max_resultados))
         if not resultados:
             return "Sin resultados."
         texto = "\n".join(f"- {r.get('title', '')}: {r.get('body', '')}" for r in resultados)
