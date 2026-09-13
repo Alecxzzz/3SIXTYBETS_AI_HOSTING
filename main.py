@@ -243,9 +243,39 @@ def listar_modelos():
     from ai.model import modelos_disponibles
     return {"modelos": modelos_disponibles()}
 
+def get_current_user_optional(authorization: str = Header(None)):
+    """Igual que get_current_user pero sin fallar: None si no hay sesion."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization[7:].strip()
+    return db.get_user_by_token(token)  # None si el token es invalido/expire
+
 @app.post("/chat", response_class=PlainTextResponse)
-def chat(data: Chat):
+def chat(data: Chat, user=Depends(get_current_user_optional)):
     modelo_id = (data.modelo or "you").strip().lower()
+    # MEMORIA DE CONVERSACION: si hay sesion, se inyecta el historial reciente
+    # (24 h, ultimos 10 mensajes) para que AMBAS IAs recuerden el contexto.
+    bloque_memoria = ""
+    if user:
+        try:
+            recientes = db.list_messages(user["id"])[-11:]
+            # El frontend guarda el mensaje actual ANTES de llamar a /chat:
+            # se excluye de la memoria para no duplicarlo.
+            if recientes and recientes[-1]["role"] == "user" and (recientes[-1].get("text") or "").strip() == (data.mensaje or "").strip():
+                recientes = recientes[:-1]
+            lineas = []
+            for m in recientes[-10:]:
+                rol = "Usuario" if m["role"] == "user" else "IA"
+                texto = (m.get("text") or "").replace("\n", " ")[:200]
+                if texto:
+                    lineas.append(f"{rol}: {texto}")
+            if lineas:
+                bloque_memoria = (
+                    "\n\nCONVERSACION PREVIA (memoria; continua de forma natural "
+                    "teniendo en cuenta este contexto):\n" + "\n".join(lineas) + "\n\n"
+                )
+        except Exception as exc:
+            print(f"[Chat-memoria] error: {exc}", flush=True)
     # Contexto ESPN (estadisticas reales) compartido por las dos IAs.
     # Solo se busca cuando el mensaje parece de un partido: evita escanear
     # todos los scoreboards de ESPN en saludos/preguntas generales.
@@ -268,7 +298,7 @@ def chat(data: Chat):
         # procesar_36ai clasifica solo: conversación -> respuesta natural,
         # partido -> análisis agéntico con formato EDGE.
         # Se inyectan las estadisticas reales de ESPN como base del análisis.
-        respuesta_36 = procesar_36ai(data.mensaje + bloque_espn)
+        respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
         if respuesta_36:
             return respuesta_36
         # 365AI saturada o sin respuesta -> fallback automatico a Demian (abajo)
@@ -297,7 +327,7 @@ def chat(data: Chat):
         # Modo conversación: sin formato EDGE, respuesta natural de asistente.
         from engine.prompt_builder import construir_prompt_conversacional
         respuesta = SearchEngine().ask_you(
-            data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
+            bloque_memoria + data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
         )
         if respuesta:
             respuesta = respuesta.replace("*", "").replace("#", "")
@@ -546,7 +576,7 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
             "records, cuotas). Basa tu pick en estos datos reales."
         )
 
-    respuesta = SearchEngine().ask_you(data.mensaje, system_prompt=reglas)
+    respuesta = SearchEngine().ask_you(bloque_memoria + data.mensaje, system_prompt=reglas)
     # Limpiar asteriscos de formato markdown
     if respuesta:
         respuesta = respuesta.replace("*", "").replace("#", "")
