@@ -930,10 +930,14 @@ def purge_events():
 
 
 def replace_events(events: list) -> int:
-    """Reemplaza TODA la lista de eventos (el scraper manda la jornada nueva)."""
+    """Reemplaza TODA la lista de eventos (el scraper manda la jornada nueva).
+
+    Inserta todo en UN solo INSERT masivo: cada run_query abre una conexión
+    nueva a la BD (Aiven), y 74 inserts individuales tardan >30s.
+    """
     purge_events()
     run_query("delete from events")
-    count = 0
+    rows, params = [], []
     for ev in events:
         sport = (ev.get("sport") or "").strip()
         name = (ev.get("name") or "").strip()
@@ -941,11 +945,8 @@ def replace_events(events: list) -> int:
         referer = (ev.get("referer") or "").strip() or None
         if not sport or not name or not stream.startswith(("http://", "https://")):
             continue
-        ok = run_query(
-            """
-            insert into events (id, sport, name, stream, referer, type, created_at)
-            values (%s, %s, %s, %s, %s, %s, %s)
-            """,
+        rows.append("(%s, %s, %s, %s, %s, %s, %s)")
+        params.extend(
             (
                 secrets.token_urlsafe(8),
                 sport[:80],
@@ -954,11 +955,16 @@ def replace_events(events: list) -> int:
                 referer,
                 "m3u8",
                 now_utc(),
-            ),
+            )
         )
-        if ok:
-            count += 1
-    return count
+    if not rows:
+        return 0
+    ok = run_query(
+        "insert into events (id, sport, name, stream, referer, type, created_at) "
+        + "values " + ", ".join(rows),
+        tuple(params),
+    )
+    return len(rows) if ok else 0
 
 
 # ==============================
