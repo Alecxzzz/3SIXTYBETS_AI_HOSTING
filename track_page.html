@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Track Record - 3SIXTYBETS</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0b0d14;color:#e8eaf6;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;padding:18px}
+.wrap{max-width:860px;margin:0 auto}
+h1{font-size:1.35rem;color:#a78bfa;margin-bottom:4px}
+.sub{color:#8b93b5;font-size:.85rem;margin-bottom:18px}
+.card{background:#141826;border:1px solid #232a42;border-radius:14px;padding:16px;margin-bottom:14px}
+.row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #1d2338;font-size:.92rem}
+.row:last-child{border-bottom:none}
+.k{color:#8b93b5}.v{font-weight:600;text-align:right}
+input{background:#0e1120;border:1px solid #2a3352;color:#e8eaf6;border-radius:10px;padding:10px 12px;width:100%;font-size:.95rem;margin-bottom:10px}
+button{background:linear-gradient(135deg,#7c5ce7,#6c5ce7);color:#fff;border:none;border-radius:10px;padding:11px 18px;font-weight:700;font-size:.95rem;cursor:pointer;width:100%}
+.err{color:#f87171;font-size:.85rem;margin-bottom:10px;min-height:1.2em}
+.pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:.75rem;font-weight:700}
+.pill.hi{background:#14532d;color:#4ade80}
+.pill.mid{background:#78350f;color:#fbbf24}
+.pill.lo{background:#7f1d1d;color:#f87171}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{color:#8b93b5;text-align:left;padding:6px 8px;border-bottom:1px solid #232a42;font-weight:600;font-size:.78rem;text-transform:uppercase}
+td{padding:7px 8px;border-bottom:1px solid #1d2338}
+.bar{position:fixed;bottom:0;left:0;right:0;background:#141826ee;border-top:1px solid #2a3352;padding:12px 18px;display:flex;justify-content:space-between;align-items:center}
+.bar b{color:#a78bfa}
+label.ck{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid #232a42;border-radius:10px;margin-bottom:8px;cursor:pointer}
+label.ck.sel{border-color:#7c5ce7;background:#1b1f36}
+label.ck input{margin-top:3px;width:auto}
+label.ck .t{flex:1}
+label.ck .o{color:#a78bfa;font-weight:700;white-space:nowrap}
+</style></head>
+<body><div class="wrap">
+<h1>Track Record de la IA</h1>
+<p class="sub">Efectividad por familia de mercado, deporte y liga (solo picks resueltos)</p>
+<div id="track"><p class="sub">Cargando...</p></div></div>
+<script>
+const TK_KEY = "sb_token";
+function tk() { const q = new URLSearchParams(location.search).get("token"); if (q) { localStorage.setItem(TK_KEY, q); return q; } return localStorage.getItem(TK_KEY) || ""; }
+function setTk(t) { localStorage.setItem(TK_KEY, t); }
+async function api(path, opts={}) {
+  const h = {"Content-Type": "application/json"};
+  if (tk()) h["Authorization"] = "Bearer " + tk();
+  const r = await fetch(path, {...opts, headers: {...h, ...(opts.headers||{})}});
+  const d = await r.json().catch(() => ({}));
+  return {ok: r.ok, status: r.status, data: d};
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]); }
+
+function fila(d) {
+  const cls = d.efectividad >= 65 ? 'hi' : (d.efectividad >= 50 ? 'mid' : 'lo');
+  return `<div class="row"><span class="k">${esc(d.nombre)}${d.confiable ? '' : ' <span class="sub" style="display:inline">(pocos datos)</span>'}</span><span class="v"><span class="pill ${cls}">${d.efectividad}%</span> ${d.aciertos}/${d.resueltos}</span></div>`;
+}
+async function init() {
+  const r = await api('/dashboard/track-record');
+  const d = r.data;
+  const box = document.getElementById('track');
+  if (!r.ok || !d.mercados) { box.innerHTML = '<div class="card"><p class="sub">Sin datos todavia.</p></div>'; return; }
+  const secciones = [
+    ['Por familia de mercado', d.mercados],
+    ['Por deporte', d.deportes],
+    ['Por liga', (d.ligas||[]).slice(0,12)],
+  ];
+  box.innerHTML = `
+    <div class="card">
+      <div class="row"><span class="k">EFECTIVIDAD HISTORICA TOTAL</span><span class="v" style="font-size:1.2rem;color:#4ade80">${d.total.efectividad}%</span></div>
+      <div class="row"><span class="k">Picks resueltos</span><span class="v">${d.total.aciertos}/${d.total.resueltos}</span></div>
+    </div>` +
+    secciones.map(([t, items]) => items && items.length ? `
+      <div class="card"><h1 style="font-size:1.05rem">${t}</h1>
+      <div style="margin-top:6px">${items.map(fila).join('')}</div></div>` : ''
+    ).join('');
+}
+init();
+
+</script></body></html>
