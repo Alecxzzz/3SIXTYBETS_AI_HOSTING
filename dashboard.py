@@ -1510,6 +1510,7 @@ def resumen_dashboard(username: str) -> dict:
         "stats": {
             "pronosticos_del_dia": len(pendientes),
             "pronosticos_acertados_por_la_ia": len(aciertos_visibles_lista),
+            "aciertos_hoy": len(aciertos_hoy),
             "aciertos_ayer": len(aciertos_de_ayer),
             "fallados_hoy": len(fallados),
             "resueltos_hoy": resueltos_hoy,
