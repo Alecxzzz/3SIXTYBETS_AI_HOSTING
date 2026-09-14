@@ -544,6 +544,7 @@ def html_track() -> str:
     cuerpo = """
 <h1>Track Record de la IA</h1>
 <p class="sub">Efectividad por familia de mercado, deporte y liga (solo picks resueltos)</p>
+<p style="margin-bottom:14px"><a href="https://threesixtybets-chat.vercel.app" style="display:inline-block;background:linear-gradient(135deg,#22c55e,#16a34a);color:#04140a;font-weight:800;font-size:.9rem;padding:10px 18px;border-radius:10px;text-decoration:none">🎯 Únete a 3SIXTYBETS</a></p>
 <div id="track"><p class="sub">Cargando...</p></div>"""
     script = """
 function fila(d) {
