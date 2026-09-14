@@ -642,6 +642,16 @@ def _init_database():
             except Exception as exc:
                 print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
 
+            # Partidos del dia: refrescador automatico (agenda la18hd.su).
+            # Cada 30 min re-scrapea la agenda y actualiza la TV; si la fuente
+            # falla, conserva la lista anterior.
+            try:
+                import event_scheduler
+
+                event_scheduler.iniciar_scheduler()
+            except Exception as exc:
+                print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
+
             break
 
         except Exception as exc:
