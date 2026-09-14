@@ -1971,6 +1971,36 @@ def list_tv_events(user=Depends(get_current_user)):
     return {"events": db.list_events()}
 
 
+@app.get("/event-resolve")
+def event_resolve(url: str, user=Depends(get_current_user)):
+    """Devuelve el playbackURL FRESCO de una pagina de evento de la fuente.
+
+    Los tokens de la fuente se invalidan cuando alguien abre la pagina de
+    nuevo, asi que los scrapeados mueren en minutos. En su lugar, al hacer
+    clic en un partido, el backend pide la pagina EN ESE INSTANTE y extrae
+    el token vigente (misma regex que usa el scraper).
+    """
+    target = (url or "").strip()
+    if not re.match(r"^https?://", target):
+        raise HTTPException(400, "URL invalida")
+    # Solo paginas de la fuente (la18hd) para que no sirva de proxy abierto
+    if "la18hd.su" not in target:
+        raise HTTPException(400, "Fuente no permitida")
+    try:
+        resp = http_requests.get(
+            target,
+            headers={"User-Agent": HLS_USER_AGENT, "Referer": "https://la18hd.su/"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except Exception:
+        raise HTTPException(502, "La fuente no responde en este momento.")
+    match = re.search(r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text)
+    if not match:
+        raise HTTPException(404, "No se encontro el stream en la pagina.")
+    return {"url": match.group(1)}
+
+
 @app.post("/admin/events")
 def admin_replace_events(data: EventsIn, user=Depends(get_admin)):
     """Reemplaza TODA la lista de eventos (lo llama el scraper en cada corrida)."""
