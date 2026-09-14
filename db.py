@@ -1145,6 +1145,16 @@ def update_pick_metadata(pick_id, home_name, away_name, home_logo, away_logo, le
     ))
 
 
+def count_user_messages(user_id: str) -> int:
+    """Mensajes del usuario (role='user') en el chat, todos los tiempos."""
+    row = run_query(
+        "select count(*) as c from chat_messages where user_id = %s and role = 'user'",
+        (user_id,),
+        fetchone=True,
+    )
+    return int(row["c"]) if row else 0
+
+
 def count_aciertos_historico():
     row = run_query(
         """

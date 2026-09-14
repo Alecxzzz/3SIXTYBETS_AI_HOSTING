@@ -252,6 +252,16 @@ def get_current_user_optional(authorization: str = Header(None)):
 
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(data: Chat, user=Depends(get_current_user_optional)):
+    # Chat freemium: tambien bloquear la generacion de respuesta si el usuario
+    # gratuito ya uso su limite (defensa en profundidad).
+    if user and not db.es_premium_row(user):
+        usados = db.count_user_messages(user["id"])
+        if usados >= CHAT_GRATIS_MENSAJES:
+            raise HTTPException(
+                402,
+                "Limite gratuito alcanzado. Desbloquea Premium para seguir "
+                "charlando con la IA.",
+            )
     modelo_id = (data.modelo or "you").strip().lower()
     # MEMORIA DE CONVERSACION: si hay sesion, se inyecta el historial reciente
     # (24 h, ultimos 10 mensajes) para que AMBAS IAs recuerden el contexto.
@@ -663,6 +673,7 @@ def _init_database():
 
 # ---- Freemium ----
 PICKS_GRATIS = 2  # picks completos que ve un usuario sin premium
+CHAT_GRATIS_MENSAJES = 2  # conversaciones (mensajes del usuario) gratis en el chat
 
 # ---- Pydantic models ----
 class AuthSignup(BaseModel):
@@ -744,6 +755,15 @@ def get_messages(user=Depends(get_current_user)):
 
 @app.post("/messages")
 def post_message(data: MessageIn, user=Depends(get_current_user)):
+    # Chat freemium: usuarios sin premium tienen limite de conversaciones.
+    if data.role == "user" and not db.es_premium_row(user):
+        usados = db.count_user_messages(user["id"])
+        if usados >= CHAT_GRATIS_MENSAJES:
+            raise HTTPException(
+                402,
+                f"Limite gratuito alcanzado ({CHAT_GRATIS_MENSAJES} conversaciones). "
+                "Desbloquea Premium para seguir charlando con la IA.",
+            )
     msg = db.create_message(user["id"], data.role, data.text)
     return msg
 
