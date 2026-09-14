@@ -300,6 +300,23 @@ def verify_password(password, stored_hash):
     return hmac.compare_digest(digest, expected)
 
 
+def es_premium_row(row) -> bool:
+    """True si el usuario tiene acceso activo (access_expires_at > ahora)."""
+    exp = row.get("access_expires_at")
+    if not exp:
+        return False
+    try:
+        if isinstance(exp, str):
+            exp = datetime.fromisoformat(exp)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp.year >= 9999:
+            return True  # acceso "sin fin"
+        return exp > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
 def public_user(row):
     return {
         "id": row["id"],
@@ -423,7 +440,14 @@ def create_user(username, password, redeem_code):
             (user_id, username, hash_password(password), now_utc(), now_utc()),
         )
 
-        access_expires_at = claim_redeem_key(redeem_code, user_id, cur)
+        # Cuenta GRATIS: sin key el acceso queda vencido desde el inicio
+        # (puede pagar con tarjeta o canjear una key despues). Con key
+        # valida, los dias se acreditan de una.
+        access_expires_at = (
+            claim_redeem_key(redeem_code, user_id, cur)
+            if redeem_code and redeem_code.strip()
+            else now_utc()
+        )
         cur.execute(
             "update users set access_expires_at = %s where id = %s",
             (access_expires_at, user_id),

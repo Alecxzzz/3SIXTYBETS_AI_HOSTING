@@ -661,11 +661,14 @@ def _init_database():
             else:
                 print("[startup] DB not available — app continues without DB", flush=True)
 
+# ---- Freemium ----
+PICKS_GRATIS = 2  # picks completos que ve un usuario sin premium
+
 # ---- Pydantic models ----
 class AuthSignup(BaseModel):
     username: str
     password: str
-    redeem_code: str
+    redeem_code: str | None = None  # opcional: sin key se crea cuenta GRATIS
 
 class AuthSignin(BaseModel):
     username: str
@@ -765,7 +768,22 @@ def dashboard_home(user=Depends(get_current_user)):
         dashboard.backfill_picks_metadata()
     except Exception:
         pass
-    return dashboard.resumen_dashboard(user["username"])
+    data = dashboard.resumen_dashboard(user["username"])
+
+    # FREEMIUM: usuarios sin acceso activo ven solo los primeros picks
+    # completos; el resto llega sin datos sensibles (el frontend pinta el
+    # candado y el boton de desbloqueo).
+    if not db.es_premium_row(user):
+        for i, pick in enumerate(data.get("pronosticos_del_dia") or []):
+            if i < PICKS_GRATIS:
+                continue
+            for campo in (
+                "titulo", "selection", "odds", "porque", "rationale",
+                "stats", "market", "confidence",
+            ):
+                pick[campo] = None
+            pick["bloqueado"] = True
+    return data
 
 
 @app.get("/dashboard/picks")
