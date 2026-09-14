@@ -26,6 +26,16 @@ ODDS_MINIMA = 1.20
 # Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
 HORA_CORTE_ACERTADOS = 23
 
+# Ligas "grandes": ~70% de los picks del dia deben venir de aqui.
+LIGAS_GRANDES = {"eng.1", "esp.1", "ita.1", "ger.1", "fra.1"}
+CUOTA_OTRAS = 0.30   # resto de ligas/deportes: maximo ~30% del total (min 2)
+
+# Validacion empirica: el outcome del pick debe ocurrir en al menos este
+# % de los ultimos 10 partidos de cada equipo (promedio de ambos). Ej: si
+# el pick es over 2.5, ambos equipos deben haber hecho over 2.5 en >=60%
+# de sus ultimos 10 para publicar la recomendacion.
+FRECUENCIA_MINIMA = 0.60
+
 TZ_NICARAGUA = db.TZ_NICARAGUA
 
 
@@ -647,6 +657,194 @@ def _market_norm(market: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (market or "").lower())
 
 
+def _normalizar_ev(ev_raw: dict) -> dict | None:
+    """Convierte un evento crudo de ESPN a {away: {name, score}, home: {...}}."""
+    import sports
+
+    comp0 = (ev_raw.get("competitions") or [{}])[0]
+    salida = {}
+    for c in comp0.get("competitors", []):
+        lado = c.get("homeAway")
+        if lado not in ("home", "away"):
+            continue
+        t = c.get("team", {})
+        salida[lado] = {
+            "name": t.get("displayName", "?"),
+            "score": sports._parse_number(c.get("score")),
+        }
+    if "home" in salida and "away" in salida:
+        return salida
+    return None
+
+
+def _recientes_con_marcador(sport: str, league, detail: dict, nombre: str) -> list:
+    """Ultimos 10 partidos (con marcador) de un equipo.
+
+    Misma estrategia de _analisis_previo: recent_games del detail + scoreboard
+    de 45 dias + schedule de temporada hasta llegar a 10.
+    """
+    import sports
+
+    equipo = next(
+        (t for t in (detail.get("teams") or []) if t.get("name") == nombre), None
+    )
+    if not equipo:
+        return []
+    recientes = list(equipo.get("recent_games") or [])
+
+    # Complemento 1: scoreboard de 45 dias
+    if len(recientes) < 10:
+        try:
+            raws = sports.get_team_recent_events(
+                sport, league, equipo.get("id"), limit=10
+            )
+            vistos = {
+                (r.get("away", {}).get("name"), r.get("home", {}).get("name"))
+                for r in recientes
+            }
+            for ev in reversed(raws):
+                norm = _normalizar_ev(ev)
+                if not norm:
+                    continue
+                clave = (norm["away"].get("name"), norm["home"].get("name"))
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                recientes.append(norm)
+                if len(recientes) >= 10:
+                    break
+        except Exception:
+            pass
+
+    # Complemento 2: schedule de temporada (futbol suele necesitarlo)
+    if len(recientes) < 10:
+        try:
+            previos = sports.get_team_schedule_results(
+                sport, league, equipo.get("id"), limit=10
+            )
+            vistos = {
+                (r.get("away", {}).get("name"), r.get("home", {}).get("name"))
+                for r in recientes
+            }
+            for ev in previos:
+                clave = (ev.get("away", {}).get("name"), ev.get("home", {}).get("name"))
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                recientes.append(ev)
+                if len(recientes) >= 10:
+                    break
+        except Exception:
+            pass
+
+    return recientes[:10]
+
+
+def _validacion_empirica(sport: str, event_id: str, home_name: str, away_name: str,
+                         league, pick: dict):
+    """Frecuencia empirica del outcome del pick en los ultimos 10 de cada equipo.
+
+    Lee los marcadores reales de los ultimos 10 partidos del LOCAL y del
+    VISITANTE, cuenta cuantas veces ocurrio lo que el pick propone
+    (over/under X.5, ambos marcan, ganador, doble oportunidad, total de un
+    equipo) y promedia ambos equipos.
+
+    Devuelve (promedio, detalle) si valido; None si el mercado no es validable
+    con marcadores o faltan datos (en cuyo caso NO se bloquea el pick).
+    """
+    import sports
+
+    texto = _norm_texto(
+        f"{pick.get('titulo') or ''} {pick.get('market') or ''} "
+        f"{pick.get('selection') or ''}"
+    )
+    if not texto:
+        return None
+
+    try:
+        detail = sports.get_game_detail(sport, event_id)
+    except Exception:
+        return None
+    if not detail:
+        return None
+
+    def _marcadores(nombre):
+        out = []
+        for r in _recientes_con_marcador(sport, league, detail, nombre):
+            a, h = r.get("away") or {}, r.get("home") or {}
+            try:
+                out.append((float(a.get("score")), float(h.get("score"))))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    rec_away = _marcadores(away_name)   # ultimos del visitante: (gf_visitante, gf_local)
+    rec_home = _marcadores(home_name)   # ultimos del local
+    if len(rec_away) < 6 or len(rec_home) < 6:
+        return None  # pocos datos para juzgar
+
+    def promedio(pred):
+        """Promedio de la frecuencia del predicado en los 10 de cada equipo."""
+        na = sum(1 for as_, hs in rec_away if pred(as_, hs))
+        nh = sum(1 for as_, hs in rec_home if pred(as_, hs))
+        detalle = f"{na}/{len(rec_away)} (visitante) y {nh}/{len(rec_home)} (local)"
+        return (na / len(rec_away) + nh / len(rec_home)) / 2, detalle
+
+    # equipo protagonista (para mercados de equipo: total propio, ML, 1X/2X)
+    home_n, away_n = _norm_texto(home_name), _norm_texto(away_name)
+    if home_n in texto and away_n not in texto:
+        es_home, nombre_eq = True, home_name
+    elif away_n in texto and home_n not in texto:
+        es_home, nombre_eq = False, away_name
+    else:
+        es_home, nombre_eq = None, None
+
+    # 1) Ambos marcan
+    if "ambos" in texto or "btts" in texto:
+        return promedio(lambda a, h: a > 0 and h > 0)
+
+    # 2) Over / Under con linea numerica
+    m_over = re.search(r"\b(?:over|mas de)\s*(\d+(?:\.\d+)?)", texto)
+    m_under = re.search(r"\b(?:under|menos de)\s*(\d+(?:\.\d+)?)", texto)
+    if m_over or m_under:
+        linea = float((m_over or m_under).group(1))
+        es_over = bool(m_over)
+        es_de_equipo = es_home is not None and (
+            "de goles" in texto or "de puntos" in texto or "total de" in texto
+        )
+        if es_de_equipo:
+            propios = rec_home if es_home else rec_away
+            n = sum(
+                1 for as_, hs in propios
+                if ((as_ if es_home else hs) > linea) == es_over
+                and (as_ if es_home else hs) != linea
+            )
+            freq = n / len(propios)
+            return freq, f"{n}/{len(propios)} partidos de {nombre_eq}"
+        pred = (lambda a, h: a + h > linea) if es_over else (lambda a, h: a + h < linea)
+        return promedio(pred)
+
+    # 3) ML / doble oportunidad (gana, no pierde, 1X/2X)
+    doble = any(
+        t in texto
+        for t in ("no pierde", "1x", "2x", "doble oportunidad", "empate o", "o empate")
+    )
+    gana = any(t in texto for t in ("gana", "ganador", "victoria", "ml ", "moneyline"))
+    if (gana or doble) and es_home is not None:
+        propios = rec_home if es_home else rec_away
+        if es_home:
+            pred_win = lambda a, h: h > a
+            pred_doble = lambda a, h: h >= a
+        else:
+            pred_win = lambda a, h: a > h
+            pred_doble = lambda a, h: a >= h
+        n = sum(1 for as_, hs in propios if (pred_doble if doble else pred_win)(as_, hs))
+        freq = n / len(propios)
+        return freq, f"{n}/{len(propios)} partidos de {nombre_eq}"
+
+    return None  # mercado no validable con marcadores: no bloquear
+
+
 def _analisis_previo(sport: str, event_id: str, home_name: str, away_name: str, league=None) -> str:
     """Analisis previo REAL (ESPN) para el prompt del pick.
 
@@ -827,11 +1025,17 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
     Nunca repite el mismo mercado (normalizado) en toda la jornada.
     """
     partidos = _partidos_hoy()
+    # 70/30: ligas grandes primero; las otras ligas/deportes solo hasta ~30%
+    partidos.sort(key=lambda x: 0 if (x.get("league") or "") in LIGAS_GRANDES else 1)
     generados = 0
     omitidos = 0
     errores = 0
     rechazados_cuota = 0
     rechazados_calidad = 0
+    rechazados_empiria = 0
+    omitidos_liga = 0
+    generados_grandes = 0
+    generados_otros = 0
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
 
@@ -839,6 +1043,16 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
         if db.pick_existe(p["event_id"]):
             omitidos += 1
             continue
+
+        # Cuota 70/30 entre ligas grandes y el resto
+        es_grande = (p.get("league") or "") in LIGAS_GRANDES
+        if not es_grande:
+            limite_otros = max(
+                2, round(CUOTA_OTRAS * (generados_grandes + generados_otros + 1))
+            )
+            if generados_otros + 1 > limite_otros:
+                omitidos_liga += 1
+                continue
 
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
         if not [m for m in mercados if _market_norm(m) not in mercados_usados]:
@@ -950,6 +1164,35 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             rechazados_calidad += 1
             continue
 
+        # Mercados NO verificables con marcador (corners, tarjetas, props de
+        # jugador...): no se generan (el resolver no puede validarlos).
+        texto_pick = _norm_texto(f"{pick.get('titulo') or ''} {pick.get('market') or ''}")
+        if any(palabra in texto_pick for palabra in _MERCADOS_NO_VERIFICABLES):
+            rechazados_calidad += 1
+            continue
+
+        # Validacion empirica: el outcome del pick debe haber ocurrido con
+        # frecuencia en los ultimos 10 partidos de AMBOS equipos. Si el
+        # promedio queda bajo FRECUENCIA_MINIMA, el pick no se publica.
+        try:
+            validacion = _validacion_empirica(
+                p["sport"], p["event_id"], p["home_name"], p["away_name"],
+                p.get("league"), pick,
+            )
+        except Exception:
+            validacion = None
+        if validacion is not None:
+            prom, detalle = validacion
+            if prom < FRECUENCIA_MINIMA:
+                rechazados_empiria += 1
+                continue
+            # Evidencia empirica como primer stat del pick
+            pick["stats"] = [
+                f"Ultimos 10: ocurrio en {detalle} -> promedio {prom * 100:.0f}%"
+            ] + [
+                _limpiar_artefactos(str(s)) for s in (pick.get("stats") or [])[:4]
+            ]
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -980,15 +1223,23 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
         )
         if creado:
             generados += 1
+            if es_grande:
+                generados_grandes += 1
+            else:
+                generados_otros += 1
             mercados_usados.add(_market_norm(market))
 
     return {
         "partidos": len(partidos),
         "generados": generados,
+        "de_ligas_grandes": generados_grandes,
+        "de_otras_ligas": generados_otros,
         "omitidos_ya_con_pick": omitidos,
+        "omitidos_otra_liga": omitidos_liga,
         "errores": errores,
         "rechazados_cuota": rechazados_cuota,
         "rechazados_calidad": rechazados_calidad,
+        "rechazados_empiria": rechazados_empiria,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
