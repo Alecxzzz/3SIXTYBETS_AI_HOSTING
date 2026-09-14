@@ -933,9 +933,9 @@ from pagadito_client import (
 
 # Planes: sobreescribir con PAGADITO_PLANS='[{"code":"plan15","description":"...","amount":5,"days":15}, ...]'
 DEFAULT_PLANS = [
-    {"code": "plan15", "description": "PREMIUM 3SIXTYBETS - 15 dias", "amount": 5.00, "days": 15},
-    {"code": "plan30", "description": "PREMIUM 3SIXTYBETS - 30 dias", "amount": 10.00, "days": 30},
-    {"code": "plan45", "description": "PREMIUM 3SIXTYBETS - 45 dias", "amount": 15.00, "days": 45},
+    {"code": "plan15", "description": "PREMIUM 3SIXTYBETS - 15 dias", "amount": 10.00, "days": 15},
+    {"code": "plan30", "description": "PREMIUM 3SIXTYBETS - 30 dias", "amount": 15.00, "days": 30},
+    {"code": "plan60", "description": "PREMIUM 3SIXTYBETS - 60 dias", "amount": 25.00, "days": 60},
 ]
 
 class PagaditoPaymentIn(BaseModel):
