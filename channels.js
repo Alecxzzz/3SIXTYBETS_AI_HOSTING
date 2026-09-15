@@ -37,13 +37,16 @@ export const channels = [
   { id: 24, name: "NBC SPORTS", status: "ACTIVO", ads: false, stream: "https://d4whmvwm0rdvi.cloudfront.net/10007/99993008/hls/master.m3u8?ads.xumo_channelId=99993008", type: "m3u8", geoRestriction: "USA", useProxy: true },
   { id: 25, name: "NFL CHANNEL", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-5ced7d5df64be98e07ed47b6.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 26, name: "NHL NETWORK", status: "ACTIVO", ads: false, stream: "https://nhl-firetv.amagi.tv/playlist.m3u8", type: "m3u8", geoRestriction: "USA", useProxy: true },
+  { id: 51, name: "NYMSPORTS", status: "ACTIVO", ads: false, stream: "https://thm-it-roku.otteravision.com/thm/it/it.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 27, name: "SKY SPORTS LALIGA", status: "ACTIVO", ads: false, stream: "http://168.228.44.241:9998/play/a001/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
+  { id: 52, name: "SKY SPORTS NFL", status: "ACTIVO", ads: false, stream: "http://stream.bottledesk.net/p/AQNASgYGemc/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 28, name: "SKY SPORTS PREMIER LEAGUE", status: "ACTIVO", ads: false, stream: "https://stream.bottledesk.net/p/AAxBRQEBc2c/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 29, name: "SKY SPORTS TENNIS", status: "ACTIVO", ads: false, stream: "https://cdnlivetv.tv/secure/api/v1/6a288d2a81d8192bb76cc320/playlist.m3u8?token=NmEyODhkMmE4MWQ4MTkyYmI3NmNjMzIwOjE3ODg0MTcwNTIwNDE6Y2RubGl2ZXR2LnR2Ojc1NTY0MjdkMjY0Nzk4YjcuODY2YTNiYTM3N2E4YjdkMzM2OTNjYjQyZTliNGNjYjE0MDhmMTlmM2VmYjA1M2JmMzVmN2EyNWViNjVjYmE1ZA", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 30, name: "SPORTSNET BLUE JAYS", status: "ACTIVO", ads: false, stream: "https://cdnlivetv.tv/secure/api/v1/6a288d2a81d8192bb76cc2a5/playlist.m3u8?token=NmEyODhkMmE4MWQ4MTkyYmI3NmNjMmE1OjE3ODg0MTcwNDc5NjQ6Y2RubGl2ZXR2LnR2OjlkMzhiM2VjZmQ2ZDhkNGMuYjc1OTJkYTc0NzM4ZTk2NDY2NDBkY2U0YzQ1YzQzMTMyYTRmYmY2YWYzMzMxZDZkNTYxM2ZjODdiZWVhZGZkYg", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 31, name: "SPORTSNET DODGERS", status: "ACTIVO", ads: false, stream: "https://cdnlivetv.tv/secure/api/v1/6a288d2a81d8192bb76cc168/playlist.m3u8?token=NmEyODhkMmE4MWQ4MTkyYmI3NmNjMTY4OjE3ODg0MTcwNDUyODg6Y2RubGl2ZXR2LnR2OjdkZWVmNjMwYTMwNWRmZjMuNmRmZmE2ODMwYzhkY2UxMDExMmU3OWEzYjM2YTlkMGU3MDFmZTQ2MjYwMjU3ZTY2MDBmNzViZTljNzg4ZjY2Nw", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 50, name: "STAR SPORTS 1", status: "ACTIVO", ads: false, stream: "http://41.205.93.154/STARSPORTS1/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 32, name: "TELEMUNDO DEPORTES", status: "ACTIVO", ads: false, stream: "https://d1rqgw5gocwo9i.cloudfront.net/manifest/3fec3e5cac39a52b2132f9c66c83dae043dc17d4/prod_default_xumo-nbcu-stitched/6a4c908e-7980-4fcb-93e3-584472a5f9a3/4.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
+  { id: 53, name: "TENNIS CHANNEL", status: "ACTIVO", ads: false, stream: "https://cdn-ue1-prod.tsv2.amagi.tv/linear/amg01444-tennischannelth-tennischannelnl-samsungnl/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true },
   { id: 44, name: "TNT SPORTS CHILE", status: "ACTIVO", ads: false, stream: "https://9.ftlly.com/tntsportschile/mono.m3u8?token=5973c01af0b52c84b6bb5e98ad00a0196b96b8c3-3-1788727449-1788709449", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 33, name: "TUDN", status: "ACTIVO", ads: false, stream: "http://200.115.120.1:8000/play/ca039/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 34, name: "TYC SPORTS", status: "ACTIVO", ads: false, stream: "http://45.181.87.106/TYCSPORTSHD/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
@@ -52,5 +55,6 @@ export const channels = [
   { id: 35, name: "WIN SPORTS", status: "ACTIVO", ads: false, stream: "http://168.228.44.241:9998/play/a03o/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 43, name: "YES NETWORK (YANKEES)", status: "ACTIVO", ads: false, stream: "http://23.237.104.106:8080/USA_YES_NETWORK/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true },
 ];
+
 
 export default channels;

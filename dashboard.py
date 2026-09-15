@@ -157,6 +157,104 @@ def _texto_sin_datos(texto) -> bool:
     return any(f in t for f in _FRASES_SIN_DATOS)
 
 
+def _sin_acentos(s: str) -> str:
+    """Normaliza texto quitando acentos (para comparar sin importar tildes)."""
+    import unicodedata
+
+    return "".join(
+        c for c in unicodedata.normalize("NFD", str(s or ""))
+        if unicodedata.category(c) != "Mn"
+    ).lower()
+
+
+# Frases con las que la IA reconoce que el pick es invalido pero lo emite
+# igual (bug real: pick de Shohei Ohtani en un partido White Sox vs Guardians,
+# con el texto "Alternativa invalida: Ohtani no juega este partido").
+_FRASES_CONTRADICCION = (
+    "no juega", "no jugara", "no participara", "no participa",
+    "no pertenece", "no forma parte", "no esta en el partido",
+    "no esta en este partido", "alternativa invalida",
+    "alternativa no valida", "pick invalido", "apuesta invalida",
+    "cuota no juega",
+)
+
+
+def _pick_se_declara_invalido(pick: dict) -> bool:
+    """True si la IA admite en alguno de sus textos que el pick es invalido."""
+    texto = _sin_acentos(
+        " ".join(
+            str(pick.get(k) or "")
+            for k in ("titulo", "porque", "rationale", "selection")
+        )
+    )
+    return any(f in texto for f in _FRASES_CONTRADICCION)
+
+
+# Mercados de props individuales: la validez depende de que el jugador
+# nombrado juegue realmente ese partido.
+_MERCADOS_JUGADOR = (
+    "por jugador", "del jugador", "bases totales", "hits totales",
+    "hr totales", "home runs del", "carreras anotadas del",
+    "ponches del", "strikeouts del", "bases por",
+)
+
+# Palabras del mercado que se limpian al extraer el nombre del jugador del titulo
+_PALABRAS_MERCADO_TITULO = (
+    "bases totales", "hits totales", "hr totales", "home runs",
+    "carreras anotadas", "ponches", "strikeouts", "total de", "totales",
+    "por jugador", "del jugador", "incl extra innings", "incl",
+    "extra innings", "bases", "hits", "carreras",
+)
+
+
+def _extraer_jugador(titulo: str) -> str:
+    """Extrae el nombre del jugador de un titulo tipo 'Shohei Ohtani bases totales: Over 2.5'."""
+    t = str(titulo or "")
+    t = t.split(":")[0]  # quitar la seleccion ('Over 2.5')
+    t_norm = _sin_acentos(t)
+    for palabra in _PALABRAS_MERCADO_TITULO:
+        t_norm = t_norm.replace(palabra, " ")
+    nombre = " ".join(t_norm.split())
+    return nombre
+
+
+def _jugador_valido_en_partido(pick: dict, p: dict) -> bool:
+    """True si el pick de prop-de-jugador nombra a alguien del partido.
+
+    Compara los tokens del nombre extraido del titulo contra los jugadores
+    del detalle ESPN (key_players / rosters). Si no se puede extraer jugador
+    o no hay datos del partido, devuelve True para no bloquear aqui (otros
+    gates ya filtran basura).
+    """
+    texto = _sin_acentos(f"{pick.get('titulo') or ''} {pick.get('market') or ''}")
+    if not any(m in texto for m in _MERCADOS_JUGADOR):
+        return True  # no es prop de jugador: no aplica
+
+    jugador = _extraer_jugador(pick.get("titulo"))
+    tokens = {t for t in re.findall(r"[a-z]{3,}", jugador)}
+    if not tokens:
+        return True
+
+    try:
+        import sports
+
+        detail = sports.get_game_detail(p["sport"], p["event_id"])
+    except Exception:
+        return True
+    nombres = [
+        str(j.get("name") or "")
+        for j in (detail.get("key_players") or [])
+        if isinstance(j, dict)
+    ]
+    if not nombres:
+        return True  # sin datos de jugadores: no bloquear
+    for nombre in nombres:
+        nt = set(re.findall(r"[a-z]{3,}", _sin_acentos(nombre)))
+        if tokens & nt:
+            return True
+    return False
+
+
 def _pick_calidad_ok(pick: dict) -> bool:
     """Gate de calidad para MOSTRAR un pick (pendientes y aciertos).
 
@@ -1161,6 +1259,19 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 
         # Coherencia titulo vs seleccion (bug real: 'no pierde (1X)' con 2X)
         if _titulo_contradice(pick, p):
+            rechazados_calidad += 1
+            continue
+
+        # La IA a veces admite en su propio texto que el pick es invalido
+        # (ej: 'Alternativa invalida: Ohtani no juega este partido') y aun asi
+        # lo emite: se rechaza directamente.
+        if _pick_se_declara_invalido(pick):
+            rechazados_calidad += 1
+            continue
+
+        # Props de jugador: el jugador nombrado debe pertenecer a uno de los
+        # dos equipos del partido (bug real: Ohtani en White Sox vs Guardians).
+        if not _jugador_valido_en_partido(pick, p):
             rechazados_calidad += 1
             continue
 
