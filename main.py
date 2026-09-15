@@ -1887,6 +1887,11 @@ def cdnlivetv_resolve(name: str, code: str):
         vm = re.search(rf"var\s+{var}='([^']+)'", html)
         if vm:
             out += _cdn_b64d(vm.group(1))
+    # cdnlivetv ahora devuelve la URL SIN esquema ("cdnlivetv.tv/secure/...")
+    # en vez de "https://...": sin el prefijo, el probe revienta con
+    # MissingSchema, el endpoint se cuelga y el player da manifestLoadError.
+    if out and not out.startswith("http"):
+        out = "https://" + out
     return out or None
 
 
