@@ -1834,6 +1834,108 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     )
 
 
+# ==============================
+# CDN LIVE TV (canales con token temporal)
+# ==============================
+# cdnlivetv.tv re-empaqueta canales premium (Sportsnet, TSN, equipos MLB, etc.)
+# y entrega el m3u8 con un token firmado que expira (~4 h). Este endpoint
+# resuelve un token FRESCO en cada sintonizada y entrega el stream a traves
+# del /hls-proxy existente (mismo origen -> sin CORS ni mixed content).
+
+import base64 as _b64
+
+_CDN_TTL = 45 * 60  # el token dura ~4 h; refrescamos antes por seguridad
+_cdn_cache = {}  # (name, code) -> {"url": str, "ts": float}
+_cdn_lock = threading.Lock()
+
+
+def _cdn_b64d(s: str) -> str:
+    s = s.replace("-", "+").replace("_", "/")
+    s += "=" * (-len(s) % 4)
+    try:
+        return _b64.b64decode(s).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def cdnlivetv_resolve(name: str, code: str):
+    """
+    Descarga la pagina del player de cdnlivetv.tv y extrae el m3u8 directo.
+    El player ofusca la URL como una suma de fragmentos base64 con nombres
+    de variable aleatorios por pagina:  var X = dec(a) + dec(b) + ... ; source:{src:X}
+    """
+    from urllib.parse import quote as _q
+
+    player_url = (
+        "https://cdnlivetv.tv/api/v1/channels/player/"
+        f"?name={_q(name)}&code={code}&user=cdnlivetv&plan=free"
+    )
+    try:
+        html = http_requests.get(
+            player_url, headers={"User-Agent": HLS_USER_AGENT}, timeout=(5, 20)
+        ).text
+    except http_requests.RequestException as exc:
+        print(f"[cdnlivetv] player error {name} ({code}): {exc}")
+        return None
+
+    m = re.search(r"var\s+(\w+)=((?:\w+\(\w+\)\+)+\w+\(\w+\))\s*;", html)
+    if not m:
+        print(f"[cdnlivetv] no se encontro la URL ofuscada de {name} ({code})")
+        return None
+    out = ""
+    for var in re.findall(r"\w+\((\w+)\)", m.group(2)):
+        vm = re.search(rf"var\s+{var}='([^']+)'", html)
+        if vm:
+            out += _cdn_b64d(vm.group(1))
+    return out or None
+
+
+def cdnlivetv_fresh(name: str, code: str):
+    """Devuelve un m3u8 vivo; cachea 45 min y reintenta (su API tiene rate-limit)."""
+    with _cdn_lock:
+        cached = _cdn_cache.get((name, code))
+    if cached and _time.time() - cached["ts"] < _CDN_TTL:
+        return cached["url"]
+
+    for attempt in range(3):
+        stream = cdnlivetv_resolve(name, code)
+        if stream:
+            try:
+                probe = http_requests.get(
+                    stream,
+                    headers={"User-Agent": HLS_USER_AGENT},
+                    stream=True,
+                    timeout=(5, 15),
+                )
+                ok = probe.status_code == 200
+                probe.close()
+                if ok:
+                    with _cdn_lock:
+                        _cdn_cache[(name, code)] = {"url": stream, "ts": _time.time()}
+                    return stream
+            except http_requests.RequestException:
+                pass
+        _time.sleep(2 * (attempt + 1))
+
+    # Ultimo recurso: devolver el viejo aunque pueda estar por expirar
+    with _cdn_lock:
+        cached = _cdn_cache.get((name, code))
+    return cached["url"] if cached else None
+
+
+@app.get("/tv/cdnlivetv/{name}/{code}")
+def tv_cdnlivetv(request: Request, name: str, code: str):
+    """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy."""
+    stream = cdnlivetv_fresh(name, code)
+    if not stream:
+        from fastapi import HTTPException
+
+        raise HTTPException(503, f"No se pudo resolver el canal {name} ({code})")
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(_wrap(stream, _proxy_base(request)), status_code=302)
+
+
 # === Player Stats API (MLB + Football) ===
 @app.get("/api/player/{sport}/{player_id}/last5")
 async def api_get_player_last5(
