@@ -781,19 +781,25 @@ def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
 # ==============================
 
 @app.get("/dashboard")
-def dashboard_home(user=Depends(get_current_user)):
-    """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra)."""
+def dashboard_home(user=Depends(get_current_user_optional)):
+    """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra).
+
+    MODO INVITADO: si no hay sesion, el dashboard se abre igual pero con el
+    freemium aplicado (2 picks gratis, el resto bloqueado). El chat/TV/stats
+    siguen requiriendo cuenta.
+    """
     # Reparar picks viejos sin equipos/logos al vuelo (barato: 1 query si no hay nada)
     try:
         dashboard.backfill_picks_metadata()
     except Exception:
         pass
-    data = dashboard.resumen_dashboard(user["username"])
+    username = user["username"] if user else "Invitado"
+    data = dashboard.resumen_dashboard(username)
 
-    # FREEMIUM: usuarios sin acceso activo ven solo los primeros picks
-    # completos; el resto llega sin datos sensibles (el frontend pinta el
-    # candado y el boton de desbloqueo).
-    if not db.es_premium_row(user):
+    # FREEMIUM (incluye invitados): solo los primeros picks son completos;
+    # el resto llega sin datos sensibles (el frontend pinta el candado y el
+    # boton de desbloqueo).
+    if not user or not db.es_premium_row(user):
         for i, pick in enumerate(data.get("pronosticos_del_dia") or []):
             if i < PICKS_GRATIS:
                 continue
