@@ -48,6 +48,11 @@ frontend_origins = os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in frontend_origins],
+    # Los endpoints de streaming (/hls-proxy, /tv/cdnlivetv) son publicos y los
+    # consume hls.js desde cualquier dominio del sitio (vercel previews, dominio
+    # propio, etc.). Sin esto, un origen no listado rompe TODOS los canales
+    # dinamicos con manifestLoadError.
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
