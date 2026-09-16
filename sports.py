@@ -184,13 +184,21 @@ def _cache_set(key, data):
         _cache[key] = {"data": data, "ts": time.time()}
 
 
-def _date_range() -> str:
-    """Rango de fechas ayer..pasado-manana para que salgan finalizados, en vivo y proximos."""
+def _dias_rango() -> list:
+    """Fechas individuales (uno por dia) de ayer..pasado-manana, hora UTC.
+
+    ESPN YA NO ACEPTA rangos en dates=YYYYMMDD-YYYYMMDD (responde 400 Bad
+    Request desde sep/2026). Solo acepta UNA fecha por peticion, por eso
+    devolvemos una lista de dias y _fetch_scoreboard hace una peticion por dia.
+    """
     from datetime import timedelta
     today = datetime.now(timezone.utc)
-    start = today - timedelta(days=1)
-    end = today + timedelta(days=2)
-    return f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+    return [
+        (today - timedelta(days=1)).strftime("%Y%m%d"),
+        today.strftime("%Y%m%d"),
+        (today + timedelta(days=1)).strftime("%Y%m%d"),
+        (today + timedelta(days=2)).strftime("%Y%m%d"),
+    ]
 
 
 TZ_NIC = timezone(timedelta(hours=-6), "America/Managua")
@@ -276,15 +284,52 @@ def _fetch_scoreboard(path: str, league: str | None = None, params_extra: dict |
         url = f"{ESPN_BASE}/{path}/{league}/scoreboard"
     else:
         url = f"{ESPN_BASE}/{path}/scoreboard"
-    params = {}
+    # Detalle de un partido puntual: SIN dates (con dates= un solo dia ya
+    # funciona, pero es innecesario; con rango daba 400 y rompia la resolucion
+    # de picks).
+    if params_extra and "event" in params_extra:
+        resp = _espn_get(url, params=params_extra)
+        return resp.json()
     # El tenis anida los torneos en un solo evento; si filtramos por fechas
     # perdemos los torneos en curso (ej. US Open). Sin dates trae todo.
-    if not path.startswith("tennis"):
-        params["dates"] = _date_range()
-    if params_extra:
-        params.update(params_extra)
-    resp = _espn_get(url, params=params)
-    return resp.json()
+    if path.startswith("tennis"):
+        resp = _espn_get(url)
+        return resp.json()
+    # ESPN ya no acepta rangos (dates=A-B -> 400 Bad Request): una peticion
+    # por dia (en paralelo) y fusionamos los eventos (deduplicados por id).
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _get_dia(dia: str):
+        params = {"dates": dia}
+        if params_extra:
+            params.update(params_extra)
+        try:
+            return _espn_get(url, params=params).json()
+        except Exception:
+            return None  # un dia que falla no tira el resto
+
+    dias = _dias_rango()
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        resultados = list(ex.map(_get_dia, dias))
+
+    data = None
+    vistos = set()
+    for djson in resultados:
+        if not djson:
+            continue
+        if data is None:
+            data = djson
+            data["events"] = []
+        for ev in djson.get("events", []):
+            eid = str(ev.get("id") or "")
+            if eid and eid in vistos:
+                continue
+            if eid:
+                vistos.add(eid)
+            data["events"].append(ev)
+    if data is None:
+        raise Exception(f"ESPN sin respuesta para {path} en {len(dias)} dias")
+    return data
 
 
 def _fetch_json(url: str) -> dict:
@@ -405,18 +450,44 @@ def get_team_recent_events(sport: str, league: str | None, team_id, limit: int =
         return cached
 
     today = datetime.now(timezone.utc)
-    start = today - timedelta(days=45)
-    params = {"dates": f"{start.strftime('%Y%m%d')}-{today.strftime('%Y%m%d')}"}
+    # ESPN ya no acepta rangos (dates=A-B -> 400): una peticion por dia en
+    # paralelo, ultimos 21 dias (suficiente para 6 partidos finalizados).
+    from datetime import timedelta
+    from concurrent.futures import ThreadPoolExecutor
+    dias = [
+        (today - timedelta(days=d)).strftime("%Y%m%d")
+        for d in range(1, 22)
+    ]
     url = (
         f"{ESPN_BASE}/{path}/{league}/scoreboard"
         if (league and path.startswith("soccer"))
         else f"{ESPN_BASE}/{path}/scoreboard"
     )
-    resp = _espn_get(url, params=params)
-    data = resp.json()
+
+    def _get_dia(dia: str):
+        try:
+            return _espn_get(url, params={"dates": dia}).json()
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        resultados = list(ex.map(_get_dia, dias))
+
+    data_events = []
+    vistos = set()
+    for djson in resultados:
+        if not djson:
+            continue
+        for ev in djson.get("events", []):
+            eid = str(ev.get("id") or "")
+            if eid and eid in vistos:
+                continue
+            if eid:
+                vistos.add(eid)
+            data_events.append(ev)
 
     events = []
-    for ev in data.get("events", []):
+    for ev in data_events:
         state = (ev.get("status") or {}).get("type", {}).get("state", "")
         if state != "post":
             continue
