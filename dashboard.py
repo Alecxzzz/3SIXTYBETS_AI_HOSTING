@@ -509,6 +509,9 @@ MERCADOS_FUTBOL = [
     "Props de jugadores",
     "Under/Over de tiros generales equipo A o B",
     "Under/Over de tiros a puerta equipo A o B",
+    "Total de tiros del partido (minimo 15)",
+    "Total de tiros a puerta del partido (minimo 6)",
+    "Total de tarjetas amarillas del partido (minimo 2.5)",
     "Total de faltas equipo A o B",
     "Under/Over de tarjetas equipo A o B",
 ]
@@ -889,6 +892,389 @@ def _recientes_con_marcador(sport: str, league, detail: dict, nombre: str) -> li
     return recientes[:10]
 
 
+# ============================================================
+# ESTADISTICAS DE PARTIDOS FINALIZADOS (corners, tiros, tarjetas...)
+# ============================================================
+
+# Cache: "sport:event_id" -> {"stats": {equipo_norm: {metrica: valor}},
+# "halves": [h1, h2] | None, "date": "..."} o None. TTL 24h (un partido
+# finalizado no cambia) y tope de memoria.
+_STATS_CACHE = {}
+_STATS_CACHE_TTL = 24 * 3600
+_STATS_CACHE_MAX = 4000
+
+
+def _stats_de_partido(sport: str, event_id, league=None) -> dict | None:
+    """Estadisticas de equipo de un partido finalizado (ESPN /summary).
+
+    Devuelve {"stats": {nombre_normalizado: {metrica_normalizada: valor}},
+    "halves": [h1, h2] | None, "date": str} o None si no hay datos.
+    """
+    import sports
+
+    if not event_id:
+        return None
+    clave = f"{sport}:{event_id}"
+    ahora = time.time()
+    hit = _STATS_CACHE.get(clave)
+    if hit and ahora - hit["ts"] < _STATS_CACHE_TTL:
+        return hit["data"]
+
+    salida = None
+    try:
+        detail = sports.get_game_detail(sport, str(event_id))
+        if not detail or detail.get("error"):
+            detail = None
+    except Exception:
+        detail = None
+
+    # Fallback: summary directo de la liga (no depende de get_sport_games,
+    # que puede venir vacio y dejar a todo el futbol sin detalle)
+    data = None
+    if detail is None:
+        try:
+            path = sports.SPORTS[sport][0]
+            url = (
+                f"{sports.ESPN_BASE}/{path}/{league}/summary?event={event_id}"
+                if (league and path.startswith("soccer"))
+                else f"{sports.ESPN_BASE}/{path}/summary?event={event_id}"
+            )
+            data = sports._fetch_json(url)
+        except Exception:
+            data = None
+        if data:
+            try:
+                header = (data.get("header", {}) or {}).get("competitions") or [{}]
+                comp = header[0] if header else {}
+                if ((comp.get("status") or {}).get("type") or {}).get("state") == "post":
+                    teams_tmp = []
+                    for c in comp.get("competitors", []):
+                        teams_tmp.append({
+                            "id": (c.get("team") or {}).get("id"),
+                            "name": (c.get("team") or {}).get("displayName", "?"),
+                            "homeAway": c.get("homeAway"),
+                            "linescores": sports._linescores(c),
+                        })
+                    detail = {"teams": teams_tmp, "date": comp.get("date")}
+                    stats_tmp = sports._parse_team_stats(data)
+                    for t in detail["teams"]:
+                        t["statistics"] = stats_tmp.get(str(t["id"]), [])
+            except Exception:
+                detail = None
+
+    try:
+        teams = (detail or {}).get("teams") or []
+        if len(teams) >= 2:
+            stats = {}
+            for t in teams:
+                nombre = _norm_texto(t.get("name"))
+                if not nombre:
+                    continue
+                d = {}
+                for s in t.get("statistics") or []:
+                    crudo = s.get("label", s.get("displayValue"))
+                    try:
+                        d[_norm_texto(s.get("name"))] = float(crudo)
+                    except (TypeError, ValueError):
+                        continue
+                if d:
+                    stats[nombre] = d
+            halves = None
+            lines = {}
+            try:
+                for t in teams:
+                    nombre = _norm_texto(t.get("name"))
+                    ls = []
+                    for x in t.get("linescores") or []:
+                        try:
+                            ls.append(float(x.get("value")))
+                        except (TypeError, ValueError, AttributeError):
+                            continue
+                    if nombre and ls:
+                        lines[nombre] = ls
+            except Exception:
+                lines = {}
+            if stats:
+                salida = {
+                    "stats": stats,
+                    "lines": lines,
+                    "date": str(detail.get("date") or ""),
+                }
+    except Exception:
+        salida = None
+
+    if len(_STATS_CACHE) >= _STATS_CACHE_MAX:
+        _STATS_CACHE.clear()
+    _STATS_CACHE[clave] = {"ts": ahora, "data": salida}
+    return salida
+
+
+# Claves de estadistica NORMALIZADAS tal como llegan del detalle ESPN
+# (STAT_TRANSLATIONS traduce: "Corners", "Tiros totales", "Tiros a puerta",
+# "Tarjetas amarillas", "Faltas", "Fueras de juego"...). El lookup es por
+# sufijo para tolerar prefijos de categoria ("x - corners").
+_METRICAS_FUTBOL = {
+    "woncorners": ("corners",),
+    "totalshots": ("tiros totales", "totalshots"),
+    "shotsontarget": ("tiros a puerta", "shotsontarget"),
+    "yellowcards": ("tarjetas amarillas", "yellowcards"),
+    "foulscommitted": ("faltas", "foulscommitted"),
+    "offsides": ("fuera de juego", "offsides"),
+}
+
+
+def _valor_metrica(d: dict, metrica: str):
+    """Valor numerico de la metrica canonica en el dict de stats, o None."""
+    if not d:
+        return None
+    if metrica == "tarjetas":
+        a, r = d.get("tarjetas amarillas"), d.get("tarjetas rojas")
+        if a is None and "tarjetasamarillas" in d:
+            a = d["tarjetasamarillas"]
+        if r is None and "tarjetasrojas" in d:
+            r = d["tarjetasrojas"]
+        if a is not None or r is not None:
+            return (a or 0) + (r or 0)
+        return None
+    for clave in _METRICAS_FUTBOL.get(metrica, (metrica,)):
+        if clave in d:
+            return d[clave]
+    # tolerancia por sufijo (stats agrupadas traen prefijo "categoria - ")
+    for k, v in d.items():
+        if k.endswith(metrica):
+            return v
+    return None
+
+
+def _metrica_equipo(stats_partido: dict, nombre_equipo: str, metrica: str):
+    """Valor de la metrica canonica para el equipo en ese partido, o None."""
+    d = (stats_partido or {}).get("stats") or {}
+    equipo = d.get(_norm_texto(nombre_equipo))
+    if not equipo:
+        # tolerancia por nombre (ESPN usa displayName consistentes, pero por si acaso)
+        for k, v in d.items():
+            if k and (k in _norm_texto(nombre_equipo) or _norm_texto(nombre_equipo) in k):
+                equipo = v
+                break
+    if not equipo:
+        return None
+    claves = _METRICAS_FUTBOL.get(metrica)
+    if not claves:
+        return None
+    for c in claves:
+        if c in equipo:
+            return equipo[c]
+    return None
+
+
+def _recientes_con_id(sport: str, league, detail: dict, nombre: str) -> list:
+    """Ultimos 10 del equipo; cada item trae 'id' de evento cuando existe."""
+    recientes = _recientes_con_marcador(sport, league, detail, nombre)
+    equipo = next(
+        (t for t in (detail.get("teams") or []) if t.get("name") == nombre), None
+    )
+    if not equipo or not recientes:
+        return recientes
+    try:
+        import sports
+        raws = sports.get_team_recent_events(sport, league, equipo.get("id"), limit=10)
+        # raws viene crudo; tomar ids por emparejamiento de fecha+rival
+        ids_por_fecha = {}
+        for ev in raws:
+            comp0 = (ev.get("competitions") or [{}])[0]
+            clave = str(comp0.get("date") or ev.get("date") or "")
+            ids_por_fecha[clave] = ev.get("id")
+        for r in recientes:
+            if r.get("id"):
+                continue
+            r["id"] = ids_por_fecha.get(str(r.get("date") or ""))
+    except Exception:
+        pass
+    return recientes
+
+
+def _validar_stats_soccer(texto, sport, league, detail, home_name, away_name,
+                          es_home, nombre_eq):
+    """Frecuencia empirica de mercados de ESTADISTICAS en futbol.
+
+    Logica: ¿en cuantos de sus ultimos partidos (temporada en curso) salio lo
+    que el pick propone? Con estadisticas reales de ESPN por partido (corners,
+    tiros, tiros a puerta, tarjetas, faltas, fuera de juego) y linescores por
+    mitad para 'gana cualquier mitad / primera mitad'.
+
+    Devuelve None (no aplica), ("nodata",) (sin datos: no bloquear) o
+    (frecuencia, detalle).
+    """
+    import sports
+
+    def _metrica():
+        if "corner" in texto or "esquina" in texto:
+            return "woncorners"
+        if "a puerta" in texto:
+            return "shotsontarget"
+        if "tiros" in texto or "tiro" in texto:
+            return "totalshots"
+        if "amarilla" in texto:
+            return "yellowcards"
+        if "tarjeta" in texto:
+            return "tarjetas"  # amarillas + rojas combinadas
+        if "falta" in texto:
+            return "foulscommitted"
+        if "fuera de juego" in texto:
+            return "offsides"
+        return None
+
+    metrica = _metrica()
+    es_mitades = "mitad" in texto and "gana" in texto and metrica is None
+    if metrica is None and not es_mitades:
+        return None
+
+    m_over = re.search(r"\b(?:over|mas de|minimo)\s*(\d+(?:\.\d+)?)", texto)
+    m_under = re.search(r"\b(?:under|menos de|maximo)\s*(\d+(?:\.\d+)?)", texto)
+    linea = None
+    es_over = True
+    if m_over or m_under:
+        linea = float((m_over or m_under).group(1))
+        es_over = bool(m_over)
+
+    def _valor(d, m):
+        return _valor_metrica(d, m)
+
+    def _historial(nombre):
+        """[{propio, rival, lines_propio, lines_rival}] de los ultimos juegos."""
+        equipo = next(
+            (t for t in (detail.get("teams") or []) if t.get("name") == nombre), None
+        )
+        if not equipo:
+            return []
+        eventos = []
+        try:
+            raws = sports.get_team_recent_events(
+                sport, league, equipo.get("id"), limit=12
+            ) or []
+            for ev in raws:
+                if ((ev.get("status") or {}).get("type") or {}).get("state") != "post":
+                    continue
+                if ev.get("id"):
+                    eventos.append(ev.get("id"))
+        except Exception:
+            pass
+        if len(eventos) < 6:
+            try:
+                for r in sports.get_team_schedule_results(
+                    sport, league, equipo.get("id"), limit=12
+                ) or []:
+                    if r.get("id"):
+                        eventos.append(r["id"])
+            except Exception:
+                pass
+        clave_eq = _norm_texto(nombre)
+        filas, vistos = [], set()
+        for gid in eventos:
+            gid = str(gid)
+            if gid in vistos:
+                continue
+            vistos.add(gid)
+            sp = _stats_de_partido(sport, gid, league)
+            if not sp or not sp.get("stats"):
+                continue
+            prop = rival = None
+            for nombre_sp, d in sp["stats"].items():
+                if nombre_sp == clave_eq or nombre_sp in clave_eq or clave_eq in nombre_sp:
+                    prop = d
+                elif rival is None:
+                    rival = d
+            if prop is None:
+                continue
+            lines = sp.get("lines") or {}
+            filas.append({
+                "propio": prop,
+                "rival": rival or {},
+                "lines_propio": lines.get(clave_eq) or [],
+                "lines_rival": next(
+                    (v for k, v in lines.items() if k != clave_eq), []
+                ),
+            })
+        return filas
+
+    return _evaluar_mercado_stats(
+        texto, metrica, es_mitades, linea, es_over, es_home, nombre_eq,
+        home_name, away_name, _historial, _valor,
+    )
+
+
+def _evaluar_mercado_stats(texto, metrica, es_mitades, linea, es_over, es_home,
+                           nombre_eq, home_name, away_name, _historial, _valor):
+    """Ramas finales de _validar_stats_soccer (separada por tamano)."""
+    # ---- Mitades: 'equipo gana cualquier mitad' / 'gana la primera mitad' ----
+    if es_mitades:
+        if es_home is None or not nombre_eq:
+            return ("nodata",)
+        propios = _historial(nombre_eq)
+        con_dato = [f for f in propios if f["lines_propio"] and f["lines_rival"]]
+        if len(con_dato) < 5:
+            return ("nodata",)
+        if "primera" in texto:
+            pred = lambda f: f["lines_propio"][0] > f["lines_rival"][0]
+        else:
+            pred = lambda f: any(
+                a > b for a, b in zip(f["lines_propio"], f["lines_rival"])
+            )
+        n = sum(1 for f in con_dato if pred(f))
+        return (
+            n / len(con_dato),
+            f"salio en {n} de sus ultimos {len(con_dato)} partidos de {nombre_eq}",
+        )
+
+    def _cumple(valor):
+        if valor is None or valor == linea:
+            return False
+        return valor > linea if es_over else valor < linea
+
+    # Ambos equipos X cada uno: propio y rival cumplen en el mismo partido
+    if "ambos" in texto and metrica:
+        juegos = []
+        for nombre in (home_name, away_name):
+            for f in _historial(nombre):
+                v1, v2 = _valor(f["propio"], metrica), _valor(f["rival"], metrica)
+                if v1 is not None and v2 is not None:
+                    juegos.append(v1 >= linea and v2 >= linea)
+        if len(juegos) < 8:
+            return ("nodata",)
+        n = sum(1 for x in juegos if x)
+        return n / len(juegos), (
+            f"salio en {n} de los ultimos {len(juegos)} partidos (ambos equipos)"
+        )
+
+    # Total del partido (sin equipo en el titulo): suma propio+rival
+    if es_home is None:
+        juegos = []
+        for nombre in (home_name, away_name):
+            for f in _historial(nombre):
+                v1, v2 = _valor(f["propio"], metrica), _valor(f["rival"], metrica)
+                if v1 is not None and v2 is not None:
+                    juegos.append(_cumple(v1 + v2))
+        if len(juegos) < 10:
+            return ("nodata",)
+        n = sum(1 for x in juegos if x)
+        return n / len(juegos), (
+            f"salio en {n} de los ultimos {len(juegos)} partidos (ambos equipos)"
+        )
+
+    # Total de un equipo: la historia de ESE equipo
+    propios = _historial(
+        nombre_eq if nombre_eq else (home_name if es_home else away_name)
+    )
+    con_dato = [f for f in propios if _valor(f["propio"], metrica) is not None]
+    if len(con_dato) < 5:
+        return ("nodata",)
+    n = sum(1 for f in con_dato if _cumple(_valor(f["propio"], metrica)))
+    return (
+        n / len(con_dato),
+        f"salio en {n} de sus ultimos {len(con_dato)} partidos de {nombre_eq}",
+    )
+
+
 def _validacion_empirica(sport: str, event_id: str, home_name: str, away_name: str,
                          league, pick: dict):
     """Frecuencia empirica del outcome del pick en los ultimos 10 de cada equipo.
@@ -947,6 +1333,27 @@ def _validacion_empirica(sport: str, event_id: str, home_name: str, away_name: s
         es_home, nombre_eq = False, away_name
     else:
         es_home, nombre_eq = None, None
+
+    # 0) Mercados de estadisticas (futbol): corners, tiros, tiros a puerta,
+    # tarjetas, faltas, fuera de juego y mitades. Logica: ¿en cuantos de sus
+    # ultimos partidos salio? CRITICO: va ANTES de la rama over/under de
+    # marcadores (si no, un 'Over 9.5 corners' se evaluaria contra GOLES).
+    if sport == "soccer":
+        try:
+            res_stats = _validar_stats_soccer(
+                texto, sport, league, detail, home_name, away_name,
+                es_home, nombre_eq,
+            )
+        except Exception:
+            res_stats = None
+        if res_stats is not None:
+            if (
+                isinstance(res_stats, tuple)
+                and len(res_stats) == 2
+                and res_stats[0] is not None
+            ):
+                return res_stats
+            return None  # aplica pero sin datos: no bloquear el pick
 
     # 1) Ambos marcan
     if "ambos" in texto or "btts" in texto:
@@ -1152,6 +1559,25 @@ def _analisis_previo(sport: str, event_id: str, home_name: str, away_name: str, 
             f"COMO LOCAL: {lg}G-{le}E-{lp}P, {lf / n:.1f} gf, {lc / n:.1f} gc | "
             f"COMO VISITANTE: {vg}G-{ve}E-{vp}P, {vf / n:.1f} gf, {vc / n:.1f} gc"
         )
+
+        # Rendimiento fisico: dias de descanso desde su ultimo partido
+        fechas = [str(r.get("date"))[:10] for r in recientes if r.get("date")]
+        if fechas:
+            try:
+                ult = max(fechas)
+                dias = (
+                    datetime.now(timezone.utc).date()
+                    - datetime.strptime(ult, "%Y-%m-%d").date()
+                ).days
+                if 0 <= dias <= 45:
+                    fisico = f"{dias} dia(s) de descanso desde su ultimo partido ({ult})"
+                    if dias <= 2:
+                        fisico += " <- POCO descanso (posible fatiga)"
+                    elif dias >= 7:
+                        fisico += " <- descanso largo (equipo fresco)"
+                    lineas.append(f"{nombre} RENDIMIENTO FISICO: {fisico}")
+            except Exception:
+                pass
 
     # H2H: ultimos enfrentamientos directos (ESPN)
     h2h = (detail.get("head_to_head") or [])[:5]
@@ -1478,13 +1904,12 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 # ============================================================
 
 
-# Mercados que NO se pueden verificar solo con el marcador final (props de
-# jugador, tarjetas, ponches, corners...): la IA no debe adivinarlos.
+# Mercados que NO se pueden verificar con el resumen ESPN final (marcador +
+# estadisticas de equipo). MLB props: el boxscore de ESPN no da ponches por
+# pitcher de forma confiable al resolver.
 _MERCADOS_NO_VERIFICABLES = (
-    "tiros de esquina", "esquina", "corner", "corners",
-    "tarjeta", "tarjetas", "en cualquier momento",
     "ponche", "strikeout", "ponches",
-    "pases", "asistencia", "tiros a puerta", "tiros totales",
+    "doble resultado", "marcador exacto", "sets exactos",
 )
 
 
@@ -1517,15 +1942,50 @@ def _resolver_pick_con_ia(pick: dict):
     marcador = " vs ".join(
         f"{t.get('name', '?')} {t.get('score', '-')}" for t in teams
     )
+
+    # Estadisticas de equipo del partido finalizado (corners, tiros, tarjetas,
+    # faltas...): necesarias para resolver esos mercados con el marcador.
+    _INTERES = (
+        "Corners", "Tiros totales", "Tiros a puerta", "Tarjetas amarillas",
+        "Tarjetas rojas", "Faltas", "Fueras de juego", "Posesion %",
+    )
+    stats_lineas = []
+    for t in teams:
+        d = {}
+        for s in t.get("statistics") or []:
+            crudo = s.get("label", s.get("displayValue"))
+            if crudo not in (None, ""):
+                d[str(s.get("name"))] = crudo
+        filas = [f"{k}={d[k]}" for k in _INTERES if d.get(k) not in (None, "")]
+        if filas:
+            stats_lineas.append(f"{t.get('name', '?')}: " + ", ".join(filas))
+
+    # Jugadores destacados (para goleador/props): nombre + sus stats
+    jugadores_lineas = []
+    for j in (detail.get("key_players") or [])[:8]:
+        st = ", ".join(
+            f"{s.get('name')}: {s.get('value')}"
+            for s in (j.get("stats") or [])[:4]
+        )
+        if st:
+            jugadores_lineas.append(f"{j.get('name', '?')} - {st}")
+
     mensaje = (
         f"Pick realizado: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
         f"Partido: {pick.get('eventName')} (deporte {pick.get('sportLabel', '')}).\n"
         f"Resultado final: {marcador}.\n"
-        f"NO adivines: si con el marcador no puedes determinarlo con certeza "
-        f"(props de jugador, tarjetas, corners, ponches...), responde INDETERMINADO.\n\n"
-        f"Con ese resultado final, Â¿el pick fue ACIERTO o FALLO?\n"
+    )
+    if stats_lineas:
+        mensaje += "Estadisticas del partido:\n" + "\n".join(stats_lineas) + "\n"
+    if jugadores_lineas:
+        mensaje += "Jugadores destacados:\n" + "\n".join(jugadores_lineas) + "\n"
+    mensaje += (
+        f"NO adivines: si con el resultado final y estas estadisticas no puedes "
+        f"determinarlo con certeza, responde INDETERMINADO. Props de jugador SOLO "
+        f"se resuelven si el jugador aparece en la lista de destacados.\n\n"
+        f"Con ese resultado y esas estadisticas, ¿el pick fue ACIERTO o FALLO?\n"
         f"Responde SOLO una palabra: ACIERTO o FALLO. Si el mercado no se puede "
-        f"determinar con ese marcador, responde INDETERMINADO."
+        f"determinar con certeza, responde INDETERMINADO."
     )
 
     votos = []

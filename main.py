@@ -30,7 +30,9 @@ except ImportError:
 # Este backend solo soporta You.com.
 # No inicializa OpenAI ni Groq en el arranque.
 
-YOU_API_KEY = os.getenv("YOU_API_KEY") or os.getenv("YOU_SEARCH_API_KEY") or ""
+import youkeys
+
+YOU_API_KEY = youkeys.get_you_key() or youkeys.get_you_search_key()
 YOU_BASE_URL = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
 
 app = FastAPI(

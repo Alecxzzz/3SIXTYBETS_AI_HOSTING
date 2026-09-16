@@ -3,6 +3,7 @@ import os
 import requests
 
 from engine.search_engine import SearchEngine, normalizar_research_effort
+import youkeys
 
 try:
     from dotenv import load_dotenv
@@ -15,7 +16,7 @@ if load_dotenv:
 MODEL_CONFIGS = {
     "you": {
         "name": "Demian tipster",
-        "api_key": os.getenv("YOU_API_KEY"),
+        "api_key": youkeys.get_you_key(),
         "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
         "model": os.getenv("YOU_MODEL", "research"),
     },
@@ -48,8 +49,8 @@ def modelos_disponibles():
 
 
 def env_diagnostics():
-    you_key = os.getenv("YOU_API_KEY", "")
-    you_search_key = os.getenv("YOU_SEARCH_API_KEY", "")
+    you_key = youkeys.get_you_key()
+    you_search_key = youkeys.get_you_search_key()
     return {
         "you_configured": bool(you_key),
         "you_key_prefix": you_key[:7] if you_key else "",
@@ -72,7 +73,7 @@ def trim_text(text: str, limit: int) -> str:
 
 
 def buscar_contexto_you(question):
-    api_key = os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
+    api_key = youkeys.get_you_search_key()
     if not api_key:
         return "No se pudo obtener contexto externo."
 
@@ -124,7 +125,7 @@ def generar_respuesta_you(prompt_sistema, prompt_usuario):
     except Exception:
         pass
 
-    api_key = os.getenv("YOU_API_KEY")
+    api_key = youkeys.get_you_key()
     if not api_key:
         return "ERROR: Falta la API key para You.com en el backend."
 

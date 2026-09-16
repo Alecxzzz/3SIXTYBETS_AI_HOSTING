@@ -2,6 +2,8 @@ import os
 
 import requests
 
+import youkeys
+
 try:
     from ddgs import DDGS
 except ImportError:  # pragma: no cover - depends on environment packages
@@ -41,7 +43,7 @@ def normalizar_research_effort(value):
 class SearchEngine:
     def __init__(self):
         self.ddgs = DDGS() if DDGS is not None else None
-        self.you_api_key = os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
+        self.you_api_key = youkeys.get_you_search_key()
         self.you_search_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
 
     def buscar_you(self, consulta, cantidad=4):
@@ -111,7 +113,7 @@ class SearchEngine:
 
     def ask_you(self, question, system_prompt="", research_effort="standard"):
         research_effort = normalizar_research_effort(research_effort)
-        api_key = os.getenv("YOU_API_KEY") or os.getenv("YOU_SEARCH_API_KEY")
+        api_key = youkeys.get_you_key()
         if not api_key:
             return "ERROR: Falta la API key para You.com en el backend."
 

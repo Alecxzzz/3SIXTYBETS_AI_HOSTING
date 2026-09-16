@@ -372,7 +372,7 @@ def get_team_schedule_results(sport: str, league: str | None, team_id, limit: in
         estado = ((comp0.get("status") or {}).get("type") or {}).get("state", "")
         if estado != "post":
             continue
-        norm = {"date": ev.get("date", "")}
+        norm = {"id": ev.get("id"), "date": ev.get("date", "")}
         for c in comp0.get("competitors", []):
             lado = c.get("homeAway")
             if lado not in ("home", "away"):
