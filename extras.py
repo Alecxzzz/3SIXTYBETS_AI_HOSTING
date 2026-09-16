@@ -93,10 +93,64 @@ def _ia_elegir(candidatos: list, cache_key: str):
         print(f"[Extras] pick del dia IA error: {exc}")
 
 
+def _frecuencia_empirica(p: dict):
+    """Frecuencia empirica (0-1) guardada en el primer stat ('promedio XX%').
+
+    Los picks del pipeline nuevo traen como primer stat:
+    'Ultimos 10: ocurrio en X -> promedio 78%'. Devuelve None si no existe.
+    """
+    datos = p.get("stats")
+    primer = ""
+    if isinstance(datos, list) and datos:
+        primer = str(datos[0])
+    elif isinstance(datos, str) and datos:
+        try:
+            arr = json.loads(datos)
+            primer = str(arr[0]) if isinstance(arr, list) and arr else datos
+        except (ValueError, TypeError):
+            primer = datos
+    m = re.search(r"promedio\s+(\d{1,3})\s*%", primer)
+    return int(m.group(1)) / 100.0 if m else None
+
+
+def _ev_estrella(p: dict) -> float:
+    """Valor esperado por unidad: frecuencia empirica x cuota.
+
+    Es el criterio del pick estrella: no basta que sea 'facil' (freq alta con
+    cuota 1.2 no gana dinero), ni que pague mucho (cuota 3 con freq 30%
+    tampoco). EV = p * cuota > 1 significa valor real.
+    """
+    f = _frecuencia_empirica(p)
+    try:
+        o = float(p.get("odds") or 0)
+    except (TypeError, ValueError):
+        o = 0.0
+    return (f * o) if f else 0.0
+
+
+def _notificar_pick_estrella(pick: dict) -> None:
+    """Log del pick estrella nuevo (base para push/notificaciones)."""
+    f = _frecuencia_empirica(pick)
+    linea = (
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')} | PICK ESTRELLA | "
+        f"{pick.get('eventName')}: {pick.get('titulo')} -> {pick.get('selection')} "
+        f"@{pick.get('odds')} (freq empirica {round(f * 100) if f else 'n/d'}%, "
+        f"EV {_ev_estrella(pick):.2f})\n"
+    )
+    print("[Extras] " + linea.strip(), flush=True)
+    try:
+        ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "push_log.txt")
+        with open(ruta, "a", encoding="utf-8") as fh:
+            fh.write(linea)
+    except Exception:
+        pass
+
+
 def pick_del_dia(force: bool = False) -> dict:
-    """El pick estrella del dia. Responde INSTANTANEO con el pick de mayor
-    confianza y lanza la eleccion de la IA en un hilo de fondo: el proximo
-    fetch (minuto siguiente) ya trae la justificacion de la IA.
+    """El pick estrella del dia. Responde INSTANTANEO con el pick de mejor
+    valor esperado empirico (frecuencia x cuota) y lanza la eleccion de la IA
+    en un hilo de fondo: el proximo fetch (minuto siguiente) ya trae la
+    justificacion de la IA.
     """
     ahora_hora = time.strftime("%Y%m%d%H")
     candidatos = _picks_candidatos_hoy()
@@ -105,20 +159,23 @@ def pick_del_dia(force: bool = False) -> dict:
         _pick_del_dia_cache.update(key=ahora_hora, data=data)
         return data
 
-    # Orden estable por confianza (fallback determinista)
-    candidatos.sort(key=lambda p: (-_conf_num(p), -(p.get("odds") or 0)))
+    # Orden por EV empirico (freq x cuota); confianza y cuota de desempate.
+    candidatos.sort(key=lambda p: (-_ev_estrella(p), -_conf_num(p), -(p.get("odds") or 0)))
     cache_key = f"{ahora_hora}:{candidatos[0]['id']}"
     if not force and _pick_del_dia_cache["key"] == cache_key:
         return _pick_del_dia_cache["data"]
 
-    # Respuesta inmediata: pick de mayor confianza con su rationale real
+    # Respuesta inmediata: pick de mejor EV con su rationale real
     elegido = candidatos[0]
     data = {
         "pick": elegido,
         "justificacion": (elegido.get("rationale") or "").strip(),
-        "elegido_por": "confianza",
+        "elegido_por": "empiria",
+        "frecuenciaEmpirica": _frecuencia_empirica(elegido),
+        "ev": round(_ev_estrella(elegido), 3),
     }
     _pick_del_dia_cache.update(key=cache_key, data=data)
+    _notificar_pick_estrella(elegido)
 
     # La IA elige en segundo plano (no bloquea la respuesta)
     threading.Thread(target=_ia_elegir, args=(candidatos[:12], cache_key), daemon=True).start()

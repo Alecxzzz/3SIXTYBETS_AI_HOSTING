@@ -249,7 +249,7 @@ def init_db():
         run_query(statement)
 
     # Migracion ligera: columnas para instalaciones previas.
-    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league"):
+    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league", "closing_odds"):
         exists = run_query(
             """
             select count(*) as cnt from information_schema.columns
@@ -1043,6 +1043,7 @@ def public_ai_pick(row):
         "model": row.get("model"),
         "pickDate": row["pick_date"].isoformat() if row.get("pick_date") else None,
         "result": row.get("result") or "PENDIENTE",
+        "closingOdds": row.get("closing_odds"),
         "createdAt": row["created_at"].isoformat() if row.get("created_at") else None,
         "fechaLabel": _fecha_label_nic(row.get("created_at")),
     }
@@ -1131,6 +1132,18 @@ def update_pick_result(pick_id, result):
     return bool(run_query(
         "update ai_picks set result = %s, updated_at = %s where id = %s",
         (result, now_utc(), pick_id),
+    ))
+
+
+def set_closing_odds(pick_id, snapshot):
+    """Guarda la cuota de cierre (snapshot al arrancar el evento) UNA sola vez.
+
+    snapshot: str JSON con la linea del partido al inicio (para medir CLV).
+    """
+    return bool(run_query(
+        "update ai_picks set closing_odds = %s "
+        "where id = %s and (closing_odds is null or closing_odds = '')",
+        (snapshot, pick_id),
     ))
 
 

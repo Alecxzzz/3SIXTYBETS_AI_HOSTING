@@ -1,1 +1,3 @@
 python: can't open file 'C:\\Users\\AlecS\\OneDrive\\Desktop\\3sixtybets_ai_hosting\\push_events.py': [Errno 2] No such file or directory
+2026-09-15 22:36:35 | PICK ESTRELLA | Pb: Over -> Over @2.2 (freq empirica 60%, EV 1.32)
+2026-09-15 22:36:35 | PICK ESTRELLA | Pz: Over -> Over @1.9 (freq empirica n/d%, EV 0.00)

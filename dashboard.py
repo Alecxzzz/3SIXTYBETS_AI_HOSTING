@@ -2239,6 +2239,7 @@ def resolver_picks_finalizados() -> dict:
 
     pendientes = db.list_picks_pendientes() or []
     resueltos = 0
+    odds_hoy = None  # snapshot de cuotas de los partidos de hoy (lazy)
     for pick in pendientes:
         # Expirar picks antiguos que ya no se pueden resolver (sin liga,
         # evento fuera de ESPN, etc.) para no bloquear la cola de pendientes
@@ -2261,6 +2262,27 @@ def resolver_picks_finalizados() -> dict:
         if horas_evento > 3:
             db.update_pick_result(pick["id"], "ANULADO")
             continue
+
+        # Cuota de CIERRE (para medir CLV): snapshot de la linea del partido
+        # al arrancar (o ya en juego), guardado UNA sola vez por pick.
+        if not (pick.get("closingOdds") or pick.get("closing_odds")):
+            try:
+                if horas_evento >= -1:
+                    if odds_hoy is None:
+                        odds_hoy = {
+                            str(p.get("event_id")): p.get("odds")
+                            for p in (_partidos_hoy() or [])
+                        }
+                    crudo = odds_hoy.get(str(pick.get("eventId"))) or {}
+                    snap = {
+                        k: crudo.get(k)
+                        for k in ("details", "overUnder", "home_odds", "away_odds", "provider")
+                        if crudo.get(k) is not None
+                    }
+                    if snap:
+                        db.set_closing_odds(pick["id"], json.dumps(snap, ensure_ascii=False))
+            except Exception:
+                pass
 
         try:
             detail = _detalle_resolucion(pick)
@@ -2492,6 +2514,35 @@ def _ciclo():
                 print(f"[Dashboard] Picks resueltos: {res}", flush=True)
         except Exception:
             print("[Dashboard] Error resolviendo picks:\n" + traceback.format_exc(), flush=True)
+        try:
+            # ALERTA de picks estancados: partido terminado/en vivo con el
+            # pick sin resolver (fallo silencioso del resolutor = datos
+            # corruptos en el track record).
+            auditoria = revisar_picks_hoy()
+            sospechosos = auditoria.get("sospechosos") or []
+            en_vivo = auditoria.get("en_vivo") or []
+            if sospechosos:
+                detalle = "; ".join(
+                    f"{s.get('eventName')}: {s.get('nota') or s.get('estado') or 'sospechoso'}"
+                    for s in sospechosos[:5]
+                )
+                print(
+                    f"[Dashboard] ALERTA: {len(sospechosos)} picks sospechosos -> {detalle}",
+                    flush=True,
+                )
+                try:
+                    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "push_log.txt")
+                    with open(ruta, "a", encoding="utf-8") as fh:
+                        fh.write(
+                            f"{time.strftime('%Y-%m-%d %H:%M:%S')} | ALERTA | "
+                            f"{len(sospechosos)} picks sospechosos: {detalle}\n"
+                        )
+                except Exception:
+                    pass
+            if en_vivo:
+                print(f"[Dashboard] Picks en vivo: {len(en_vivo)}", flush=True)
+        except Exception:
+            print("[Dashboard] Error auditando picks:\n" + traceback.format_exc(), flush=True)
 
 
 def _loop():
