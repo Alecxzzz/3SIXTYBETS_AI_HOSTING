@@ -549,7 +549,8 @@ def html_track() -> str:
     script = """
 function fila(d) {
   const cls = d.efectividad >= 65 ? 'hi' : (d.efectividad >= 50 ? 'mid' : 'lo');
-  return `<div class="row"><span class="k">${esc(d.nombre)}${d.confiable ? '' : ' <span class="sub" style="display:inline">(pocos datos)</span>'}</span><span class="v"><span class="pill ${cls}">${d.efectividad}%</span> ${d.aciertos}/${d.resueltos}</span></div>`;
+  const roi = d.roi == null ? '' : `<span class="sub" style="display:inline">ROI ${d.roi > 0 ? '+' : ''}${d.roi}%</span> `;
+  return `<div class="row"><span class="k">${esc(d.nombre)}${d.confiable ? '' : ' <span class="sub" style="display:inline">(pocos datos)</span>'}</span><span class="v"><span class="pill ${cls}">${d.efectividad}%</span> ${roi}${d.aciertos}/${d.resueltos}</span></div>`;
 }
 async function init() {
   const r = await api('/dashboard/track-record');
@@ -558,12 +559,14 @@ async function init() {
   if (!r.ok || !d.mercados) { box.innerHTML = '<div class="card"><p class="sub">Sin datos todavia.</p></div>'; return; }
   const secciones = [
     ['Por familia de mercado', d.mercados],
+    ['Por rango de cuota (ROI revela si el % de aciertos es rentable)', d.cuotas],
     ['Por deporte', d.deportes],
     ['Por liga', (d.ligas||[]).slice(0,12)],
   ];
   box.innerHTML = `
     <div class="card">
       <div class="row"><span class="k">EFECTIVIDAD HISTORICA TOTAL</span><span class="v" style="font-size:1.2rem;color:#4ade80">${d.total.efectividad}%</span></div>
+      <div class="row"><span class="k">ROI historico (1 unidad por pick)</span><span class="v" style="color:${d.total.roi != null && d.total.roi >= 0 ? '#4ade80' : '#f87171'}">${d.total.roi == null ? 'N/D (sin cuotas)' : (d.total.roi > 0 ? '+' : '') + d.total.roi + '%'}</span></div>
       <div class="row"><span class="k">Picks resueltos</span><span class="v">${d.total.aciertos}/${d.total.resueltos}</span></div>
     </div>` +
     secciones.map(([t, items]) => items && items.length ? `

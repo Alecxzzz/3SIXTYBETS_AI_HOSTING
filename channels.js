@@ -52,7 +52,7 @@ export const channels = [
   { id: 28, name: "SKY SPORTS PREMIER LEAGUE", status: "ACTIVO", ads: false, stream: "http://stream.bottledesk.net/p/AAxBRQEBc2c/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 29, name: "SKY SPORTS TENNIS", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sky%20Sports%20Tennis/gb`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 30, name: "SPORTSNET BLUE JAYS", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20Ontario/ca`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
-  { id: 31, name: "SPORTSNET DODGERS", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20West/ca`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
+  { id: 31, name: "SPORTSNET DODGERS (SNLA)", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20LA/us`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 54, name: "SPORTSNET 360", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20360/ca`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 55, name: "SPORTSNET EAST", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20East/ca`, type: "m3u8", geoRestriction: "NONE", useProxy: false },
   { id: 56, name: "SPORTSNET ONE", status: "ACTIVO", ads: false, stream: `${CDN_API_BASE}/tv/cdnlivetv/Sportsnet%20One/ca`, type: "m3u8", geoRestriction: "NONE", useProxy: false },

@@ -36,6 +36,7 @@ CHANNELS = [
     ("Sportsnet East", "ca"),
     ("Sportsnet World", "ca"),
     ("Sportsnet West", "ca"),
+    ("Sportsnet LA", "us"),
     ("MLB Network", "us"),
 ]
 

@@ -36,6 +36,18 @@ CUOTA_OTRAS = 0.30   # resto de ligas/deportes: maximo ~30% del total (min 2)
 # de sus ultimos 10 para publicar la recomendacion.
 FRECUENCIA_MINIMA = 0.60
 
+# --- Calidad por historico (track record) ---
+# Una familia de mercado con >=RESUELTOS muestras y efectividad >= este % puede
+# repetirse mercado dentro de la jornada (la diversidad estricta cuesta aciertos).
+REUTILIZAR_EFECTIVIDAD = 60
+REUTILIZAR_RESUELTOS = 8
+# Familia con suficientes muestras y efectividad por debajo de esto: vetada.
+VETO_EFECTIVIDAD = 45
+VETO_RESUELTOS = 10
+# Best-of-N: si un candidato alcanza esta frecuencia empirica, no se piden mas.
+BEST_OF_N = 3
+PARADA_TEMPRANA_PROM = 0.75
+
 TZ_NICARAGUA = db.TZ_NICARAGUA
 
 
@@ -621,7 +633,11 @@ REGLAS OBLIGATORIAS:
 2. Los textos del catalogo son INSTRUCCIONES/REGLAS del mercado (minimos de
    linea, cuota minima, limites de handicap, etc.), NO texto literal para el
    usuario. Interpretalos: eligen la linea concreta que cumpla esas reglas.
-3. NUNCA repitas el mismo mercado en los diferentes o mismos partidos.
+3. Dentro del MISMO partido nunca repitas un mercado. Entre partidos del dia,
+   evita repetir mercado SALVO que el historial de rendimiento de abajo
+   demuestre que esa familia es de las mas efectivas (60%+ de aciertos):
+   en ese caso repetirla esta PERMITIDO y es preferible a forzar un mercado
+   raro. NUNCA elijas una familia marcada como vetada.
 4. SIEMPRE ve variando las opciones: no te centres solo en 1X2 o goles.
 5. Busca SIEMPRE la apuesta mas FACIL de acertar CON VALOR (cuota justa vs probabilidad real).
 6. Respeta los minimos indicados (cuotas minimas, handicap minimo, under mas bajo en NBA/tenis).
@@ -753,6 +769,41 @@ def _parsear_pick_json(texto: str):
 
 def _market_norm(market: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (market or "").lower())
+
+
+def _texto_rendimiento(hist_mercados: dict) -> str:
+    """Bloque de rendimiento historico real de la IA para el prompt (Paso 2).
+
+    Prioriza familias con buen %, avisa cuales estan vetadas por mal historial.
+    """
+    if not hist_mercados:
+        return ""
+    buenas = [
+        (n, m) for n, m in hist_mercados.items()
+        if m["efectividad"] >= REUTILIZAR_EFECTIVIDAD and m["resueltos"] >= REUTILIZAR_RESUELTOS
+    ]
+    malas = [
+        (n, m) for n, m in hist_mercados.items()
+        if m["efectividad"] < VETO_EFECTIVIDAD and m["resueltos"] >= VETO_RESUELTOS
+    ]
+    if not buenas and not malas:
+        return ""
+    lineas = ["\nRENDIMIENTO HISTORICO REAL de la IA (aciertos/resueltos por familia):"]
+    if buenas:
+        lineas += [
+            f"- {n}: {m['efectividad']}% ({m['aciertos']}/{m['resueltos']}) <- familia confiable, puedes REPETIR este mercado entre partidos"
+            for n, m in sorted(buenas, key=lambda x: -x[1]["efectividad"])[:8]
+        ]
+    if malas:
+        lineas += [
+            f"- {n}: {m['efectividad']}% ({m['aciertos']}/{m['resueltos']}) <- VETADA por mal historial: PROHIBIDO elegirla"
+            for n, m in malas[:8]
+        ]
+    return "\n".join(lineas) + "\n"
+
+
+def _familia_historica(fam_sin_sub: str, sub: str, hist_mercados: dict):
+    return hist_mercados.get(fam_sin_sub + sub)
 
 
 def _normalizar_ev(ev_raw: dict) -> dict | None:
@@ -1120,7 +1171,10 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
     """Genera picks automaticos para los partidos de hoy.
 
     Idempotente: salta partidos que ya tienen pick guardado hoy.
-    Nunca repite el mismo mercado (normalizado) en toda la jornada.
+    Anti-repeticion relajada: no se repite un mercado entre partidos SALVO que
+    su familia historica sea confiable (60%+ con muestras suficientes).
+    Best-of-N: por partido se generan hasta 3 candidatos y se publica el de
+    mejor validacion empirica (la diversidad estricta costaba aciertos).
     """
     partidos = _partidos_hoy()
     # 70/30: ligas grandes primero; las otras ligas/deportes solo hasta ~30%
@@ -1131,11 +1185,22 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
     rechazados_cuota = 0
     rechazados_calidad = 0
     rechazados_empiria = 0
+    rechazados_historia = 0
     omitidos_liga = 0
     generados_grandes = 0
     generados_otros = 0
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
+
+    # Rendimiento historico por familia de mercado (track record real de la BD)
+    hist = db.track_record(min_resueltos=REUTILIZAR_RESUELTOS) or {}
+    hist_mercados = {
+        m["nombre"]: m for m in (hist.get("mercados") or []) if m.get("resueltos")
+    }
+    familias_reutilizables = {
+        n for n, m in hist_mercados.items()
+        if m["efectividad"] >= REUTILIZAR_EFECTIVIDAD and m["resueltos"] >= REUTILIZAR_RESUELTOS
+    }
 
     for p in partidos[:max_partidos]:
         if db.pick_existe(p["event_id"]):
@@ -1153,8 +1218,13 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
                 continue
 
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
-        if not [m for m in mercados if _market_norm(m) not in mercados_usados]:
-            break  # ya se usaron todos los mercados del catalogo hoy
+        # Si ya se usaron todos los mercados Y no hay familias confiables
+        # reutilizables, no tiene sentido seguir (se acabaria la variedad)
+        if (
+            not [m for m in mercados if _market_norm(m) not in mercados_usados]
+            and not familias_reutilizables
+        ):
+            break
 
         mensaje = (
             f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
@@ -1198,106 +1268,153 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
                 "2.5 goles a favor', 'H2H: gano los ultimos 2 enfrentamientos'.\n"
             )
 
-        mensaje += (
-            f"\nElige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
-            f"usados hoy: {', '.join(list(mercados_usados)[:15]) or 'ninguno'}). "
-            f"Recuerda: el campo 'market' es para validar contra el catalogo; el campo "
-            f"'titulo' es la apuesta en lenguaje natural (ej: 'Corners de "
-            f"{p['home_name']}: Over 3.5'). Devuelve el JSON del pick."
-            f"\nIMPORTANTE: usa los nombres REALES de los equipos/jugadores "
-            f"({p['home_name']} y {p['away_name']}); PROHIBIDO picks genericos tipo "
-            f"'Jugador A', 'Local' o 'equipo B'. Si de verdad no tienes datos del "
-            f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
-            f"\nFECHA ACTUAL: {datetime.now(timezone.utc).strftime('%d/%m/%Y')}. "
-            f"El analisis y los datos deben ser de la temporada EN CURSO (incluye "
-            f"el mes y el ano actual en tus busquedas y analisis, ej: 'equipo vs "
-            f"equipo septiembre 2026'); descarta estadisticas de temporadas pasadas."
-            f"\nIncluye el campo \"porque\": UNA linea corta (maximo 70 caracteres) "
-            f"con la CONCLUSION que justifica el pick: la implicacion de la "
-            f"tendencia para esta apuesta, con cifras reales. PROHIBIDO copiar "
-            f"literal una linea de los datos/stats: debe ser la sintesis de la "
-            f"tendencia (ej: 'Over 1.5 en 5 de los ultimos 6 H2H' o 'Vino over "
-            f"2.5 en 4 de 5 de local'), no un dato suelto repetido."
-        )
+        # Rendimiento historico real como guia del prompt (Paso 2)
+        mensaje_base = mensaje
+        rend = _texto_rendimiento(hist_mercados)
+        if rend:
+            mensaje_base += rend
 
-        texto, modelo = _preguntar_ia(mensaje)
-        pick = _parsear_pick_json(texto)
-
-        if not pick:
-            errores += 1
-            continue
-
-        market = (pick.get("market") or "").strip()
-        # Validar que el mercado pertenece al catalogo del deporte y no repite
-        if _market_norm(market) not in {_market_norm(m) for m in mercados}:
-            errores += 1
-            continue
-        if _market_norm(market) in mercados_usados:
-            errores += 1
-            continue
-
-        # Rechazar picks con cuota demasiado baja (debe estar arriba de 1.20)
-        try:
-            odds_pick = float(pick.get("odds") or 0)
-        except (TypeError, ValueError):
-            odds_pick = 0
-        if not odds_pick or odds_pick <= ODDS_MINIMA:
-            rechazados_cuota += 1
-            continue
-
-        # Gate de calidad: nada de picks genericos o sin datos reales
-        # (equipos '?', 'Jugador A', rationale 'sin datos...', sin cuota).
-        rationale_txt = str(pick.get("rationale") or "") + " " + str(pick.get("titulo") or "")
-        if (
-            not _nombre_valido(p["home_name"])
-            or not _nombre_valido(p["away_name"])
-            or _texto_sin_datos(rationale_txt)
-            or _texto_sin_datos(p["event_name"])
-        ):
-            rechazados_calidad += 1
-            continue
-
-        # Coherencia titulo vs seleccion (bug real: 'no pierde (1X)' con 2X)
-        if _titulo_contradice(pick, p):
-            rechazados_calidad += 1
-            continue
-
-        # La IA a veces admite en su propio texto que el pick es invalido
-        # (ej: 'Alternativa invalida: Ohtani no juega este partido') y aun asi
-        # lo emite: se rechaza directamente.
-        if _pick_se_declara_invalido(pick):
-            rechazados_calidad += 1
-            continue
-
-        # Props de jugador: el jugador nombrado debe pertenecer a uno de los
-        # dos equipos del partido (bug real: Ohtani en White Sox vs Guardians).
-        if not _jugador_valido_en_partido(pick, p):
-            rechazados_calidad += 1
-            continue
-
-        # Mercados NO verificables con marcador (corners, tarjetas, props de
-        # jugador...): no se generan (el resolver no puede validarlos).
-        texto_pick = _norm_texto(f"{pick.get('titulo') or ''} {pick.get('market') or ''}")
-        if any(palabra in texto_pick for palabra in _MERCADOS_NO_VERIFICABLES):
-            rechazados_calidad += 1
-            continue
-
-        # Validacion empirica: el outcome del pick debe haber ocurrido con
-        # frecuencia en los ultimos 10 partidos de AMBOS equipos. Si el
-        # promedio queda bajo FRECUENCIA_MINIMA, el pick no se publica.
-        try:
-            validacion = _validacion_empirica(
-                p["sport"], p["event_id"], p["home_name"], p["away_name"],
-                p.get("league"), pick,
+        # Best-of-N (Paso 4): hasta 3 candidatos por partido; gana el de mejor
+        # validacion empirica. Cada intento excluye los mercados ya propuestos.
+        exclusion = set(mercados_usados)
+        mejor = None  # (prom|None, detalle|None, pick, market, modelo)
+        for intento in range(BEST_OF_N):
+            mensaje = mensaje_base + (
+                f"\nElige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
+                f"usados hoy: {', '.join(sorted(exclusion)[:15]) or 'ninguno'}). "
+                f"Recuerda: el campo 'market' es para validar contra el catalogo; el campo "
+                f"'titulo' es la apuesta en lenguaje natural (ej: 'Corners de "
+                f"{p['home_name']}: Over 3.5'). Devuelve el JSON del pick."
+                f"\nIMPORTANTE: usa los nombres REALES de los equipos/jugadores "
+                f"({p['home_name']} y {p['away_name']}); PROHIBIDO picks genericos tipo "
+                f"'Jugador A', 'Local' o 'equipo B'. Si de verdad no tienes datos del "
+                f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
+                f"\nFECHA ACTUAL: {datetime.now(timezone.utc).strftime('%d/%m/%Y')}. "
+                f"El analisis y los datos deben ser de la temporada EN CURSO (incluye "
+                f"el mes y el ano actual en tus busquedas y analisis, ej: 'equipo vs "
+                f"equipo septiembre 2026'); descarta estadisticas de temporadas pasadas."
+                f"\nIncluye el campo \"porque\": UNA linea corta (maximo 70 caracteres) "
+                f"con la CONCLUSION que justifica el pick: la implicacion de la "
+                f"tendencia para esta apuesta, con cifras reales. PROHIBIDO copiar "
+                f"literal una linea de los datos/stats: debe ser la sintesis de la "
+                f"tendencia (ej: 'Over 1.5 en 5 de los ultimos 6 H2H' o 'Vino over "
+                f"2.5 en 4 de 5 de local'), no un dato suelto repetido."
             )
-        except Exception:
-            validacion = None
-        if validacion is not None:
-            prom, detalle = validacion
-            if prom < FRECUENCIA_MINIMA:
-                rechazados_empiria += 1
+
+            texto, modelo = _preguntar_ia(mensaje)
+            pick = _parsear_pick_json(texto)
+            if not pick:
+                errores += 1
                 continue
-            # Evidencia empirica como primer stat del pick
+
+            market = (pick.get("market") or "").strip()
+            norma = _market_norm(market)
+            titulo_pick = str(pick.get("titulo") or "")
+            # Validar que el mercado pertenece al catalogo del deporte
+            if norma not in {_market_norm(m) for m in mercados}:
+                errores += 1
+                continue
+
+            # Historico de la familia de este candidato (Paso 2/3)
+            fam_base = db._categoria_mercado(market, titulo_pick)
+            fam_clave = fam_base + db._subcategoria_deporte(p["sport"], fam_base)
+            hist_fam = hist_mercados.get(fam_clave)
+            if (
+                hist_fam
+                and hist_fam["resueltos"] >= VETO_RESUELTOS
+                and hist_fam["efectividad"] < VETO_EFECTIVIDAD
+            ):
+                rechazados_historia += 1
+                continue
+
+            # Anti-repeticion RELAJADA (Paso 3): repetir mercado entre partidos
+            # solo se permite si la familia historica es confiable (60%+).
+            if norma in exclusion and not (
+                hist_fam
+                and hist_fam["resueltos"] >= REUTILIZAR_RESUELTOS
+                and hist_fam["efectividad"] >= REUTILIZAR_EFECTIVIDAD
+            ):
+                errores += 1
+                continue
+
+            # Rechazar picks con cuota demasiado baja (debe estar arriba de 1.20)
+            try:
+                odds_pick = float(pick.get("odds") or 0)
+            except (TypeError, ValueError):
+                odds_pick = 0
+            if not odds_pick or odds_pick <= ODDS_MINIMA:
+                rechazados_cuota += 1
+                continue
+
+            # Gate de calidad: nada de picks genericos o sin datos reales
+            # (equipos '?', 'Jugador A', rationale 'sin datos...', sin cuota).
+            rationale_txt = str(pick.get("rationale") or "") + " " + titulo_pick
+            if (
+                not _nombre_valido(p["home_name"])
+                or not _nombre_valido(p["away_name"])
+                or _texto_sin_datos(rationale_txt)
+                or _texto_sin_datos(p["event_name"])
+            ):
+                rechazados_calidad += 1
+                continue
+
+            # Coherencia titulo vs seleccion (bug real: 'no pierde (1X)' con 2X)
+            if _titulo_contradice(pick, p):
+                rechazados_calidad += 1
+                continue
+
+            # La IA a veces admite en su propio texto que el pick es invalido
+            # (ej: 'Alternativa invalida: Ohtani no juega este partido') y aun asi
+            # lo emite: se rechaza directamente.
+            if _pick_se_declara_invalido(pick):
+                rechazados_calidad += 1
+                continue
+
+            # Props de jugador: el jugador nombrado debe pertenecer a uno de los
+            # dos equipos del partido (bug real: Ohtani en White Sox vs Guardians).
+            if not _jugador_valido_en_partido(pick, p):
+                rechazados_calidad += 1
+                continue
+
+            # Mercados NO verificables con marcador (corners, tarjetas, props de
+            # jugador...): no se generan (el resolver no puede validarlos).
+            texto_pick = _norm_texto(f"{titulo_pick} {market}")
+            if any(palabra in texto_pick for palabra in _MERCADOS_NO_VERIFICABLES):
+                rechazados_calidad += 1
+                continue
+
+            exclusion.add(norma)
+
+            # Validacion empirica del candidato: juez del best-of-N
+            try:
+                validacion = _validacion_empirica(
+                    p["sport"], p["event_id"], p["home_name"], p["away_name"],
+                    p.get("league"), pick,
+                )
+            except Exception:
+                validacion = None
+            if validacion is None:
+                # No validable con marcadores: se acepta el primero que llegue
+                if mejor is None:
+                    mejor = (None, None, pick, market, modelo)
+                break
+            prom, detalle = validacion
+            if mejor is None or prom > mejor[0]:
+                mejor = (prom, detalle, pick, market, modelo)
+            if prom >= PARADA_TEMPRANA_PROM:
+                break  # candidato excelente: no gastar mas llamadas
+
+        if mejor is None:
+            continue
+        prom, detalle, pick, market, modelo = mejor
+
+        # Ningun candidato alcanzo la frecuencia minima: no se publica nada
+        if prom is not None and prom < FRECUENCIA_MINIMA:
+            rechazados_empiria += 1
+            continue
+
+        # Evidencia empirica como primer stat del pick
+        if prom is not None:
             pick["stats"] = [
                 f"Ultimos 10: ocurrio en {detalle} -> promedio {prom * 100:.0f}%"
             ] + [
@@ -1351,6 +1468,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
         "rechazados_cuota": rechazados_cuota,
         "rechazados_calidad": rechazados_calidad,
         "rechazados_empiria": rechazados_empiria,
+        "rechazados_historia": rechazados_historia,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

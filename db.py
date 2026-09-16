@@ -1213,38 +1213,65 @@ def track_record(min_resueltos: int = 3):
     un minimo de muestras para que los % sean honestos.
     """
     rows = run_query(
-        "select market, titulo, sport, sport_label, league, result "
+        "select market, titulo, sport, sport_label, league, result, odds "
         "from ai_picks where result in ('ACIERTO', 'FALLO')"
     )
     if not rows:
-        return {"total": {"resueltos": 0, "aciertos": 0, "efectividad": 0}, "mercados": [], "deportes": [], "ligas": []}
+        return {
+            "total": {"resueltos": 0, "aciertos": 0, "efectividad": 0, "roi": None},
+            "mercados": [], "deportes": [], "ligas": [], "cuotas": [],
+        }
 
     def _nueva():
-        return {"resueltos": 0, "aciertos": 0}
+        return {"resueltos": 0, "aciertos": 0, "profit": 0.0, "con_odds": 0}
 
-    mercados, deportes, ligas = {}, {}, {}
+    def _bucket_cuota(odds: float) -> str:
+        if not odds or odds <= 0:
+            return "Sin cuota"
+        if odds <= 1.40:
+            return "Cuota 1.01-1.40"
+        if odds <= 1.70:
+            return "Cuota 1.41-1.70"
+        if odds <= 2.00:
+            return "Cuota 1.71-2.00"
+        return "Cuota 2.01+"
+
+    mercados, deportes, ligas, cuotas = {}, {}, {}, {}
     for r in rows:
         familia = _categoria_mercado(r.get("market"), r.get("titulo")) + _subcategoria_deporte(r.get("sport"), _categoria_mercado(r.get("market"), r.get("titulo")))
         acierto = 1 if r.get("result") == "ACIERTO" else 0
+        try:
+            odds = float(r.get("odds") or 0)
+        except (TypeError, ValueError):
+            odds = 0
+        # P&L en unidades de 1 stake: gana (odds-1), pierde -1
+        profit = (odds - 1) if (acierto and odds > 0) else (-1 if not acierto else 0)
+        tiene_odds = odds > 0
         for grupo, clave in (
             (mercados, familia),
             (deportes, r.get("sport_label") or r.get("sport") or "?"),
             (ligas, r.get("league") or "Otra"),
+            (cuotas, _bucket_cuota(odds)),
         ):
             d = grupo.setdefault(clave, _nueva())
             d["resueltos"] += 1
             d["aciertos"] += acierto
+            d["profit"] += profit
+            if tiene_odds:
+                d["con_odds"] += 1
 
     def _formar(grupo: dict) -> list:
         salida = []
         for nombre, d in grupo.items():
             if d["resueltos"] < 1:
                 continue
+            base = d["con_odds"] or d["resueltos"]
             salida.append({
                 "nombre": nombre,
                 "resueltos": d["resueltos"],
                 "aciertos": d["aciertos"],
                 "efectividad": round(100 * d["aciertos"] / d["resueltos"]),
+                "roi": round(100 * d["profit"] / base) if base else None,
                 "confiable": d["resueltos"] >= min_resueltos,
             })
         salida.sort(key=lambda x: (-x["efectividad"], -x["resueltos"]))
@@ -1252,11 +1279,15 @@ def track_record(min_resueltos: int = 3):
 
     total = {"resueltos": len(rows), "aciertos": sum(1 for r in rows if r.get("result") == "ACIERTO")}
     total["efectividad"] = round(100 * total["aciertos"] / total["resueltos"]) if total["resueltos"] else 0
+    profit_total = sum(g["profit"] for g in mercados.values())
+    con_odds_total = sum(g["con_odds"] for g in mercados.values())
+    total["roi"] = round(100 * profit_total / con_odds_total) if con_odds_total else None
     return {
         "total": total,
         "mercados": _formar(mercados),
         "deportes": _formar(deportes),
         "ligas": _formar(ligas),
+        "cuotas": _formar(cuotas),
     }
 
 
