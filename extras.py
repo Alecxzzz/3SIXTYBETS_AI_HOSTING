@@ -346,7 +346,7 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
     prompt = (
         "Eres el asistente EXCLUSIVO de soporte de 3SIXTYBETS (plataforma de "
         "pronosticos deportivos con IA, canales de TV en vivo y suscripciones "
-        "pagadas con Pagadito). Escribe MUY amable, con emojis discretos, en "
+        "pagadas con tarjeta). Escribe MUY amable, con emojis discretos, en "
         "espanol, maximo 4 frases, sin listas.\n\n"
         "FORMATO DE RESPUESTA (obligatorio): texto conversacional plano. "
         "NUNCA respondas con JSON, diccionarios, codigo ni razonamiento; "

@@ -43,9 +43,12 @@ API_KEY = (
     or ""
 )
 BASE_URL = os.getenv("SUPPORT_AI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions")
-MODELO = os.getenv("SUPPORT_AI_MODEL", "qwen/qwen3.6-27b")
+MODELO = os.getenv("SUPPORT_AI_MODEL", "qwen/qwen3.8-27b")
 # Respaldo propio de soporte (familia qwen, NUNCA los gpt-oss de las IAs
 # principales: el soporte no compite por los mismos buckets de tasa).
+# NOTA: qwen/qwen3.6-27b fue eliminado por Groq (404 en cada llamada y el
+# chat de soporte caia al aviso de WhatsApp). qwen3.8-27b es el unico
+# modelo de chat disponible en la cuenta (verificado via /models).
 MODELO_RESPALDO = os.getenv("SUPPORT_AI_MODEL_FALLBACK", "qwen/qwen3.8-27b")
 # 512 alcanza de sobra: SIN razonamiento, la respuesta de soporte es corta.
 MAX_TOKENS = int(os.getenv("SUPPORT_AI_MAX_TOKENS", "512"))
@@ -150,10 +153,9 @@ def responder(prompt: str):
       Bug real: con razonamiento activo, qwen3 gastaba todos los tokens en
       pensar y devolvia content VACIO -> el chat caia al aviso de WhatsApp.
       Sin razonamiento responde ~3x mas rapido y siempre con contenido.
-    - Cadena de modelos PROPIOS de soporte (qwen3.6 -> qwen3.8); si un
-      modelo no esta disponible (400/404), pasa al siguiente. Sin
-      herramientas, sin agente y SIN fallback hacia los modelos de las
-      IAs principales (a proposito).
+    - Cadena de modelos PROPIOS de soporte; si un modelo no esta disponible
+      (400/404), pasa al siguiente. Sin herramientas, sin agente y SIN
+      fallback hacia los modelos de las IAs principales (a proposito).
     Devuelve texto limpio o None.
     """
     if not API_KEY:
@@ -173,7 +175,7 @@ def responder(prompt: str):
             "reasoning_effort": "none",
         }
 
-    modelos = [MODELO] + ([MODELO_RESPALDO] if MODELO_RESPALDO != MODELO else [])
+    modelos = [MODELO] + ([MODELO_RESPALDO] if MODELO_RESPALDO and MODELO_RESPALDO != MODELO else [])
     for _intento in range(MAX_REINTENTOS):
         for idx, modelo in enumerate(modelos):
             payload = _payload(modelo)
