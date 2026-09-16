@@ -611,6 +611,14 @@ def _clasificar_rapida(mensaje: str):
         return "CONVERSACION"
     t = texto.lower()
 
+    # Ruido sin palabras reales ("..", "???", "123", ".,!"): NUNCA es un
+    # partido. Sin esto, el clasificador Groq clasifica basura al azar y el
+    # fallback SPORTS_MATCH analiza "los partidos de hoy" sin que el usuario
+    # pidiera nada (bug real: el usuario mando '..' y recibio el analisis
+    # del Barcelona vs Racing).
+    if not re.search(r"[a-záéíóúüñ]{2,}", t):
+        return "CONVERSACION"
+
     # Match claro: vs / versus / v. / contra
     if re.search(r'\b(vs|versus|v\.|contra)\b', t):
         return "SPORTS_MATCH"

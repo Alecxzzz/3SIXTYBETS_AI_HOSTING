@@ -334,11 +334,16 @@ def chat(data: Chat, user=Depends(get_current_user_optional)):
 
     # Demian (You.com): clasificar para diferenciar conversación de análisis.
     # Usamos el clasificador de 365AI (rápido, vía Groq) para decidir.
-    try:
-        from ai.ia36 import clasificar_36ai
-        tipo = clasificar_36ai(data.mensaje)
-    except Exception:
-        tipo = "SPORTS_MATCH"  # si falla la clasificación, comportamiento anterior
+    # Ruido sin palabras reales ("..", "??", "123"): NUNCA es analisis de
+    # partido (bug real: '..' disparaba el analisis de los partidos de hoy).
+    if re.search(r"[a-záéíóúüñ]{2,}", (data.mensaje or "").lower()):
+        try:
+            from ai.ia36 import clasificar_36ai
+            tipo = clasificar_36ai(data.mensaje)
+        except Exception:
+            tipo = "SPORTS_MATCH"  # si falla la clasificación, comportamiento anterior
+    else:
+        tipo = "CONVERSACION"
 
     if tipo != "SPORTS_MATCH":
         # Modo conversación: sin formato EDGE, respuesta natural de asistente.

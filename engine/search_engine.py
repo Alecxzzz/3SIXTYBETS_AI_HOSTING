@@ -1,8 +1,31 @@
+import json
 import os
+import re
 
 import requests
 
 import youkeys
+
+# Marcas de citacion de You.com: [[1]], [[1, 2]], 【3】... (SIEMPRE doble
+# corchete o 【】; el regex NO toca arrays JSON como [1, 2] ni ["a", "b"]).
+_RE_CITAS = re.compile(r"\[\[\s*[\d,\s|]{1,12}\]\]\s*|【\s*[\d,\s|]{1,12}】\s*")
+
+
+def _limpiar_citas(texto: str) -> str:
+    if not texto:
+        return texto
+    # Si el texto es JSON (respuestas del pipeline de picks), NO tocarlo:
+    # un regex podria comerse arrays numericos como [1, 2]. Los campos se
+    # limpian campo por campo con _limpiar_artefactos en dashboard.
+    strip = texto.strip()
+    if strip.startswith("{") or strip.startswith("["):
+        try:
+            json.loads(strip)
+            return strip
+        except ValueError:
+            pass
+    limpio = _RE_CITAS.sub("", texto)
+    return re.sub(r"[ \t]{2,}", " ", limpio).strip()
 
 try:
     from ddgs import DDGS
@@ -196,12 +219,12 @@ Analiza este evento deportivo:
 
             if isinstance(data, dict):
                 if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
-                    return data["output"]["content"].strip()
+                    return _limpiar_citas(data["output"]["content"])
                 for key in ("answer", "content", "text", "result"):
                     if key in data and isinstance(data[key], str):
-                        return data[key].strip()
+                        return _limpiar_citas(data[key])
                 if "output" in data and isinstance(data["output"], str):
-                    return data["output"].strip()
+                    return _limpiar_citas(data["output"])
 
             return str(data)
         except Exception as error:
