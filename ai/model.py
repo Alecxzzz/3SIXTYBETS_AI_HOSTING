@@ -17,8 +17,8 @@ MODEL_CONFIGS = {
     "you": {
         "name": "Demian tipster",
         "api_key": youkeys.get_you_key(),
-        "base_url": os.getenv("YOU_ANSWER_URL", "https://api.you.com/v1/answer"),
-        "model": os.getenv("YOU_MODEL", "answer"),
+        "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
+        "model": os.getenv("YOU_MODEL", "research"),
     },
     "36ai": {
         "name": "365AI",
@@ -102,7 +102,7 @@ def generar_respuesta_you(prompt_sistema, prompt_usuario):
     except Exception:
         pass
 
-    # Fallback: consulta directa a /v1/answer con el prompt compuesto
+    # Fallback: consulta directa a /v1/research con el prompt compuesto
     api_key = youkeys.get_you_key() or youkeys.get_you_search_key()
     if not api_key:
         return "ERROR: Falta la API key para You.com en el backend."
@@ -119,16 +119,16 @@ Solicitud del usuario:
         "X-API-Key": api_key,
     }
     payload = {
-        # /v1/answer limita 'query' a 400 caracteres
-        "query": trim_text(full_prompt, 400),
-        "freshness": os.getenv("YOU_FRESHNESS", "day"),
+        "input": trim_text(full_prompt, 39000),
         "research_effort": research_effort,
+        "background": False,
+        "freshness": os.getenv("YOU_FRESHNESS", "day"),
+        "safesearch": os.getenv("YOU_SAFESEARCH", "strict"),
+        "language": os.getenv("YOU_LANGUAGE", "ES"),
         "extraction": {
             "extraction_mode": "full_page",
             "extraction_source": "fetch",
         },
-        "safesearch": os.getenv("YOU_SAFESEARCH", "strict"),
-        "language": os.getenv("YOU_LANGUAGE", "ES"),
         "include_domains": [
             d.strip() for d in os.getenv(
                 "YOU_INCLUDE_DOMAINS", "sofascore.com,flashscore.com"
@@ -138,10 +138,10 @@ Solicitud del usuario:
 
     try:
         response = requests.post(
-            os.getenv("YOU_ANSWER_URL", "https://api.you.com/v1/answer"),
+            os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
             headers=headers,
             json=payload,
-            timeout=60,
+            timeout=90,
         )
         if not response.ok:
             raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")

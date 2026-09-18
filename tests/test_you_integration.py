@@ -8,31 +8,31 @@ from engine.search_engine import SearchEngine, normalizar_research_effort
 
 class YouIntegrationTests(unittest.TestCase):
     @patch("engine.search_engine.requests.post")
-    def test_ask_you_uses_answer_endpoint_with_required_payload(self, mock_post):
+    @patch("engine.search_engine.requests.get")
+    def test_ask_you_uses_research_with_required_fields(self, mock_get, mock_post):
         os.environ["YOU_API_KEY"] = "test-key"
+        mock_get.return_value.json.return_value = {
+            "hits": [{"title": "Title 1", "snippet": "Snippet 1"}]
+        }
         mock_post.return_value.ok = True
-        mock_post.return_value.json.return_value = {"answer": "respuesta lista"}
+        mock_post.return_value.json.return_value = {"output": {"content": "respuesta lista"}}
 
         engine = SearchEngine()
         text = engine.ask_you("Analiza picks para mañana", system_prompt="Sistema de prueba")
 
         self.assertEqual(text, "respuesta lista")
+        self.assertEqual(mock_get.call_count, 1)
         self.assertEqual(mock_post.call_count, 1)
 
-        post_kwargs = mock_post.call_args.kwargs
-        payload = post_kwargs["json"]
-        self.assertIn("Analiza picks para mañana", payload["query"])
-        self.assertIn("Sistema de prueba", payload["query"])
-        self.assertEqual(payload["research_effort"], "deep")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertIn("Analiza picks para mañana", payload["input"])
+        self.assertIn("Sistema de prueba", payload["input"])
         self.assertEqual(payload["freshness"], "day")
         self.assertEqual(payload["safesearch"], "strict")
         self.assertEqual(payload["language"], "ES")
-        self.assertEqual(
-            payload["extraction"],
-            {"extraction_mode": "full_page", "extraction_source": "fetch"},
-        )
+        self.assertEqual(payload["extraction"], {"extraction_mode": "full_page", "extraction_source": "fetch"})
         self.assertEqual(payload["include_domains"], ["sofascore.com", "flashscore.com"])
-        self.assertIn("api.you.com/v1/answer", mock_post.call_args.args[0])
+        self.assertIn("api.you.com/v1/research", mock_post.call_args.args[0])
 
     @patch("ai.model.SearchEngine.ask_you")
     def test_generar_respuesta_you_uses_search_engine(self, mock_ask_you):
