@@ -10,6 +10,33 @@ import youkeys
 # corchete o 【】; el regex NO toca arrays JSON como [1, 2] ni ["a", "b"]).
 _RE_CITAS = re.compile(r"\[\[\s*[\d,\s|]{1,12}\]\]\s*|【\s*[\d,\s|]{1,12}】\s*")
 
+# API de respuestas de You.com (Smart/Answer): UN solo endpoint para busqueda
+# y respuestas con investigacion web. Se usa en TODOS los puntos del sitio
+# (chat, dashboard/picks, estadisticas y verificacion de aciertos).
+YOU_ANSWER_URL = os.getenv("YOU_ANSWER_URL", "https://api.you.com/v1/answer")
+
+
+def _you_include_domains():
+    """Dominios a los que se limita la busqueda de You.com (Sofascore primero)."""
+    raw = os.getenv("YOU_INCLUDE_DOMAINS", "sofascore.com,flashscore.com")
+    return [d.strip() for d in raw.split(",") if d.strip()]
+
+
+def _extraer_texto_you(data):
+    """Extrae el texto de respuesta del JSON de /v1/answer (tolerante)."""
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, dict):
+        return str(data)
+    if isinstance(data.get("output"), dict) and "content" in data["output"]:
+        return data["output"]["content"]
+    for key in ("answer", "content", "text", "result"):
+        if isinstance(data.get(key), str):
+            return data[key]
+    if isinstance(data.get("output"), str):
+        return data["output"]
+    return str(data)
+
 
 def _limpiar_citas(texto: str) -> str:
     if not texto:
@@ -70,42 +97,21 @@ class SearchEngine:
         self.you_search_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
 
     def buscar_you(self, consulta, cantidad=4):
-        if not self.you_api_key:
+        """Busqueda de contexto via /v1/answer (You.com Smart).
+
+        La nueva API devuelve una RESPUESTA investigada (no una lista de
+        hits); se envuelve como un unico 'resultado' para que los
+        consumidores (main.buscar_web, contexto del chat) sigan funcionando.
+        """
+        texto = self.answer(consulta)
+        if not texto or texto.startswith(("ERROR", "Error de You.com", "Error leyendo")):
             return []
-
-        try:
-            querystring = {
-                "query": consulta,
-                "count": str(cantidad),
-                "freshness": "day",
-                "language": "ES",
-                "safesearch": "off",
-                "crawl_timeout": "10",
-            }
-            headers = {
-                "X-API-KEY": self.you_api_key,
-                "Accept": "application/json",
-            }
-            response = requests.get(
-                self.you_search_url,
-                headers=headers,
-                params=querystring,
-                timeout=15,
-            )
-            data = response.json()
-        except Exception:
-            return []
-
-        datos = []
-        for item in data.get("hits", [])[:cantidad]:
-            datos.append({
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "body": item.get("snippet") or item.get("description") or "",
-                "source": "you",
-            })
-
-        return datos
+        return [{
+            "title": "You.com (analisis en vivo)",
+            "url": YOU_ANSWER_URL,
+            "body": texto[:2000],
+            "source": "you",
+        }]
 
     def buscar_ddgs(self, consulta, cantidad=4):
         datos = []
@@ -134,101 +140,96 @@ class SearchEngine:
 
         return self.buscar_ddgs(consulta, cantidad)
 
-    def ask_you(self, question, system_prompt="", research_effort="standard"):
-        research_effort = normalizar_research_effort(research_effort)
-        api_key = youkeys.get_you_key()
+    def answer(self, query, system_prompt="", research_effort="deep",
+               include_domains=None, freshness="day"):
+        """Consulta UNICA a You.com Smart/Answer (api.you.com/v1/answer).
+
+        Payload exacto pedido por el usuario: freshness day, research_effort
+        deep, extraccion full_page/fetch, safesearch strict, idioma ES y
+        include_domains limitado a sofascore.com + flashscore.com.
+        Todos los puntos del sitio (chat, dashboard, estadisticas y
+        verificacion de aciertos) pasan por aqui.
+        """
+        api_key = youkeys.get_you_key() or youkeys.get_you_search_key()
         if not api_key:
             return "ERROR: Falta la API key para You.com en el backend."
 
-        # research_effort="frontier" SIEMPRE requiere background=true.
-        # Este backend no implementa polling (GET /v1/research/{task_id}),
-        # así que si llega "frontier" lo bajamos a "exhaustive" para evitar
-        # un 422 garantizado en cada llamada síncrona.
-        if research_effort == "frontier":
-            research_effort = "exhaustive"
+        consulta = f"{system_prompt}\n\n{query}".strip() if system_prompt else query
+        # Limite duro de caracteres del prompt
+        LIMITE_INPUT = 39000
+        if len(consulta) > LIMITE_INPUT:
+            consulta = consulta[:LIMITE_INPUT].rstrip()
 
-        try:
-            ydc_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
-            querystring = {
-                "query": question,
-                "count": "5",
-                "freshness": "day",
-                "language": "ES",
-                "safesearch": "off",
-                "crawl_timeout": "10",
-            }
-            headers_ydc = {
-                "X-API-KEY": api_key,
-                "Accept": "application/json",
-            }
-            ydc_response = requests.get(ydc_url, headers=headers_ydc, params=querystring, timeout=15)
-            ydc_data = ydc_response.json()
+        effort = normalizar_research_effort(
+            research_effort or os.getenv("YOU_RESEARCH_EFFORT", "deep")
+        )
 
-            context = ""
-            for item in ydc_data.get("hits", [])[:5]:
-                title = item.get("title", "")
-                snippet = item.get("snippet") or item.get("description") or ""
-                # Recortamos cada snippet para que 5 resultados nunca puedan
-                # inflar el prompt hasta el límite de 40,000 caracteres de "input".
-                snippet = snippet[:600]
-                context += f"{title}\n{snippet}\n\n"
-        except Exception:
-            context = "No se pudo obtener contexto externo."
+        payload = {
+            "query": consulta,
+            "freshness": os.getenv("YOU_FRESHNESS", freshness),
+            "research_effort": effort,
+            "extraction": {
+                "extraction_mode": "full_page",
+                "extraction_source": "fetch",
+            },
+            "safesearch": os.getenv("YOU_SAFESEARCH", "strict"),
+            "language": os.getenv("YOU_LANGUAGE", "ES"),
+        }
+        dominios = (
+            include_domains if include_domains is not None
+            else _you_include_domains()
+        )
+        if dominios:
+            payload["include_domains"] = dominios
 
-        url = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
         headers = {
             "Content-Type": "application/json",
             "X-API-Key": api_key,
         }
-        full_prompt = f"""
-{system_prompt}
 
-Información reciente encontrada:
-{context}
-
-Analiza este evento deportivo:
-{question}
-"""
-
-        # Límite duro documentado por You.com para "input": 40,000 caracteres.
-        # Dejamos margen de seguridad.
-        LIMITE_INPUT = 39000
-        if len(full_prompt) > LIMITE_INPUT:
-            full_prompt = full_prompt[:LIMITE_INPUT].rstrip() + "\n...(recortado por límite de caracteres de You.com)"
-
-        payload = {
-            "input": full_prompt,
-            "research_effort": research_effort,
-            "background": False,
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=35)
-            if not response.ok:
-                # Antes esto se perdía: raise_for_status() solo da el texto
-                # genérico "422 Client Error...", sin el detalle real que
-                # You.com manda en el body explicando qué campo falló.
+        # La API rechaza con 422 los campos que no soporta (ej. research_effort
+        # o extraction segun el plan). Se reintenta quitando los campos
+        # rechazados hasta 3 veces para ser tolerante a cambios del API.
+        for _ in range(3):
+            try:
+                response = requests.post(
+                    YOU_ANSWER_URL, headers=headers, json=payload, timeout=60
+                )
+            except Exception as error:
+                return f"Error leyendo respuesta de You.com: {error}"
+            if response.ok:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = response.text
+                return _limpiar_citas(_extraer_texto_you(data))
+            if response.status_code == 422:
                 try:
                     detalle = response.json()
                 except Exception:
-                    detalle = response.text[:800]
-                return (
-                    f"Error de You.com ({response.status_code}): {detalle}"
-                )
-            data = response.json()
+                    detalle = {}
+                campos = set()
+                for d in (detalle.get("detail") or []) if isinstance(detalle, dict) else []:
+                    loc = d.get("loc") or []
+                    if d.get("type") == "extra_forbidden" and len(loc) > 1:
+                        campos.add(loc[1])
+                if campos and any(c in payload for c in campos):
+                    for c in campos:
+                        payload.pop(c, None)
+                    continue
+            return (
+                f"Error de You.com ({response.status_code}): "
+                f"{response.text[:800]}"
+            )
+        return "Error de You.com: no se pudo obtener respuesta tras los reintentos."
 
-            if isinstance(data, dict):
-                if "output" in data and isinstance(data["output"], dict) and "content" in data["output"]:
-                    return _limpiar_citas(data["output"]["content"])
-                for key in ("answer", "content", "text", "result"):
-                    if key in data and isinstance(data[key], str):
-                        return _limpiar_citas(data[key])
-                if "output" in data and isinstance(data["output"], str):
-                    return _limpiar_citas(data["output"])
-
-            return str(data)
-        except Exception as error:
-            return f"Error leyendo respuesta de You.com: {error}"
+    def ask_you(self, question, system_prompt="", research_effort="deep"):
+        """Compatibilidad: todo You.com pasa por /v1/answer."""
+        return self.answer(
+            question,
+            system_prompt=system_prompt,
+            research_effort=research_effort,
+        )
 
     def buscar_varias(self, consultas, proveedor="ddgs"):
         resultados = []

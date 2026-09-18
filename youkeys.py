@@ -8,6 +8,12 @@ con cualquiera de las dos formas.
 """
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 def _normalizar(key) -> str:
     if not key:
@@ -19,10 +25,13 @@ def _normalizar(key) -> str:
 
 
 def get_you_key() -> str:
-    """YOU_API_KEY normalizada (Demian / research)."""
-    return _normalizar(os.getenv("YOU_API_KEY"))
+    """YOU_API_KEY (o YDC_API_KEY) normalizada (Demian / answer)."""
+    return _normalizar(os.getenv("YOU_API_KEY") or os.getenv("YDC_API_KEY"))
 
 
 def get_you_search_key() -> str:
-    """YOU_SEARCH_API_KEY normalizada (busqueda ydc-index)."""
-    return _normalizar(os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY"))
+    """YOU_SEARCH_API_KEY (o YDC_API_KEY) normalizada (busqueda You.com)."""
+    return _normalizar(
+        os.getenv("YOU_SEARCH_API_KEY") or os.getenv("YOU_API_KEY")
+        or os.getenv("YDC_API_KEY")
+    )

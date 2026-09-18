@@ -17,8 +17,8 @@ MODEL_CONFIGS = {
     "you": {
         "name": "Demian tipster",
         "api_key": youkeys.get_you_key(),
-        "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
-        "model": os.getenv("YOU_MODEL", "research"),
+        "base_url": os.getenv("YOU_ANSWER_URL", "https://api.you.com/v1/answer"),
+        "model": os.getenv("YOU_MODEL", "answer"),
     },
     "36ai": {
         "name": "365AI",
@@ -73,46 +73,23 @@ def trim_text(text: str, limit: int) -> str:
 
 
 def buscar_contexto_you(question):
-    api_key = youkeys.get_you_search_key()
-    if not api_key:
-        return "No se pudo obtener contexto externo."
+    """Contexto de estadisticas via You.com Smart/Answer (/v1/answer).
 
+    Limitado a sofascore.com y flashscore.com (include_domains), en
+    espanol, research_effort deep y safesearch strict.
+    """
     try:
-        ydc_url = os.getenv("YOU_SEARCH_URL", "https://ydc-index.io/v1/search")
-        querystring = {
-            "query": question,
-            "count": "5",
-            "freshness": "day",
-            "language": "ES",
-            "safesearch": "off",
-            "crawl_timeout": "10",
-        }
-        headers = {
-            "X-API-KEY": api_key,
-            "Accept": "application/json",
-        }
-        response = requests.get(
-            ydc_url,
-            headers=headers,
-            params=querystring,
-            timeout=15,
-        )
-        data = response.json()
-
-        context = ""
-        for item in data.get("hits", [])[:3]:
-            title = item.get("title", "")
-            snippet = item.get("snippet") or item.get("description") or ""
-            context += f"{trim_text(title, 120)}\n{trim_text(snippet, 450)}\n\n"
-
-        return trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800"))) or "No se pudo obtener contexto externo."
+        texto = SearchEngine().answer(question, research_effort="deep")
+        if not texto or texto.startswith(("ERROR", "Error de You.com", "Error leyendo")):
+            return "No se pudo obtener contexto externo."
+        return trim_text(texto, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))
     except Exception:
         return "No se pudo obtener contexto externo."
 
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
     search_engine = SearchEngine()
-    research_effort = normalizar_research_effort(os.getenv("YOU_RESEARCH_EFFORT", "standard"))
+    research_effort = normalizar_research_effort(os.getenv("YOU_RESEARCH_EFFORT", "deep"))
 
     try:
         respuesta = search_engine.ask_you(
@@ -125,33 +102,46 @@ def generar_respuesta_you(prompt_sistema, prompt_usuario):
     except Exception:
         pass
 
-    api_key = youkeys.get_you_key()
+    # Fallback: consulta directa a /v1/answer con el prompt compuesto
+    api_key = youkeys.get_you_key() or youkeys.get_you_search_key()
     if not api_key:
         return "ERROR: Falta la API key para You.com en el backend."
 
-    context = buscar_contexto_you(prompt_usuario)
-    url = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
     full_prompt = f"""
 {prompt_sistema}
-
-Informacion reciente encontrada:
-{trim_text(context, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))}
 
 Solicitud del usuario:
 {trim_text(prompt_usuario, 1200)}
 """
+
     headers = {
         "Content-Type": "application/json",
         "X-API-Key": api_key,
     }
     payload = {
-        "input": full_prompt,
-        "research_effort": normalizar_research_effort(os.getenv("YOU_RESEARCH_EFFORT", "standard")),
-        "background": False,
+        "query": trim_text(full_prompt, 39000),
+        "freshness": os.getenv("YOU_FRESHNESS", "day"),
+        "research_effort": research_effort,
+        "extraction": {
+            "extraction_mode": "full_page",
+            "extraction_source": "fetch",
+        },
+        "safesearch": os.getenv("YOU_SAFESEARCH", "strict"),
+        "language": os.getenv("YOU_LANGUAGE", "ES"),
+        "include_domains": [
+            d.strip() for d in os.getenv(
+                "YOU_INCLUDE_DOMAINS", "sofascore.com,flashscore.com"
+            ).split(",") if d.strip()
+        ],
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=35)
+        response = requests.post(
+            os.getenv("YOU_ANSWER_URL", "https://api.you.com/v1/answer"),
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
         if not response.ok:
             raise RuntimeError(f"You.com {response.status_code}: {response.text[:300]}")
 
