@@ -140,22 +140,23 @@ class SearchEngine:
 
         return self.buscar_ddgs(consulta, cantidad)
 
-    def answer(self, query, system_prompt="", research_effort="deep",
-               include_domains=None, freshness="day"):
-        """Consulta UNICA a You.com Smart/Answer (api.you.com/v1/answer).
+    def answer_full(self, query, system_prompt="", research_effort="deep",
+                    include_domains=None, freshness="day"):
+        """Igual que answer(), pero devuelve el dict COMPLETO de /v1/answer.
 
-        Payload exacto pedido por el usuario: freshness day, research_effort
-        deep, extraccion full_page/fetch, safesearch strict, idioma ES y
-        include_domains limitado a sofascore.com + flashscore.com.
-        Todos los puntos del sitio (chat, dashboard, estadisticas y
-        verificacion de aciertos) pasan por aqui.
+        Estructura real de la API:
+        {"answer": "...", "citations": [{"source": url, "excerpts": [...]}],
+         "results": {"web": [{"url", "title", "snippets"}]}}
+        Nota: segun el plan, 'research_effort' y 'extraction' pueden venir
+        rechazados (422 extra_forbidden); en ese caso se reintentan sin ellos.
         """
         api_key = youkeys.get_you_key() or youkeys.get_you_search_key()
         if not api_key:
-            return "ERROR: Falta la API key para You.com en el backend."
+            return {"answer": "ERROR: Falta la API key para You.com en el backend."}
 
         consulta = f"{system_prompt}\n\n{query}".strip() if system_prompt else query
-        # Limite duro de caracteres del prompt
+        # La API a veces ignora "language": pedimos espanol en la consulta.
+        consulta += "\n\nResponde SIEMPRE en espanol."
         LIMITE_INPUT = 39000
         if len(consulta) > LIMITE_INPUT:
             consulta = consulta[:LIMITE_INPUT].rstrip()
@@ -167,13 +168,17 @@ class SearchEngine:
         payload = {
             "query": consulta,
             "freshness": os.getenv("YOU_FRESHNESS", freshness),
-            "research_effort": effort,
-            "extraction": {
-                "extraction_mode": "full_page",
-                "extraction_source": "fetch",
-            },
             "safesearch": os.getenv("YOU_SAFESEARCH", "strict"),
             "language": os.getenv("YOU_LANGUAGE", "ES"),
+        }
+        # research_effort y extraction solo se envian si el plan los soporta:
+        # se intentan una vez y, si la API los rechaza (422 extra_forbidden),
+        # se retiran automaticamente (ver bucle de abajo).
+        if os.getenv("YOU_SEND_EFFORT", "1") not in ("0", "false", "False"):
+            payload["research_effort"] = effort
+        payload["extraction"] = {
+            "extraction_mode": "full_page",
+            "extraction_source": "fetch",
         }
         dominios = (
             include_domains if include_domains is not None
@@ -187,22 +192,20 @@ class SearchEngine:
             "X-API-Key": api_key,
         }
 
-        # La API rechaza con 422 los campos que no soporta (ej. research_effort
-        # o extraction segun el plan). Se reintenta quitando los campos
-        # rechazados hasta 3 veces para ser tolerante a cambios del API.
+        # La API rechaza con 422 los campos que no soporta. Se reintenta
+        # quitando los campos rechazados hasta 3 veces.
         for _ in range(3):
             try:
                 response = requests.post(
                     YOU_ANSWER_URL, headers=headers, json=payload, timeout=60
                 )
             except Exception as error:
-                return f"Error leyendo respuesta de You.com: {error}"
+                return {"answer": f"Error leyendo respuesta de You.com: {error}"}
             if response.ok:
                 try:
-                    data = response.json()
+                    return response.json()
                 except Exception:
-                    data = response.text
-                return _limpiar_citas(_extraer_texto_you(data))
+                    return {"answer": response.text}
             if response.status_code == 422:
                 try:
                     detalle = response.json()
@@ -217,11 +220,25 @@ class SearchEngine:
                     for c in campos:
                         payload.pop(c, None)
                     continue
-            return (
-                f"Error de You.com ({response.status_code}): "
-                f"{response.text[:800]}"
-            )
-        return "Error de You.com: no se pudo obtener respuesta tras los reintentos."
+            return {
+                "answer": (
+                    f"Error de You.com ({response.status_code}): "
+                    f"{response.text[:800]}"
+                )
+            }
+        return {"answer": "Error de You.com: no se pudo obtener respuesta tras los reintentos."}
+
+    def answer(self, query, system_prompt="", research_effort="deep",
+               include_domains=None, freshness="day"):
+        """Texto de respuesta de /v1/answer (lo usan TODOS los puntos del sitio)."""
+        data = self.answer_full(
+            query,
+            system_prompt=system_prompt,
+            research_effort=research_effort,
+            include_domains=include_domains,
+            freshness=freshness,
+        )
+        return _limpiar_citas(_extraer_texto_you(data))
 
     def ask_you(self, question, system_prompt="", research_effort="deep"):
         """Compatibilidad: todo You.com pasa por /v1/answer."""
