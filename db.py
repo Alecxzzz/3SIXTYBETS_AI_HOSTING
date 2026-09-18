@@ -1090,14 +1090,18 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
 
 
 def pick_existe(event_id):
-    """True si el evento ya tiene un pick generado HOY.
+    """True si el evento ya tiene un pick vigente (creado en los ultimos 2 dias).
 
-    Sin el filtro de fecha, picks de dias anteriores con el mismo event_id
-    bloqueaban la generacion de picks nuevos para siempre.
+    Con picks de partidos de MANANA creados hoy, el filtro por pick_date = hoy
+    generaria duplicados al llegar el dia del partido; por eso se busca por
+    event_id en una ventana de 2 dias. Los ANULADO no bloquean (permiten
+    regenerar un pick si el anterior se descarto).
     """
+    desde = (now_utc() - timedelta(days=2)).date()
     row = run_query(
-        "select id from ai_picks where event_id = %s and pick_date = %s limit 1",
-        (event_id, now_utc().date()),
+        "select id from ai_picks where event_id = %s and result != 'ANULADO' "
+        "and pick_date >= %s limit 1",
+        (event_id, desde),
         fetchone=True,
     )
     return bool(row)
@@ -1169,18 +1173,51 @@ def count_user_messages(user_id: str) -> int:
 
 
 def count_aciertos_historico():
+    # El archivo (idea 19) tambien cuenta: el historico nunca baja al archivar.
+    run_query("create table if not exists ai_picks_archive like ai_picks")
     row = run_query(
         """
         select
           coalesce(sum(case when result = 'ACIERTO' then 1 else 0 end), 0) as aciertos,
           coalesce(sum(case when result in ('ACIERTO', 'FALLO') then 1 else 0 end), 0) as resueltos
-        from ai_picks
+        from (
+            select result from ai_picks
+            union all
+            select result from ai_picks_archive
+        ) t
         """,
         fetchone=True,
     )
     if not row:
         return {"aciertos": 0, "resueltos": 0}
     return {"aciertos": int(row["aciertos"]), "resueltos": int(row["resueltos"])}
+
+
+def archivar_picks_antiguos(dias: int = 30) -> int:
+    """Idea 19: mueve a ai_picks_archive los picks con pick_date de hace +N dias.
+
+    Mantiene la tabla ai_picks pequena y rapida sin perder el historico
+    (el track record y count_aciertos_historico siguen sumando el archivo).
+    """
+    corte = (now_utc() - timedelta(days=dias)).date()
+    row = run_query(
+        "select count(*) as c from ai_picks where pick_date < %s",
+        (corte,),
+        fetchone=True,
+    )
+    total = int(row["c"]) if row else 0
+    if not total:
+        return 0
+    if not run_query("create table if not exists ai_picks_archive like ai_picks"):
+        return 0
+    if not run_query(
+        "insert into ai_picks_archive select * from ai_picks where pick_date < %s",
+        (corte,),
+    ):
+        return 0
+    if not run_query("delete from ai_picks where pick_date < %s", (corte,)):
+        return 0
+    return total
 
 
 # ============================================================

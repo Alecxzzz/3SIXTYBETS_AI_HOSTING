@@ -26,8 +26,25 @@ import db
 ODDS_MINIMA = 1.20
 # Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
 HORA_CORTE_ACERTADOS = 20
+# La IA solo empieza a analizar/generar picks desde las 21:00 (9 PM) Nicaragua
+HORA_INICIO_ANALISIS = 21
+# Verificacion estricta de aciertos: N pasadas independientes de la IA contra
+# fuentes externas (Sofascore/Flashscore/Fotmob); TODAS deben coincidir.
+VERIFICACIONES_ACIERTO = 6
 
 TZ_NICARAGUA = db.TZ_NICARAGUA
+
+# Salud del scheduler (idea 20: monitoreo; visible en /dashboard/salud)
+_salud = {
+    "ultimo_ciclo": None,
+    "ultima_generacion_con_picks": None,
+    "ultima_generacion_ts": 0.0,
+    "ultimo_forzado_ts": 0.0,
+    "generaciones_fallidas": 0,
+    "sofascore_estado": "sin usar",
+    "marcadores_discrepantes": 0,
+    "archivo_ultimo_dia": None,
+}
 
 
 def _hora_nicaragua():
@@ -204,38 +221,43 @@ def _odds_evento(event_id):
     return mercados
 
 
+def _evento_oddsapi_con_mercados(sport: str, home_name: str, away_name: str):
+    """Devuelve (evento, mercados, local_en_odds) de odds-api.io para el duelo.
+
+    El matching es por PAR de equipos sin importar el orden (odds-api puede
+    listar el mismo duelo invertido). local_en_odds=True si el local del pick
+    es el 'home' de odds-api; False si esta invertido; None si no hubo match.
+    """
+    slug = ODDS_SPORT_SLUGS.get(sport)
+    if not slug:
+        return None, None, None
+
+    def _coincide(a: str, b: str) -> bool:
+        a, b = _norm_texto(a), _norm_texto(b)
+        return bool(a) and bool(b) and (a == b or a in b or b in a)
+
+    for e in _odds_eventos(slug):
+        if e.get("status") not in ("pending", "live"):
+            continue
+        if _coincide(e.get("home", ""), home_name) and _coincide(
+            e.get("away", ""), away_name
+        ):
+            return e, (_odds_evento(e.get("id")) or []), True
+        if _coincide(e.get("home", ""), away_name) and _coincide(
+            e.get("away", ""), home_name
+        ):
+            return e, (_odds_evento(e.get("id")) or []), False
+    return None, None, None
+
+
 def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
     """Devuelve un texto con las cuotas reales (odds-api.io) del partido.
 
     Matching difuso por nombre de equipos contra los eventos del deporte.
     Devuelve "" si no hay coincidencia o no hay cuotas.
     """
-    slug = ODDS_SPORT_SLUGS.get(sport)
-    if not slug:
-        return ""
-
-    eventos = _odds_eventos(slug)
-    nh, na = _norm_texto(home_name), _norm_texto(away_name)
-
-    def _coincide(a: str, b: str) -> bool:
-        a, b = _norm_texto(a), _norm_texto(b)
-        return bool(a) and bool(b) and (a == b or a in b or b in a)
-
-    evento = None
-    for e in eventos:
-        if e.get("status") not in ("pending", "live"):
-            continue
-        if _coincide(e.get("home", ""), home_name) and _coincide(
-            e.get("away", ""), away_name
-        ):
-            evento = e
-            break
-
-    if not evento:
-        return ""
-
-    mercados = _odds_evento(evento.get("id"))
-    if not mercados:
+    evento, mercados = _evento_oddsapi_con_mercados(sport, home_name, away_name)
+    if not evento or not mercados:
         return ""
 
     lineas = [f"CUOTAS REALES ({evento['home']} vs {evento['away']}, odds-api.io):"]
@@ -249,6 +271,178 @@ def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
         "respetar los minimos del catalogo."
     )
     return "\n".join(lineas)
+
+
+def _num_cuota(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 1.0 else None
+
+
+def _cuota_real_pick(sport: str, home_name: str, away_name: str,
+                     market: str, selection: str, titulo: str):
+    """Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion del pick.
+
+    Mapea el mercado del catalogo a los mercados de odds-api: 1X2->ML,
+    sin empate->Draw No Bet, doble oportunidad->Double Chance,
+    handicap->Spread, over/under->Totals/Goals O/U (incl. corners y
+    tarjetas), ambos marcan->BTTS. Devuelve float o None si no existe.
+    """
+    _, mercados, local_en_odds = _evento_oddsapi_con_mercados(
+        sport, home_name, away_name
+    )
+    if not mercados:
+        return None
+
+    texto = f"{market} {titulo} {selection}".lower()
+    nh, na = _norm_texto(home_name), _norm_texto(away_name)
+    lado_txt = _norm_texto(f"{titulo} {selection}")
+
+    def _mercado(*claves):
+        for m in mercados:
+            n = (m.get("name") or "").lower()
+            if any(c in n for c in claves):
+                return m
+        return None
+
+    def _lado():
+        """Lado del pick en terminos de odds-api (reorienta si esta invertido)."""
+        l = None
+        for nombre in (nh, na):
+            if not nombre:
+                continue
+            if nombre in lado_txt:
+                l = "home" if nombre == nh else "away"
+                break
+            # nombre largo de odds-api ("real betis seville") vs corto del pick
+            palabras = nombre.split()
+            if len(palabras) >= 2 and " ".join(palabras[:2]) in lado_txt:
+                l = "home" if nombre == nh else "away"
+                break
+        if l is None:
+            return None
+        if local_en_odds is False:
+            return "away" if l == "home" else "home"
+        return l
+
+    # Sin empate (Draw No Bet)
+    if "sin empate" in texto:
+        m = _mercado("draw no bet")
+        for o in (m or {}).get("odds") or []:
+            if isinstance(o, dict):
+                lado = _lado()
+                if lado and _num_cuota(o.get(lado)):
+                    return _num_cuota(o.get(lado))
+        return None
+
+    # 1X2 / Ganador
+    if any(k in texto for k in ("1x2", "ganador", "moneyline", " ml", "cualquier equipo gana")):
+        m = _mercado("ml", "moneyline", "match winner", "1x2")
+        for o in (m or {}).get("odds") or []:
+            if not isinstance(o, dict):
+                continue
+            lado = _lado()
+            if lado and _num_cuota(o.get(lado)):
+                return _num_cuota(o.get(lado))
+            if "empate" in texto and _num_cuota(o.get("draw")):
+                return _num_cuota(o.get("draw"))
+        return None
+
+    # Doble oportunidad (1X / 12 / X2)
+    if "doble oportunidad" in texto or "doble" in texto:
+        m = _mercado("double chance")
+        sel = lado_txt.replace(" ", "")
+        clave = next((k for k in ("1x", "12", "x2") if k in sel), None)
+        for o in (m or {}).get("odds") or []:
+            if isinstance(o, dict) and clave:
+                val = _num_cuota(o.get(clave.upper()) or o.get(clave))
+                if val:
+                    return val
+        return None
+
+    # Handicap (Spread)
+    if "handicap" in texto or "spread" in texto:
+        m = _mercado("spread", "handicap")
+        linea = None
+        mm = re.search(r"([+-]?\d+(?:\.\d+)?)", str(selection))
+        if mm:
+            try:
+                linea = float(mm.group(1))
+            except ValueError:
+                linea = None
+        lado = _lado()
+        # El hdp de odds-api se expresa sobre el LOCAL: para el visitante la
+        # linea se invierte (Real Betis -1.5 == Getafe +1.5)
+        esperado = None
+        if linea is not None and lado:
+            esperado = linea if lado == "home" else -linea
+        if lado:
+            for tolerancia in (0.01, 0.26):
+                for o in (m or {}).get("odds") or []:
+                    if not isinstance(o, dict):
+                        continue
+                    try:
+                        hdp = float(o.get("hdp"))
+                    except (TypeError, ValueError):
+                        continue
+                    if esperado is not None and abs(hdp - esperado) > tolerancia:
+                        continue
+                    val = _num_cuota(o.get(lado))
+                    if val:
+                        return val
+        return None
+
+    # Over/Under (goles, carreras, puntos, corners, tarjetas)
+    if any(k in texto for k in ("over", "under", "total", "mas de", "menos de")):
+        es_corner = "corner" in texto
+        es_tarjeta = "tarjeta" in texto or "card" in texto
+        es_over = any(k in texto for k in ("over", "mas de"))
+        linea = None
+        mm = re.search(r"(\d+(?:\.\d+)?)", str(selection))
+        if mm:
+            try:
+                linea = float(mm.group(1))
+            except ValueError:
+                linea = None
+        for m in mercados:
+            n = (m.get("name") or "").lower()
+            if not any(k in n for k in ("over/under", "totals", "total")):
+                continue
+            if es_corner and "corner" not in n:
+                continue
+            if es_tarjeta and "card" not in n:
+                continue
+            if not es_corner and not es_tarjeta and ("corner" in n or "card" in n):
+                continue
+            for o in (m.get("odds") or []):
+                if not isinstance(o, dict):
+                    continue
+                try:
+                    hdp = float(o.get("hdp"))
+                except (TypeError, ValueError):
+                    hdp = None
+                if linea is not None and hdp is not None and abs(hdp - linea) > 0.01:
+                    continue
+                val = _num_cuota(o.get("over") if es_over else o.get("under"))
+                if val:
+                    return val
+        return None
+
+    # Ambos equipos marcan (BTTS)
+    if "ambos" in texto or "btts" in texto:
+        m = _mercado("both teams", "btts")
+        sel = (selection or "").strip().lower()
+        es_si = sel in ("si", "sí", "yes") or "si" in lado_txt.split()
+        for o in (m or {}).get("odds") or []:
+            if isinstance(o, dict):
+                val = _num_cuota(o.get("yes") if es_si else o.get("no"))
+                if val:
+                    return val
+        return None
+
+    return None
 
 # ============================================================
 # MERCADOS DEFINIDOS POR DEPORTE (unico catalogo permitido)
@@ -443,8 +637,10 @@ def _partidos_hoy():
             for g in data.get("games", []):
                 if g.get("state") == "post":
                     continue  # ya finalizados: no generar pick nuevo
-                # Solo partidos de HOY (hora Nicaragua) o que esten en vivo:
+                # Partidos de HOY o MANANA (hora Nicaragua) o que esten en vivo:
                 # el scoreboard ahora trae tambien manana y pasado manana.
+                # Incluir manana permite que la IA analice YA los proximos
+                # partidos cuando ya no queda nada por jugar hoy.
                 if g.get("state") != "in":
                     try:
                         fecha = datetime.fromisoformat(
@@ -452,7 +648,7 @@ def _partidos_hoy():
                         ).astimezone(sports.TZ_NIC).date()
                     except (ValueError, TypeError):
                         fecha = ahora_local.date()
-                    if fecha != ahora_local.date():
+                    if fecha not in (ahora_local.date(), ahora_local.date() + timedelta(days=1)):
                         continue
                 home = g.get("home") or {}
                 away = g.get("away") or {}
@@ -591,12 +787,30 @@ def _ultimos5(sport: str, event_id: str, home_name: str, away_name: str) -> dict
     return salida
 
 
-def generar_picks_dia(max_partidos: int = 40) -> dict:
+def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
     """Genera picks automaticos para los partidos de hoy.
 
     Idempotente: salta partidos que ya tienen pick guardado hoy.
-    Nunca repite el mismo mercado (normalizado) en toda la jornada.
+    FUTBOL: se genera pick para CADA partido disponible (mas volumen), el
+    resto de deportes sigue la regla de no repetir mercado en la jornada.
+    Solo analiza desde las HORA_INICIO_ANALISIS (21:00/9PM) Nicaragua en
+    adelante, salvo que se pida forzar=True.
     """
+    ahora_local = _hora_nicaragua()
+    if ahora_local.hour < HORA_INICIO_ANALISIS and not forzar:
+        return {
+            "partidos": 0,
+            "generados": 0,
+            "omitidos_ya_con_pick": 0,
+            "errores": 0,
+            "rechazados_cuota": 0,
+            "rechazados_calidad": 0,
+            "mensaje": (
+                f"El analisis inicia a las {HORA_INICIO_ANALISIS}:00 Nicaragua; "
+                f"ahora son las {ahora_local.strftime('%H:%M')}."
+            ),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
     partidos = _partidos_hoy()
     generados = 0
     omitidos = 0
@@ -612,8 +826,15 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             continue
 
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
-        if not [m for m in mercados if _market_norm(m) not in mercados_usados]:
-            break  # ya se usaron todos los mercados del catalogo hoy
+        disponibles = [m for m in mercados if _market_norm(m) not in mercados_usados]
+        if not disponibles:
+            if p["sport"] == "soccer":
+                # FUTBOL: mas volumen. Si ya se usaron todos los mercados del
+                # catalogo hoy, se permite reutilizarlos para partidos nuevos
+                # (cada partido lleva SU pick aunque el mercado ya salio hoy).
+                disponibles = list(mercados)
+            else:
+                break  # otros deportes: se agotaron los mercados del catalogo
 
         mensaje = (
             f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
@@ -677,10 +898,12 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 
         market = (pick.get("market") or "").strip()
         # Validar que el mercado pertenece al catalogo del deporte y no repite
-        if _market_norm(market) not in {_market_norm(m) for m in mercados}:
+        # (el no-repetir solo bloquea en deportes que NO son futbol: en futbol
+        # se genera pick para cada partido con mas volumen)
+        if _market_norm(market) not in {_market_norm(m) for m in disponibles}:
             errores += 1
             continue
-        if _market_norm(market) in mercados_usados:
+        if p["sport"] != "soccer" and _market_norm(market) in mercados_usados:
             errores += 1
             continue
 
@@ -705,6 +928,35 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             rechazados_calidad += 1
             continue
 
+        # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
+        # Si existe, reemplaza la estimacion de la IA y se valida contra el
+        # minimo; si no hay cuota real, se usa la estimada.
+        cuota_real = _cuota_real_pick(
+            p["sport"], p["home_name"], p["away_name"], market,
+            str(pick.get("selection", "")), str(pick.get("titulo") or ""),
+        )
+        if cuota_real is not None:
+            if cuota_real <= ODDS_MINIMA:
+                rechazados_cuota += 1
+                continue
+            odds_final = round(cuota_real, 3)
+        else:
+            odds_final = pick.get("odds")
+            # Props de jugador: las cuotas de la IA suelen ser absurdas (ej.
+            # 9.25 por un over 8.5 de ponches). Sin cuota real de Bet365 se
+            # rechaza cualquier prop con cuota mayor a 4.00.
+            es_prop_jugador = (
+                "jugador" in (market or "").lower()
+                or "jugador" in str(pick.get("titulo") or "").lower()
+            )
+            if es_prop_jugador:
+                try:
+                    if float(odds_final or 0) > 4.0:
+                        rechazados_cuota += 1
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -713,7 +965,7 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
             event_date=p["date"],
             market=market,
             selection=str(pick.get("selection", "")),
-            odds=pick.get("odds"),
+            odds=odds_final,
             confidence=pick.get("confidence", "MEDIA"),
             rationale=pick.get("rationale", ""),
             model=modelo or "IA",
@@ -746,6 +998,225 @@ def generar_picks_dia(max_partidos: int = 40) -> dict:
 # ============================================================
 # RESOLUCION DE PICKS (ACIERTO / FALLO)
 # ============================================================
+
+MLB_BASE = "https://statsapi.mlb.com/api/v1"
+_MLB_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; 3SIXTYBETS/1.0)"}
+
+
+def _mlb_get(path: str, params=None):
+    import requests
+
+    r = requests.get(
+        f"{MLB_BASE}{path}",
+        params=params or {},
+        headers=_MLB_HEADERS,
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _mlb_gamepk(pick: dict):
+    """gamePk de statsapi.mlb.com para el evento del pick (±1 dia)."""
+    from backend.player_stats import mlb_api
+
+    try:
+        dt = datetime.fromisoformat(
+            str(pick.get("eventDate") or "").replace("Z", "+00:00")
+        )
+    except (ValueError, TypeError):
+        return None
+    try:
+        tid = mlb_api.get_team_id(pick.get("homeName") or "") or mlb_api.get_team_id(
+            pick.get("awayName") or ""
+        )
+    except Exception:
+        tid = None
+    if not tid:
+        return None
+    fecha = dt.date()
+    for delta in (0, -1, 1):
+        try:
+            data = _mlb_get(
+                "/schedule",
+                {"sportId": 1, "teamId": tid, "date": (fecha + timedelta(days=delta)).isoformat()},
+            )
+        except Exception:
+            continue
+        for d in data.get("dates") or []:
+            for g in d.get("games") or []:
+                if g.get("gamePk"):
+                    return g.get("gamePk")
+    return None
+
+
+def _resolver_prop_mlb(pick: dict):
+    """Resuelve props de JUGADOR de MLB con el boxscore real (statsapi).
+
+    Cubre: hits, ponches/strikeouts (lanzador o bateador) y home runs.
+    Devuelve ACIERTO/FALLO o None si no es resoluble. Si el jugador NO
+    aparece en el boxscore del partido, devuelve FALLO (sin datos no hay
+    acierto) — evita que la IA lo adivine con solo el marcador del equipo.
+    """
+    if pick.get("sport") != "mlb":
+        return None
+    market = (pick.get("market") or "").lower()
+    titulo = (pick.get("titulo") or "").lower()
+    texto = f"{market} {titulo} {(pick.get('selection') or '').lower()}"
+    if "jugador" not in texto and " del jugador" not in texto:
+        return None
+
+    match = re.search(r"(over|under)\s*\+?\s*([0-9]+(?:\.[0-9]+)?)", texto)
+    if not match:
+        return None
+    es_over = match.group(1) == "over"
+    linea = float(match.group(2))
+
+    jugador = str(pick.get("titulo") or "").split(":")[0].strip()
+    if not jugador or len(jugador) < 4:
+        return None
+    jt = set(_norm_texto(jugador).split())
+
+    pk = _mlb_gamepk(pick)
+    if not pk:
+        return None
+    try:
+        box = _mlb_get(f"/game/{pk}/boxscore")
+    except Exception:
+        return None
+
+    jugador_stats = None
+    for side in ("away", "home"):
+        team = (box.get("teams") or {}).get(side) or {}
+        for info in (team.get("players") or {}).values():
+            full = _norm_texto((info.get("person") or {}).get("fullName") or "")
+            pt = set(full.split())
+            if jt and jt.issubset(pt):
+                jugador_stats = info
+                break
+        if jugador_stats:
+            break
+
+    if not jugador_stats:
+        # El jugador no participo en ese partido: el pick es FALLO
+        return "FALLO"
+
+    stats = jugador_stats.get("stats") or {}
+    batting = stats.get("batting") or {}
+    pitching = stats.get("pitching") or {}
+    es_pitcher = (
+        ((jugador_stats.get("position") or {}).get("abbreviation") == "P")
+        or bool(pitching.get("gamesPlayed"))
+    )
+
+    valor = None
+    if any(k in texto for k in ("ponch", "strikeout", "so ")):
+        valor = pitching.get("strikeOuts") if es_pitcher else batting.get("strikeOuts")
+    elif "hit" in texto:
+        valor = batting.get("hits")
+    elif any(k in texto for k in ("home run", "hr", "cuadrangular")):
+        valor = batting.get("homeRuns")
+    if valor is None:
+        return None
+    try:
+        valor = float(valor)
+    except (TypeError, ValueError):
+        return None
+
+    return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
+           ("ACIERTO" if valor < linea else "FALLO")
+
+
+def _resolver_stats_sofascore(pick: dict):
+    """Resuelve over/under de TARJETAS y CORNERS de futbol con Sofascore.
+
+    El marcador global no determina estos mercados (antes la IA adivinaba);
+    aqui se usa la estadistica real del partido (periodo ALL).
+    """
+    if pick.get("sport") != "soccer":
+        return None
+    market = (pick.get("market") or "").lower()
+    titulo = (pick.get("titulo") or "").lower()
+    texto = f"{market} {titulo} {(pick.get('selection') or '').lower()}"
+
+    if "tarjeta" in texto or "card" in texto:
+        claves = ("yellowcards", "redcards")
+    elif "corner" in texto:
+        claves = ("corners",)
+    else:
+        return None
+
+    match = re.search(r"(over|m[áa]s de|under|menos de)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto)
+    if not match:
+        return None
+    es_over = match.group(1).startswith(("over", "m"))
+    try:
+        linea = float(match.group(2).replace(",", "."))
+    except ValueError:
+        return None
+
+    total = _sofascore_stat_total(pick, claves)
+    if total is None:
+        return None
+    return ("ACIERTO" if total > linea else "FALLO") if es_over else \
+           ("ACIERTO" if total < linea else "FALLO")
+
+
+MESES_ES = {
+    1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+    7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre",
+    12: "diciembre",
+}
+
+
+def _verificar_acierto_con_fuentes(pick: dict, marcador: str):
+    """Verificacion ESTRICTA del resultado: N pasadas independientes de la IA.
+
+    Cada pasada pide verificar el resultado en sitios externos
+    (sofascore.com / flashscore.com / fotmob.com) con la consulta del tipo
+    'STATS {local} VS {visitante} HOY (dia) DE (mes)'. Solo devuelve ACIERTO o
+    FALLO si TODAS las pasadas coinciden; si alguna discrepa devuelve None
+    (el pick queda PENDIENTE para re-verificar en el proximo ciclo).
+    """
+    ahora = _hora_nicaragua()
+    equipos = pick.get("eventName") or ""
+    local = pick.get("homeName") or ""
+    visitante = pick.get("awayName") or ""
+
+    mensaje = (
+        f"TIPO: STATS {local} VS {visitante} HOY ({ahora.day}) DE "
+        f"{MESES_ES.get(ahora.month, ahora.month)}.\n"
+        f"Partido: {equipos} (deporte {pick.get('sportLabel', '')}).\n"
+        f"Pick: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
+        f"Marcador final que tenemos registrado: {marcador}.\n\n"
+        "Verifica el resultado FINAL de ese partido en sitios externos como "
+        "sofascore.com, flashscore.com y fotmob.com. Comprueba si TODAS las "
+        "fuentes coinciden con el marcador registrado y si el pick resulto "
+        "ganador. Responde SOLO una palabra: ACIERTO o FALLO. Si el marcador "
+        "no coincide con las fuentes externas, responde DISCREPANTE."
+    )
+
+    votos = []
+    for i in range(VERIFICACIONES_ACIERTO):
+        texto, _ = _preguntar_ia(mensaje)
+        upper = (texto or "").upper()
+        if "ACIERTO" in upper:
+            votos.append("ACIERTO")
+        elif "FALLO" in upper:
+            votos.append("FALLO")
+        else:
+            votos.append(None)
+        if len(set(v for v in votos if v)) > 1:
+            print(
+                f"[Dashboard] Verificacion {i + 1}/{VERIFICACIONES_ACIERTO} "
+                f"discrepante para pick {pick.get('id')}: {votos}",
+                flush=True,
+            )
+            return None  # fuentes no coinciden: no marcar nada
+
+    if any(v is None for v in votos):
+        return None  # alguna pasada no fue concluyente
+    return votos[0]
 
 
 def _resolver_pick_con_ia(pick: dict):
@@ -959,14 +1430,249 @@ def _detalle_resolucion(pick: dict):
     return sports.get_game_detail(sport, eid)
 
 
+# ============================================================
+# SOFASCORE (verificacion OBLIGATORIA de marcadores, 3ra fuente)
+# ============================================================
+
+SOFASCORE_API = "https://api.sofascore.com/api/v1"
+_SOFASCORE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.sofascore.com/",
+}
+_sofascore_cache = {}  # clave -> (timestamp, data)
+_SOFASCORE_TTL = 600  # 10 min
+_sofascore_bloqueado_hasta = 0  # backoff ante 403/429 de Cloudflare
+_SOFASCORE_BACKOFF = 900  # 15 min
+
+
+def _sofascore_get(path: str, params=None):
+    """GET contra api.sofascore.com con cache, backoff y registro de salud.
+
+    Sofascore protege su API con Cloudflare validando la huella TLS: las
+    peticiones se hacen con curl_cffi impersonando Chrome (si esta
+    disponible); fallback a requests normal (suele dar 403).
+    """
+    global _sofascore_bloqueado_hasta
+    ahora = time.time()
+    if ahora < _sofascore_bloqueado_hasta:
+        return None
+    cache_key = f"{path}:{params.get('q', '') if params else ''}"
+    cached = _sofascore_cache.get(cache_key)
+    if cached and ahora - cached[0] < _SOFASCORE_TTL:
+        return cached[1]
+    url = f"{SOFASCORE_API}{path}"
+    data = None
+    # 1) curl_cffi con TLS de Chrome real (pasa el antibot de Cloudflare)
+    try:
+        from curl_cffi import requests as curl_requests
+
+        r = curl_requests.get(
+            url,
+            params=params or {},
+            impersonate="chrome124",
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+    except Exception as exc:
+        _salud["sofascore_estado"] = f"curl_cffi: {exc}"
+    # 2) Fallback: requests normal (por si curl_cffi no esta instalado)
+    if data is None:
+        try:
+            import requests
+
+            r = requests.get(
+                url,
+                params=params or {},
+                headers=_SOFASCORE_HEADERS,
+                timeout=10,
+            )
+            if r.status_code in (403, 429, 451):
+                _sofascore_bloqueado_hasta = ahora + _SOFASCORE_BACKOFF
+                _salud["sofascore_estado"] = f"bloqueado ({r.status_code})"
+                print(
+                    f"[Dashboard] Sofascore bloqueado ({r.status_code}); pausa 15 min",
+                    flush=True,
+                )
+                return None
+            if r.status_code == 200:
+                data = r.json()
+        except Exception as exc:
+            _salud["sofascore_estado"] = f"error: {exc}"
+    if data is not None:
+        _sofascore_cache[cache_key] = (ahora, data)
+        _salud["sofascore_estado"] = "ok"
+    return data
+
+
+def _coincide_nombres(nombre: str, team: dict) -> bool:
+    a = _norm_texto(nombre)
+    b = _norm_texto((team or {}).get("name") or (team or {}).get("fullName") or "")
+    return bool(a) and bool(b) and (a in b or b in a)
+
+
+def _sofascore_encontrar_evento(pick: dict):
+    """Busca el evento del pick en Sofascore (validando fecha ±12h).
+
+    Devuelve el dict del evento (con homeScore/awayScore/status/startTimestamp)
+    o None si no lo encuentra.
+    """
+    home = pick.get("homeName") or ""
+    away = pick.get("awayName") or ""
+    if not home or not away:
+        return None
+    try:
+        fecha_pick = datetime.fromisoformat(
+            str(pick.get("eventDate") or "").replace("Z", "+00:00")
+        )
+    except (ValueError, TypeError):
+        fecha_pick = None
+
+    data = _sofascore_get("/search/all", {"q": f"{home} {away}"})
+    for item in (data or {}).get("results") or []:
+        if item.get("type") != "event":
+            continue
+        ev = item.get("entity") or item
+        start = ev.get("startTimestamp")
+        if fecha_pick is not None and start:
+            try:
+                fecha_ev = datetime.fromtimestamp(int(start), timezone.utc)
+            except (ValueError, TypeError, OverflowError, OSError):
+                continue
+            if abs((fecha_ev - fecha_pick).total_seconds()) > 12 * 3600:
+                continue  # mismo duelo pero OTRA fecha: descartar
+        h_team = ev.get("homeTeam") or {}
+        a_team = ev.get("awayTeam") or {}
+        # Solo importa que esten los DOS equipos del pick, sin importar quien
+        # es local (el mismo duelo aparece en ambos ordenes en la busqueda).
+        if not (
+            (_coincide_nombres(home, h_team) or _coincide_nombres(home, a_team))
+            and (_coincide_nombres(away, h_team) or _coincide_nombres(away, a_team))
+        ):
+            continue
+        return ev
+    return None
+
+
+def _sofascore_stat_total(pick: dict, claves_stat):
+    """Total (local+visitante) de una estadistica del partido via Sofascore.
+
+    claves_stat: tuplas de substrings del key de la estadistica
+    (ej. ('yellowcards', 'redcards') para tarjetas, ('corners',) para corners).
+    Solo cuenta si el partido ya termino. Devuelve int o None.
+    """
+    ev = _sofascore_encontrar_evento(pick)
+    if not ev:
+        return None
+    if ((ev.get("status") or {}).get("type") or "") != "finished":
+        return None
+    st = _sofascore_get(f"/event/{ev.get('id')}/statistics") or {}
+    for grp in st.get("statistics") or []:
+        if (grp.get("period") or "").upper() != "ALL":
+            continue
+        total = 0
+        encontrado = False
+        for gi in grp.get("groups") or []:
+            for si in gi.get("statisticsItems") or []:
+                k = (si.get("key") or "").lower()
+                if any(c in k for c in claves_stat):
+                    try:
+                        total += int(si.get("home") or 0) + int(si.get("away") or 0)
+                        encontrado = True
+                    except (TypeError, ValueError):
+                        pass
+        if encontrado:
+            return total
+    return None
+
+
+def _detalle_desde_sofascore(pick: dict):
+    """Marcador desde api.sofascore.com para el evento del pick.
+
+    Devuelve el detalle en el mismo formato que ESPN/odds-api:
+    {"state": "post"|"in", "teams": [{name, score, homeAway}, ...]}
+    """
+    home = pick.get("homeName") or ""
+    away = pick.get("awayName") or ""
+    if not home or not away:
+        return None
+    ev = _sofascore_encontrar_evento(pick)
+    if not ev:
+        return None
+    hs = (ev.get("homeScore") or {}).get("current")
+    as_ = (ev.get("awayScore") or {}).get("current")
+    # En /search/all el score viene como 'display' (no 'current')
+    if hs is None:
+        hs = (ev.get("homeScore") or {}).get("display")
+    if as_ is None:
+        as_ = (ev.get("awayScore") or {}).get("display")
+    if hs is None or as_ is None:
+        return None
+    estado = (ev.get("status") or {}).get("type") or ""
+    if estado == "finished":
+        state = "post"
+    elif estado == "inprogress":
+        state = "in"
+    else:
+        state = "pre"
+    h_team = ev.get("homeTeam") or {}
+    a_team = ev.get("awayTeam") or {}
+    # Reorientar al orden del pick (home/away de NUESTRA BD) para que el
+    # resolutor deterministico siga funcionando igual.
+    local_en_sofascore = _coincide_nombres(home, h_team)
+    home_score = hs if local_en_sofascore else as_
+    away_score = as_ if local_en_sofascore else hs
+    return {
+        "state": state,
+        "teams": [
+            {"name": home, "score": home_score, "homeAway": "home"},
+            {"name": away, "score": away_score, "homeAway": "away"},
+        ],
+    }
+
+
+def _marcador_discrepa(d1: dict, d2: dict) -> bool:
+    """True si los dos detalles dan marcadores finales DISTINTOS."""
+    def _score_map(d):
+        m = {}
+        for t in d.get("teams") or []:
+            try:
+                m[t.get("homeAway")] = float(t.get("score"))
+            except (TypeError, ValueError):
+                return None
+        return m if "home" in m and "away" in m else None
+
+    s1, s2 = _score_map(d1), _score_map(d2)
+    if not s1 or not s2:
+        return False
+    return s1["home"] != s2["home"] or s1["away"] != s2["away"]
+
+
 def _detalle_desde_oddsapi(pick: dict):
     """Fallback: marcador final desde odds-api.io (eventos settled incluyen scores).
 
     Permite resolver picks de partidos que ya no aparecen en ESPN.
+    IMPORTANTE: solo cuenta el evento si su FECHA coincide con la del pick
+    (±12h). Sin ese guard, el matching por nombre de equipos resolvía el pick
+    de HOY con el resultado del mismo duelo de AYER (o de hace una semana).
     """
     slug = ODDS_SPORT_SLUGS.get(pick["sport"])
     if not slug:
         return None
+
+    def _fecha_evento_pick():
+        try:
+            return datetime.fromisoformat(
+                str(pick.get("eventDate") or "").replace("Z", "+00:00")
+            )
+        except (ValueError, TypeError):
+            return None
+
+    fecha_pick = _fecha_evento_pick()
 
     eventos = _odds_eventos(slug)
 
@@ -980,6 +1686,16 @@ def _detalle_desde_oddsapi(pick: dict):
         scores = e.get("scores") or {}
         if scores.get("home") is None or scores.get("away") is None:
             continue
+        # Guard de fecha: el evento debe ser el MISMO duelo (misma fecha ±12h)
+        if fecha_pick is not None:
+            try:
+                fecha_evento = datetime.fromisoformat(
+                    str(e.get("date", "")).replace("Z", "+00:00")
+                )
+            except (ValueError, TypeError):
+                continue
+            if abs((fecha_evento - fecha_pick).total_seconds()) > 12 * 3600:
+                continue
         if _coincide(e.get("home", ""), pick.get("homeName") or "") and _coincide(
             e.get("away", ""), pick.get("awayName") or ""
         ):
@@ -1034,23 +1750,92 @@ def resolver_picks_finalizados() -> dict:
         except Exception:
             continue
 
+        # Verificacion OBLIGATORIA con api.sofascore.com (tercera fuente).
+        # Si Sofascore tiene el partido finalizado y su marcador DIFIERE del de
+        # ESPN/odds-api, el pick NO se resuelve (queda PENDIENTE para
+        # re-verificar en el proximo ciclo). Si ESPN/odds-api no dieron
+        # marcador, el de Sofascore se usa directo.
+        try:
+            sofascore = _detalle_desde_sofascore(pick)
+        except Exception:
+            sofascore = None
+        if sofascore and sofascore.get("state") == "post":
+            if detail and detail.get("state") == "post" and _marcador_discrepa(detail, sofascore):
+                print(
+                    f"[Dashboard] Pick {pick['id']}: discrepancia de marcador entre "
+                    f"ESPN/odds-api y Sofascore; queda PENDIENTE",
+                    flush=True,
+                )
+                _salud["marcadores_discrepantes"] = _salud.get("marcadores_discrepantes", 0) + 1
+                continue
+            if not detail or detail.get("state") != "post":
+                detail = sofascore
+
         if detail.get("state") != "post" or len(detail.get("teams") or []) < 2:
             continue
 
-        # 1) Reglas directas con el marcador
+        # 1) Reglas directas con el marcador (mismo duelo, guard de fecha)
         resultado = _resolver_deterministico(pick, detail)
-        # 2) IA solo si el mercado no es determinable con el marcador
-        if resultado is None:
-            resultado = _resolver_pick_con_ia(pick)
         if resultado:
             db.update_pick_result(pick["id"], resultado)
             resueltos += 1
+            continue
+
+        # 1.5) Mercados con estadistica real disponible:
+        #   - props de jugador MLB -> boxscore oficial (statsapi)
+        #   - tarjetas/corners futbol -> estadisticas de Sofascore
+        # El marcador global NO determina estos mercados (la IA adivinaba).
+        try:
+            resultado = _resolver_prop_mlb(pick) or _resolver_stats_sofascore(pick)
+        except Exception:
+            resultado = None
+        if resultado:
+            db.update_pick_result(pick["id"], resultado)
+            resueltos += 1
+            continue
+
+        # 2) IA solo si el mercado no es determinable con el marcador.
+        #    El resultado de la IA SOLO se acepta si la verificacion estricta
+        #    multi-fuente (Sofascore/Flashscore/Fotmob, 6 pasadas) coincide
+        #    con el mismo veredicto; si no, el pick queda PENDIENTE.
+        ia_resultado = _resolver_pick_con_ia(pick)
+        if ia_resultado is None:
+            continue
+        marcador = " vs ".join(
+            f"{t.get('name', '?')} {t.get('score', '-')}"
+            for t in (detail.get("teams") or [])
+        )
+        verificado = _verificar_acierto_con_fuentes(pick, marcador)
+        if verificado is None or verificado != ia_resultado:
+            print(
+                f"[Dashboard] Pick {pick.get('id')} queda PENDIENTE: "
+                f"IA={ia_resultado} verificacion={verificado}",
+                flush=True,
+            )
+            continue
+        db.update_pick_result(pick["id"], verificado)
+        resueltos += 1
     return {"pendientes": len(pendientes), "resueltos": resueltos}
 
 
 # ============================================================
 # RESUMEN PARA EL DASHBOARD
 # ============================================================
+
+
+def _label_ayer_confusion(pick: dict) -> str | None:
+    """Etiqueta para picks de AYER: 'Ayer (HH:MM) LA GENTE SE ESTA CONFUNDIENDO'.
+
+    La hora es la hora a la que se jugo el evento, en hora Nicaragua.
+    """
+    try:
+        dt = datetime.fromisoformat(
+            str(pick.get("eventDate") or "").replace("Z", "+00:00")
+        )
+        local = dt.astimezone(TZ_NICARAGUA)
+        return f"Ayer ({local.strftime('%H:%M')}) LA GENTE SE ESTÁ CONFUNDIENDO"
+    except (ValueError, TypeError):
+        return "AYER LA GENTE SE ESTÁ CONFUNDIENDO"
 
 
 def aciertos_visibles() -> list:
@@ -1067,9 +1852,30 @@ def aciertos_visibles() -> list:
     for p in aciertos:
         if not _pick_calidad_ok(p):
             continue
-        es_ayer = (p.get("pickDate") or "") < ahora_local.date().isoformat()
+        # "De ayer" se decide por la fecha en que SE JUGO el evento y tambien
+        # por cuando se creo el pick (regla del usuario: al pasar las 12:00,
+        # todo lo del dia anterior debe decir AYER).
+        es_ayer = False
+        try:
+            dt_ev = datetime.fromisoformat(
+                str(p.get("eventDate") or "").replace("Z", "+00:00")
+            )
+            es_ayer = dt_ev.astimezone(TZ_NICARAGUA).date() < ahora_local.date()
+        except (ValueError, TypeError):
+            pass
+        if not es_ayer:
+            try:
+                dt_cr = datetime.fromisoformat(p.get("createdAt") or "")
+                es_ayer = (
+                    dt_cr.replace(tzinfo=timezone.utc).astimezone(TZ_NICARAGUA).date()
+                    < ahora_local.date()
+                )
+            except (ValueError, TypeError):
+                es_ayer = (p.get("pickDate") or "") < ahora_local.date().isoformat()
         if es_ayer and not mostrar_ayer:
             continue
+        if es_ayer:
+            p["fechaLabel"] = _label_ayer_confusion(p)
         visibles.append(p)
     return visibles
 
@@ -1185,8 +1991,11 @@ def resumen_dashboard(username: str) -> dict:
     picks = db.list_picks_hoy() or []
     aciertos_hoy = [p for p in picks if p.get("result") == "ACIERTO"]
     fallados = [p for p in picks if p.get("result") == "FALLO"]
+    # Pendientes VIGENTES: se incluyen los creados ayer para partidos de hoy o
+    # manana (ej. la IA genero picks a las 9 PM para el futbol del dia
+    # siguiente). Se filtran por evento vigente + calidad, no por pick_date.
     pendientes = [
-        p for p in picks
+        p for p in (db.list_picks_pendientes() or [])
         if p.get("result") == "PENDIENTE"
         and _pick_calidad_ok(p)
         and _evento_vigente(p)
@@ -1238,6 +2047,7 @@ _generando = threading.Lock()
 
 def _ciclo():
     with _generando:
+        _salud["ultimo_ciclo"] = datetime.now(timezone.utc).isoformat()
         try:
             reparados = backfill_picks_metadata()
             if reparados:
@@ -1246,8 +2056,19 @@ def _ciclo():
             print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
         try:
             stats = generar_picks_dia()
+            _salud["generaciones_fallidas"] = 0
+            if stats.get("generados", 0) > 0:
+                _salud["ultima_generacion_ts"] = time.time()
+                _salud["ultima_generacion_con_picks"] = datetime.now(timezone.utc).isoformat()
             print(f"[Dashboard] Picks automaticos: {stats}", flush=True)
         except Exception:
+            _salud["generaciones_fallidas"] = _salud.get("generaciones_fallidas", 0) + 1
+            if _salud["generaciones_fallidas"] >= 5:
+                print(
+                    f"[Dashboard] ADVERTENCIA (idea 20): {_salud['generaciones_fallidas']} "
+                    f"ciclos consecutivos fallidos generando picks",
+                    flush=True,
+                )
             print("[Dashboard] Error en ciclo de picks:\n" + traceback.format_exc(), flush=True)
         try:
             res = resolver_picks_finalizados()
@@ -1255,6 +2076,65 @@ def _ciclo():
                 print(f"[Dashboard] Picks resueltos: {res}", flush=True)
         except Exception:
             print("[Dashboard] Error resolviendo picks:\n" + traceback.format_exc(), flush=True)
+        _vigilante()
+        _archivo_diario()
+
+
+# Idea 18: si hace 3h+ que no se genera ningun pick, fuerza un ciclo
+_UMBRAL_VIGILANTE_HORAS = 3
+
+
+def _vigilante():
+    """Vigilante: fuerza el analisis si el scheduler lleva horas sin generar."""
+    if _hora_nicaragua().hour < HORA_INICIO_ANALISIS:
+        return  # respeta la ventana de analisis (9 PM Nicaragua)
+    ahora_ts = time.time()
+    ultimo = max(
+        _salud.get("ultima_generacion_ts", 0.0),
+        _salud.get("ultimo_forzado_ts", 0.0),
+    )
+    if ahora_ts - ultimo < _UMBRAL_VIGILANTE_HORAS * 3600:
+        return
+    _salud["ultimo_forzado_ts"] = ahora_ts
+    print("[Dashboard] VIGILANTE: sin picks nuevos hace 3h+; forzando analisis", flush=True)
+    try:
+        stats = generar_picks_dia(forzar=True)
+        if stats.get("generados", 0) > 0:
+            _salud["ultima_generacion_ts"] = time.time()
+            _salud["ultima_generacion_con_picks"] = datetime.now(timezone.utc).isoformat()
+        print(f"[Dashboard] VIGILANTE resultado: {stats}", flush=True)
+    except Exception:
+        print("[Dashboard] VIGILANTE fallo:\n" + traceback.format_exc(), flush=True)
+
+
+def _archivo_diario():
+    """Idea 19: una vez al dia archiva los picks de hace mas de 30 dias."""
+    hoy = _hora_nicaragua().date().isoformat()
+    if _salud.get("archivo_ultimo_dia") == hoy:
+        return
+    try:
+        movidos = db.archivar_picks_antiguos(30)
+        _salud["archivo_ultimo_dia"] = hoy
+        if movidos:
+            print(f"[Dashboard] Archivados {movidos} picks con mas de 30 dias", flush=True)
+    except Exception:
+        print("[Dashboard] Error archivando picks:\n" + traceback.format_exc(), flush=True)
+
+
+def salud_scheduler() -> dict:
+    """Idea 20: estado del scheduler para monitoreo (endpoint /dashboard/salud)."""
+    s = dict(_salud)
+    s["ventana_analisis"] = f"{HORA_INICIO_ANALISIS}:00 Nicaragua"
+    s["verificaciones_por_acierto"] = VERIFICACIONES_ACIERTO
+    if _salud.get("ultima_generacion_ts"):
+        s["ultima_generacion_hace_min"] = round(
+            (time.time() - _salud["ultima_generacion_ts"]) / 60, 1
+        )
+    try:
+        s["pendientes"] = len(db.list_picks_pendientes() or [])
+    except Exception:
+        s["pendientes"] = None
+    return s
 
 
 def _loop():

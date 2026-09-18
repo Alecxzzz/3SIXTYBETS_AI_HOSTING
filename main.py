@@ -841,6 +841,12 @@ def dashboard_acertados(user=Depends(get_current_user)):
     return {"acertados": dashboard.aciertos_visibles()}
 
 
+@app.get("/dashboard/salud")
+def dashboard_salud(user=Depends(get_current_user)):
+    """Idea 20: monitoreo del scheduler (vigilante, Sofascore, archivo BD)."""
+    return dashboard.salud_scheduler()
+
+
 @app.post("/dashboard/generate")
 def dashboard_generate(user=Depends(get_admin)):
     """Fuerza la generacion de picks ahora (admin)."""
@@ -987,9 +993,9 @@ from pagadito_client import (
 
 # Planes: sobreescribir con PAGADITO_PLANS='[{"code":"plan15","description":"...","amount":5,"days":15}, ...]'
 DEFAULT_PLANS = [
-    {"code": "plan15", "description": "PREMIUM 3SIXTYBETS - 15 dias", "amount": 10.00, "days": 15},
+    {"code": "plan15", "description": "BASICO 3SIXTYBETS - 15 dias", "amount": 10.00, "days": 15},
     {"code": "plan30", "description": "PREMIUM 3SIXTYBETS - 30 dias", "amount": 15.00, "days": 30},
-    {"code": "plan60", "description": "PREMIUM 3SIXTYBETS - 60 dias", "amount": 25.00, "days": 60},
+    {"code": "plan60", "description": "VIP 3SIXTYBETS - 60 dias", "amount": 25.00, "days": 60},
 ]
 
 class PagaditoPaymentIn(BaseModel):
