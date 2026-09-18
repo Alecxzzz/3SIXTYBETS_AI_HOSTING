@@ -155,11 +155,33 @@ class SearchEngine:
             return {"answer": "ERROR: Falta la API key para You.com en el backend."}
 
         consulta = f"{system_prompt}\n\n{query}".strip() if system_prompt else query
-        # La API a veces ignora "language": pedimos espanol en la consulta.
-        consulta += "\n\nResponde SIEMPRE en espanol."
-        LIMITE_INPUT = 39000
-        if len(consulta) > LIMITE_INPUT:
-            consulta = consulta[:LIMITE_INPUT].rstrip()
+        # /v1/answer limita 'query' a 400 caracteres: no cabe el prompt largo
+        # de sistema. Se comprime el system prompt (una linea), se recorta y
+        # la pregunta del usuario tiene prioridad sobre el prefijo.
+        LIMITE_QUERY = 400
+        SUFIJO_ES = " Responde SIEMPRE en espanol."
+        pregunta = query.strip()
+        prefijo = ""
+        if system_prompt:
+            comprimido = " ".join(system_prompt.split())
+            espacio = LIMITE_QUERY - len(pregunta) - len(SUFIJO_ES) - 4
+            if espacio > 60:
+                prefijo = comprimido[:espacio]
+                corte = prefijo.rfind(" ")
+                if corte > 40:
+                    prefijo = prefijo[:corte]
+                prefijo += "..."
+        total = len(prefijo) + len(pregunta) + len(SUFIJO_ES) + (4 if prefijo else 0)
+        if total > LIMITE_QUERY:
+            # la pregunta manda: recortar el prefijo (o quitarlo si no cabe)
+            exceso = total - LIMITE_QUERY
+            if prefijo and exceso < len(prefijo) - 60:
+                prefijo = prefijo[:-exceso].rsplit(" ", 1)[0] + "..."
+            else:
+                prefijo = ""
+                pregunta = pregunta[: LIMITE_QUERY - len(SUFIJO_ES)]
+        consulta = (f"{prefijo}\n\n{pregunta}" if prefijo else pregunta) + SUFIJO_ES
+        consulta = consulta[:LIMITE_QUERY]
 
         effort = normalizar_research_effort(
             research_effort or os.getenv("YOU_RESEARCH_EFFORT", "deep")

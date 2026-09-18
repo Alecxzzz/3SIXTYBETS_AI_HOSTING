@@ -119,7 +119,8 @@ Solicitud del usuario:
         "X-API-Key": api_key,
     }
     payload = {
-        "query": trim_text(full_prompt, 39000),
+        # /v1/answer limita 'query' a 400 caracteres
+        "query": trim_text(full_prompt, 400),
         "freshness": os.getenv("YOU_FRESHNESS", "day"),
         "research_effort": research_effort,
         "extraction": {
