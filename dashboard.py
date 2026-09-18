@@ -256,7 +256,7 @@ def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
     Matching difuso por nombre de equipos contra los eventos del deporte.
     Devuelve "" si no hay coincidencia o no hay cuotas.
     """
-    evento, mercados = _evento_oddsapi_con_mercados(sport, home_name, away_name)
+    evento, mercados, _local = _evento_oddsapi_con_mercados(sport, home_name, away_name)
     if not evento or not mercados:
         return ""
 
@@ -295,6 +295,15 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
     )
     if not mercados:
         return None
+    # DORADOBET (Altenar) tiene prioridad: es la casa donde apuesta la gente.
+    try:
+        from cuotas_doradobet import cuota_doradobet
+
+        cuota_dorado = cuota_doradobet(sport, home_name, away_name, market, selection, titulo)
+        if cuota_dorado:
+            return cuota_dorado
+    except Exception as exc:
+        print(f"[Dashboard] Error cuotas Doradobet: {exc}", flush=True)
 
     texto = f"{market} {titulo} {selection}".lower()
     nh, na = _norm_texto(home_name), _norm_texto(away_name)
@@ -637,10 +646,8 @@ def _partidos_hoy():
             for g in data.get("games", []):
                 if g.get("state") == "post":
                     continue  # ya finalizados: no generar pick nuevo
-                # Partidos de HOY o MANANA (hora Nicaragua) o que esten en vivo:
-                # el scoreboard ahora trae tambien manana y pasado manana.
-                # Incluir manana permite que la IA analice YA los proximos
-                # partidos cuando ya no queda nada por jugar hoy.
+                # Solo partidos de HOY (hora Nicaragua) o que esten en vivo.
+                # El usuario NO quiere picks de manana.
                 if g.get("state") != "in":
                     try:
                         fecha = datetime.fromisoformat(
@@ -648,7 +655,7 @@ def _partidos_hoy():
                         ).astimezone(sports.TZ_NIC).date()
                     except (ValueError, TypeError):
                         fecha = ahora_local.date()
-                    if fecha not in (ahora_local.date(), ahora_local.date() + timedelta(days=1)):
+                    if fecha != ahora_local.date():
                         continue
                 home = g.get("home") or {}
                 away = g.get("away") or {}

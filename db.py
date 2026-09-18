@@ -1062,6 +1062,18 @@ def list_picks_aciertos_hoy_ayer():
     return [public_ai_pick(r) for r in (rows or [])]
 
 
+def _param_seguro(valor):
+    """Blindaje: pymysql no acepta dict/list; se serializan como JSON."""
+    import json as _json
+
+    if isinstance(valor, (dict, list)):
+        try:
+            return _json.dumps(valor, ensure_ascii=False)
+        except Exception:
+            return str(valor)
+    return valor
+
+
 def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
@@ -1076,11 +1088,14 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
          selection, porque, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
         values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
         """,
-        (
-            pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
-            home_logo, away_logo, event_date, market, titulo, league,
-            selection, porque, odds, confidence, rationale, stats, model,
-            now_utc().date(), now_utc(),
+        tuple(
+            _param_seguro(v)
+            for v in (
+                pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
+                home_logo, away_logo, event_date, market, titulo, league,
+                selection, porque, odds, confidence, rationale, stats, model,
+                now_utc().date(), now_utc(),
+            )
         ),
     )
     if not ok:
