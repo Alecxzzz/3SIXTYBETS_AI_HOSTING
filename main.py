@@ -2303,14 +2303,35 @@ def free_espn_match():
 
 @app.get("/tv-live/stream")
 def free_espn_stream(request: Request):
-    """m3u8 por el proxy HLS (publico). Usa el stream fijo del partido.
+    """m3u8 por el proxy HLS (publico). Cadena de respaldo validada:
 
-    Si el partido esta en la agenda se respeta la ventana de 2 horas; si la
-    agenda falla, se entrega el stream igual (mejor sirve que bloquear).
+    1. Stream oficial (token Akamai; vence rapido, se valida en vivo).
+    2. Evento del partido en la TV (Partidos de Hoy): token fresco de su
+       pagina de la fuente; si no, el token guardado en la BD.
+    3. Stream fijo de respaldo.
+    Se sirve el PRIMERO que responda 200 con #EXTM3U.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
-    url_fija = "https://1309591.akamaized.net/hls/live/2039590/prod01/mmrtdbwcbmdj1rvgkc4yuisg4.m3u8?hdnea=st=1789845729~exp=1789845789~acl=/*/2039590*~id=f109cf8be9004996a26e137cfcf3b26c~hmac=c8db13c7f01c4323e4bde953a99ac215b1163c297c57bcac64eeb73707ea1bd9&reportingKey=eventId-2559767_partnerId-13819&unique_id=f109cf8be9004996a26e137cfcf3b26c"
+    url_oficial = (
+        "https://1309591.akamaized.net/hls/live/2039590/prod01/"
+        "mmrtdbwcbmdj1rvgkc4yuisg4.m3u8?hdnea=st=1789845729~exp=1789845789"
+        "~acl=/*/2039590*~id=f109cf8be9004996a26e137cfcf3b26c"
+        "~hmac=c8db13c7f01c4323e4bde953a99ac215b1163c297c57bcac64eeb73707ea1bd9"
+        "&reportingKey=eventId-2559767_partnerId-13819"
+        "&unique_id=f109cf8be9004996a26e137cfcf3b26c"
+    )
+    url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
+
+    def _vivo(u: str, referer: str | None = None) -> bool:
+        try:
+            headers = {"User-Agent": HLS_USER_AGENT}
+            if referer:
+                headers["Referer"] = referer
+            r = http_requests.get(u, headers=headers, timeout=8)
+            return r.status_code == 200 and "#EXTM3U" in r.text
+        except Exception:
+            return False
 
     cierre = None
     try:
@@ -2326,11 +2347,50 @@ def free_espn_stream(request: Request):
     except HTTPException:
         raise
 
+    # --- Cadena de candidatos ---
+    candidatos = [url_oficial]
+
+    try:
+        tokens = [t.lower() for t in FREE_ESPN_MATCH]
+        for ev in db.list_events() or []:
+            nombre = (ev.get("name") or "").lower()
+            if all(t in nombre for t in tokens):
+                page = ev.get("referer") or ""
+                # Token FRESCO desde la pagina de la fuente (vence rapido)
+                if page.startswith("http"):
+                    try:
+                        resp = http_requests.get(
+                            page,
+                            headers={
+                                "User-Agent": HLS_USER_AGENT,
+                                "Referer": "https://la18hd.su/",
+                            },
+                            timeout=12,
+                        )
+                        m = re.search(
+                            r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
+                        )
+                        if m:
+                            candidatos.append(m.group(1))
+                    except Exception:
+                        pass
+                guardado = ev.get("stream") or ""
+                if guardado.startswith("http"):
+                    candidatos.append(guardado)
+    except Exception:
+        pass
+
+    candidatos.append(url_fija)
+
     proxy_base = _proxy_base(request)
-    respuesta = {"url": _wrap(url_fija, proxy_base)}
-    if cierre:
-        respuesta["expira"] = cierre.isoformat()
-    return respuesta
+    for candidato in candidatos:
+        if _vivo(candidato):
+            respuesta = {"url": _wrap(candidato, proxy_base)}
+            if cierre:
+                respuesta["expira"] = cierre.isoformat()
+            return respuesta
+
+    raise HTTPException(502, "Ninguna senal del partido esta disponible ahora mismo.")
 
 
 @app.post("/admin/events")
