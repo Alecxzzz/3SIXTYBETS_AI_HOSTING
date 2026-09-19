@@ -2303,39 +2303,34 @@ def free_espn_match():
 
 @app.get("/free-espn/stream")
 def free_espn_stream(request: Request):
-    """m3u8 de ESPN Deportes por el proxy HLS (publico SOLO en la ventana)."""
-    from datetime import datetime, timezone
+    """m3u8 por el proxy HLS (publico). Usa el stream fijo del partido.
 
-    game = _free_espn_buscar_partido()
-    if not game:
-        raise HTTPException(404, "Partido destacado no encontrado.")
-    apertura, cierre = _free_espn_ventana(game)
-    ahora = datetime.now(timezone.utc)
-    if ahora < apertura:
-        segundos = int((apertura - ahora).total_seconds())
-        raise HTTPException(403, f"El acceso gratis abre en {segundos // 60} minutos.")
-    if ahora > cierre:
-        raise HTTPException(403, "Las 2 horas de acceso gratis terminaron.")
+    Si el partido esta en la agenda se respeta la ventana de 2 horas; si la
+    agenda falla, se entrega el stream igual (mejor sirve que bloquear).
+    """
+    from datetime import datetime, timedelta, timezone
 
-    # Resolver ESPN Deportes desde la fuente (mismo mecanismo de la TV).
-    import event_scheduler
+    url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
 
-    ev = {
-        "link": "https://la18hd.su/vivo/canales.php?stream=espnndeportes",
-        "date": (game.get("date") or "")[:10],
-        "time": "00:00",
-        "title": "ESPN Deportes Gratis",
-        "language": "",
-    }
-    evento = event_scheduler._procesar_evento(ev)
-    if not evento:
-        raise HTTPException(502, "El stream de ESPN Deportes no esta disponible ahora mismo.")
+    cierre = None
+    try:
+        game = _free_espn_buscar_partido()
+        if game:
+            apertura, cierre = _free_espn_ventana(game)
+            ahora = datetime.now(timezone.utc)
+            if ahora < apertura:
+                segundos = int((apertura - ahora).total_seconds())
+                raise HTTPException(403, f"El acceso abre en {segundos // 60} minutos.")
+            if ahora > cierre:
+                raise HTTPException(403, "El acceso gratuito termino.")
+    except HTTPException:
+        raise
 
     proxy_base = _proxy_base(request)
-    return {
-        "url": _wrap(evento["stream"], proxy_base, evento.get("referer")),
-        "expira": cierre.isoformat(),
-    }
+    respuesta = {"url": _wrap(url_fija, proxy_base)}
+    if cierre:
+        respuesta["expira"] = cierre.isoformat()
+    return respuesta
 
 
 @app.post("/admin/events")
