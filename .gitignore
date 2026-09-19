@@ -6,3 +6,6 @@ node_modules/
 dist/
 uvicorn.log
 nul
+
+logs_picks_forzado.log
+logs_picks_forzado.err
