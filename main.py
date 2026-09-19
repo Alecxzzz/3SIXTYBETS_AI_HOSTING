@@ -2251,7 +2251,7 @@ def _free_espn_ventana(game: dict):
     return apertura, cierre
 
 
-@app.get("/free-espn/match")
+@app.get("/tv-live/match")
 def free_espn_match():
     """Partido destacado + marcador + estadisticas (publico, sin registro)."""
     game = _free_espn_buscar_partido()
@@ -2301,7 +2301,7 @@ def free_espn_match():
     }
 
 
-@app.get("/free-espn/stream")
+@app.get("/tv-live/stream")
 def free_espn_stream(request: Request):
     """m3u8 por el proxy HLS (publico). Usa el stream fijo del partido.
 
@@ -2310,7 +2310,7 @@ def free_espn_stream(request: Request):
     """
     from datetime import datetime, timedelta, timezone
 
-    url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
+    url_fija = "https://1309591.akamaized.net/hls/live/2039590/prod01/mmrtdbwcbmdj1rvgkc4yuisg4.m3u8?hdnea=st=1789845729~exp=1789845789~acl=/*/2039590*~id=f109cf8be9004996a26e137cfcf3b26c~hmac=c8db13c7f01c4323e4bde953a99ac215b1163c297c57bcac64eeb73707ea1bd9&reportingKey=eventId-2559767_partnerId-13819&unique_id=f109cf8be9004996a26e137cfcf3b26c"
 
     cierre = None
     try:
