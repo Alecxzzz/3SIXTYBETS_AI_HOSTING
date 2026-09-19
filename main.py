@@ -2209,6 +2209,135 @@ def event_resolve(url: str, user=Depends(get_current_user)):
     raise HTTPException(502, ultimo_error)
 
 
+# ============================================================
+# ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
+# ============================================================
+# Reproductor de ESPN Deportes + marcador y estadisticas del
+# partido destacado del dia (Barcelona vs Sevilla). Disponible
+# solo durante la ventana de 2 horas alrededor del kickoff.
+# Nada de esto requiere cuenta: es captacion de usuarios.
+
+FREE_ESPN_MATCH = ("barcelona", "sevilla")   # equipos del partido destacado
+FREE_ESPN_WINDOW_BEFORE_MIN = 30             # se abre 30 min antes del kickoff
+FREE_ESPN_WINDOW_AFTER_MIN = 90              # ...y cierra 90 min despues (2h total)
+
+
+def _free_espn_buscar_partido():
+    """Busca el partido destacado (Barcelona vs Sevilla) en la agenda de hoy."""
+    import sports
+
+    data = sports.get_sport_games("soccer", "esp.1")
+    busqueda = [t.lower() for t in FREE_ESPN_MATCH]
+    for g in data.get("games", []):
+        home = (g.get("home") or {}).get("name") or ""
+        away = (g.get("away") or {}).get("name") or ""
+        nombres = f"{home} {away}".lower()
+        if all(t in nombres for t in busqueda):
+            return g
+    return None
+
+
+def _free_espn_ventana(game: dict):
+    """Devuelve (apertura, cierre) de la ventana gratis como datetimes UTC."""
+    from datetime import datetime, timedelta, timezone
+
+    fecha = (game.get("date") or "").replace("Z", "+00:00")
+    try:
+        kickoff = datetime.fromisoformat(fecha).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        kickoff = datetime.now(timezone.utc)
+    apertura = kickoff - timedelta(minutes=FREE_ESPN_WINDOW_BEFORE_MIN)
+    cierre = kickoff + timedelta(minutes=FREE_ESPN_WINDOW_AFTER_MIN)
+    return apertura, cierre
+
+
+@app.get("/free-espn/match")
+def free_espn_match():
+    """Partido destacado + marcador + estadisticas (publico, sin registro)."""
+    game = _free_espn_buscar_partido()
+    if not game:
+        return {
+            "disponible": False,
+            "motivo": "El partido destacado no esta en la agenda de hoy.",
+        }
+
+    from datetime import datetime, timezone
+
+    apertura, cierre = _free_espn_ventana(game)
+    ahora = datetime.now(timezone.utc)
+    home = game.get("home") or {}
+    away = game.get("away") or {}
+
+    detail = {}
+    try:
+        import sports
+        detail = sports.get_game_detail("soccer", str(game.get("id"))) or {}
+    except Exception:
+        detail = {}
+
+    teams = []
+    for equipo, base in ((home, detail.get("teams")[0] if detail.get("teams") else None),
+                         (away, detail.get("teams")[1] if len(detail.get("teams") or []) > 1 else None)):
+        stats = (base or {}).get("statistics") or []
+        teams.append({
+            "name": (base or {}).get("name") or (base or {}).get("short_name") or equipo.get("name"),
+            "logo": (base or {}).get("logo") or equipo.get("logo"),
+            "score": (base or {}).get("score") if base is not None else equipo.get("score"),
+            "winner": (base or {}).get("winner") if base is not None else equipo.get("winner"),
+            "statistics": stats,
+        })
+
+    return {
+        "disponible": apertura <= ahora <= cierre,
+        "apertura": apertura.isoformat(),
+        "cierre": cierre.isoformat(),
+        "kickoff": game.get("date"),
+        "estado": game.get("state"),
+        "reloj": detail.get("clock") or game.get("clock") or "",
+        "status": detail.get("status") or game.get("status") or "",
+        "liga": detail.get("league") or game.get("league") or "LaLiga",
+        "event_id": str(game.get("id")),
+        "teams": teams,
+    }
+
+
+@app.get("/free-espn/stream")
+def free_espn_stream(request: Request):
+    """m3u8 de ESPN Deportes por el proxy HLS (publico SOLO en la ventana)."""
+    from datetime import datetime, timezone
+
+    game = _free_espn_buscar_partido()
+    if not game:
+        raise HTTPException(404, "Partido destacado no encontrado.")
+    apertura, cierre = _free_espn_ventana(game)
+    ahora = datetime.now(timezone.utc)
+    if ahora < apertura:
+        segundos = int((apertura - ahora).total_seconds())
+        raise HTTPException(403, f"El acceso gratis abre en {segundos // 60} minutos.")
+    if ahora > cierre:
+        raise HTTPException(403, "Las 2 horas de acceso gratis terminaron.")
+
+    # Resolver ESPN Deportes desde la fuente (mismo mecanismo de la TV).
+    import event_scheduler
+
+    ev = {
+        "link": "https://la18hd.su/vivo/canales.php?stream=espnndeportes",
+        "date": (game.get("date") or "")[:10],
+        "time": "00:00",
+        "title": "ESPN Deportes Gratis",
+        "language": "",
+    }
+    evento = event_scheduler._procesar_evento(ev)
+    if not evento:
+        raise HTTPException(502, "El stream de ESPN Deportes no esta disponible ahora mismo.")
+
+    proxy_base = _proxy_base(request)
+    return {
+        "url": _wrap(evento["stream"], proxy_base, evento.get("referer")),
+        "expira": cierre.isoformat(),
+    }
+
+
 @app.post("/admin/events")
 def admin_replace_events(data: EventsIn, user=Depends(get_admin)):
     """Reemplaza TODA la lista de eventos (lo llama el scraper en cada corrida)."""
