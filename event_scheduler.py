@@ -92,23 +92,45 @@ def _vigente(fecha: str, hora: str) -> bool:
         return True  # fecha/hora raras: no lo descartamos por eso
 
 
-def refresh_once() -> str:
-    """Una corrida completa. Devuelve un mensaje para el log."""
-    agenda = requests.get(AGENDA_URL, headers={"User-Agent": UA}, timeout=20).json()
-    if not isinstance(agenda, list) or not agenda:
-        return "agenda vacia o invalida; se conserva la lista actual"
+def _stream_vivo(url: str, referer: str) -> bool:
+    """True si el m3u8 responde 200 con contenido HLS.
 
-    events = []
-    for ev in agenda:
-        link = (ev.get("link") or "").strip()
-        if "la18hd.su" not in link:
-            continue  # tarjetarojita.xyz y otros espejos: solo la fuente principal
-        if not _vigente(ev.get("date") or "", ev.get("time") or ""):
-            continue
-        slug = parse_qs(urlparse(link).query).get("stream", [None])[0]
-        if not slug:
-            continue
-        page = PAGE_URL.format(slug=slug)
+    La fuente (fubo18) rota el subdominio en cada request: algunos hosts
+    estan muertos (DNS fail, timeout, 404). Sin esta validacion la TV
+    publica eventos con streams muertos y TODOS los partidos dan
+    manifestLoadError al abrirlos.
+    """
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": UA, "Referer": referer},
+            timeout=10,
+        )
+        return resp.status_code == 200 and "#EXTM3U" in resp.text
+    except Exception:
+        return False
+
+
+def _procesar_evento(ev: dict):
+    """Scrapea un evento de la agenda y devuelve el dict del evento o None.
+
+    El host del stream ROTA en cada request y algunos hosts estan muertos
+    (DNS fail / timeout / 404): re-scrapeamos hasta 3 veces y solo aceptamos
+    el token cuyo m3u8 realmente responde. Sin esta validacion la TV
+    publica canales muertos y TODOS los partidos dan manifestLoadError.
+    """
+    link = (ev.get("link") or "").strip()
+    if "la18hd.su" not in link:
+        return None  # tarjetarojita.xyz y otros espejos: solo la fuente principal
+    if not _vigente(ev.get("date") or "", ev.get("time") or ""):
+        return None
+    slug = parse_qs(urlparse(link).query).get("stream", [None])[0]
+    if not slug:
+        return None
+    page = PAGE_URL.format(slug=slug)
+
+    playback = None
+    for _intento in range(3):
         try:
             resp = requests.get(
                 page,
@@ -120,24 +142,51 @@ def refresh_once() -> str:
         m = PLAYBACK_RE.search(resp.text)
         if not m:
             continue
+        playback = m.group(1)
+        if _stream_vivo(playback, page):
+            break
+        playback = None  # host muerto: forzar otro scrape (nuevo token/host)
 
-        titulo = " ".join((ev.get("title") or "").split())
-        if ":" in titulo:
-            sport, name = (x.strip() for x in titulo.split(":", 1))
-        else:
-            sport, name = "Futbol", titulo
-        if not name:
-            continue
+    if not playback:
+        return None  # este evento no tiene stream vivo ahora mismo
 
-        label = f"{name} · {_canal_pretty(slug)}"
-        lang = (ev.get("language") or "").strip()
-        if lang and lang.lower() not in label.lower():
-            label += f" ({lang.capitalize()})"
+    titulo = " ".join((ev.get("title") or "").split())
+    if ":" in titulo:
+        sport, name = (x.strip() for x in titulo.split(":", 1))
+    else:
+        sport, name = "Futbol", titulo
+    if not name:
+        return None
 
-        events.append({"sport": sport or "Futbol", "name": label, "stream": m.group(1), "referer": page})
+    label = f"{name} · {_canal_pretty(slug)}"
+    lang = (ev.get("language") or "").strip()
+    if lang and lang.lower() not in label.lower():
+        label += f" ({lang.capitalize()})"
+
+    return {"sport": sport or "Futbol", "name": label, "stream": playback, "referer": page}
+
+
+def refresh_once() -> str:
+    """Una corrida completa. Devuelve un mensaje para el log.
+
+    Los eventos se procesan EN PARALELO (cada uno implica scrape + validacion
+    del m3u8, hasta 3 intentos): en serie tardaria ~20 min con muchos streams
+    muertos; con 10 hilos baja a ~2 min.
+    """
+    agenda = requests.get(AGENDA_URL, headers={"User-Agent": UA}, timeout=20).json()
+    if not isinstance(agenda, list) or not agenda:
+        return "agenda vacia o invalida; se conserva la lista actual"
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    events = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for resultado in pool.map(_procesar_evento, agenda):
+            if resultado:
+                events.append(resultado)
 
     if not events:
-        return "no se scrapeo ningun stream; se conserva la lista actual"
+        return "no se scrapeo ningun stream vivo; se conserva la lista actual"
 
     count = db.replace_events(events)
     return f"{count} evento(s) publicados (agenda: {len(agenda)} items)"

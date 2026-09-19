@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import timedelta
 from urllib.parse import urljoin, quote
 import requests as http_requests
@@ -2172,19 +2173,40 @@ def event_resolve(url: str, user=Depends(get_current_user)):
     # Solo paginas de la fuente (la18hd) para que no sirva de proxy abierto
     if "la18hd.su" not in target:
         raise HTTPException(400, "Fuente no permitida")
-    try:
-        resp = http_requests.get(
-            target,
-            headers={"User-Agent": HLS_USER_AGENT, "Referer": "https://la18hd.su/"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-    except Exception:
-        raise HTTPException(502, "La fuente no responde en este momento.")
-    match = re.search(r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text)
-    if not match:
-        raise HTTPException(404, "No se encontro el stream en la pagina.")
-    return {"url": match.group(1)}
+    # El host del stream rota en cada scrape y algunos hosts salen muertos
+    # (DNS fail / 404): re-scrapeamos hasta 3 veces y devolvemos el PRIMER
+    # token cuyo m3u8 realmente responde. Sin esto, "Recargar canal" puede
+    # devolver otro stream muerto y el usuario sigue viendo manifestLoadError.
+    ultimo_error = "La fuente no responde en este momento."
+    for _intento in range(3):
+        try:
+            resp = http_requests.get(
+                target,
+                headers={"User-Agent": HLS_USER_AGENT, "Referer": "https://la18hd.su/"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception:
+            time.sleep(1)
+            continue
+        match = re.search(r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text)
+        if not match:
+            ultimo_error = "No se encontro el stream en la pagina."
+            continue
+        candidato = match.group(1)
+        try:
+            check = http_requests.get(
+                candidato,
+                headers={"User-Agent": HLS_USER_AGENT, "Referer": target},
+                timeout=10,
+            )
+            if check.status_code == 200 and "#EXTM3U" in check.text:
+                return {"url": candidato}
+        except Exception:
+            pass
+        ultimo_error = "El stream salio muerto; reintentando con un token nuevo."
+        time.sleep(1)
+    raise HTTPException(502, ultimo_error)
 
 
 @app.post("/admin/events")
