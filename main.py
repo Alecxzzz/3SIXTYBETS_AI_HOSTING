@@ -2219,7 +2219,7 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 
 FREE_ESPN_MATCH = ("barcelona", "sevilla")   # equipos del partido destacado
 FREE_ESPN_WINDOW_BEFORE_MIN = 30             # se abre 30 min antes del kickoff
-FREE_ESPN_WINDOW_AFTER_MIN = 90              # ...y cierra 90 min despues (2h total)
+FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
 
 
 def _free_espn_buscar_partido():
