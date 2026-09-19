@@ -2313,14 +2313,6 @@ def free_espn_stream(request: Request):
     """
     from datetime import datetime, timezone
 
-    url_oficial = (
-        "https://1309591.akamaized.net/hls/live/2039590/prod01/"
-        "mmrtdbwcbmdj1rvgkc4yuisg4.m3u8?hdnea=st=1789845729~exp=1789845789"
-        "~acl=/*/2039590*~id=f109cf8be9004996a26e137cfcf3b26c"
-        "~hmac=c8db13c7f01c4323e4bde953a99ac215b1163c297c57bcac64eeb73707ea1bd9"
-        "&reportingKey=eventId-2559767_partnerId-13819"
-        "&unique_id=f109cf8be9004996a26e137cfcf3b26c"
-    )
     url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
 
     def _vivo(u: str, referer: str | None = None) -> bool:
@@ -2347,8 +2339,10 @@ def free_espn_stream(request: Request):
     except HTTPException:
         raise
 
-    # --- Cadena de candidatos ---
-    candidatos = [url_oficial]
+    # --- Candidatos (fubo18 del partido, en orden de preferencia) ---
+    # 1) Stream fijo. 2) Tokens FRESCOS de los otros canales que transmiten
+    #    el mismo partido (Partidos de Hoy). 3) Tokens guardados en la BD.
+    candidatos = [(url_fija, None)]
 
     try:
         tokens = [t.lower() for t in FREE_ESPN_MATCH]
@@ -2356,7 +2350,6 @@ def free_espn_stream(request: Request):
             nombre = (ev.get("name") or "").lower()
             if all(t in nombre for t in tokens):
                 page = ev.get("referer") or ""
-                # Token FRESCO desde la pagina de la fuente (vence rapido)
                 if page.startswith("http"):
                     try:
                         resp = http_requests.get(
@@ -2371,26 +2364,39 @@ def free_espn_stream(request: Request):
                             r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
                         )
                         if m:
-                            candidatos.append(m.group(1))
+                            candidatos.append((m.group(1), page))
                     except Exception:
                         pass
                 guardado = ev.get("stream") or ""
                 if guardado.startswith("http"):
-                    candidatos.append(guardado)
+                    candidatos.append((guardado, page))
     except Exception:
         pass
 
-    candidatos.append(url_fija)
-
+    # Validar en vivo y armar hasta 3 OPCIONES (max 6 checks para no tardar)
+    opciones = []
+    vistos = set()
+    checks = 0
     proxy_base = _proxy_base(request)
-    for candidato in candidatos:
-        if _vivo(candidato):
-            respuesta = {"url": _wrap(candidato, proxy_base)}
-            if cierre:
-                respuesta["expira"] = cierre.isoformat()
-            return respuesta
+    for url_c, ref in candidatos:
+        if url_c in vistos or checks >= 6 or len(opciones) >= 3:
+            continue
+        vistos.add(url_c)
+        checks += 1
+        if _vivo(url_c, ref):
+            opciones.append({
+                "label": f"Opción {len(opciones) + 1}",
+                "url": _wrap(url_c, proxy_base, ref),
+            })
 
-    raise HTTPException(502, "Ninguna senal del partido esta disponible ahora mismo.")
+    if not opciones:
+        # Nada validado ahora mismo: entregar el fijo de todos modos
+        opciones.append({"label": "Opción 1", "url": _wrap(url_fija, proxy_base)})
+
+    respuesta = {"opciones": opciones}
+    if cierre:
+        respuesta["expira"] = cierre.isoformat()
+    return respuesta
 
 
 @app.post("/admin/events")
