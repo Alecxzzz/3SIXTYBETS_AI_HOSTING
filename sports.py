@@ -619,18 +619,38 @@ def _parse_tennis(events: list) -> list:
     from datetime import datetime, timedelta, timezone
     limite = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y%m%d%H%M%S")
 
+    def _extraer_url(valor):
+        """Extrae la URL real de un campo de imagen de ESPN.
+
+        ESPN devuelve 'headshot' y 'flag' como objetos {'href': url} (o listas
+        de ellos). Guardar el dict tal cual produce URLs invalidas y el
+        frontend muestra la imagen rota. Aqui siempre devolvemos un string
+        http(s) o None.
+        """
+        if isinstance(valor, dict):
+            valor = valor.get("href")
+        elif isinstance(valor, list):
+            primero = valor[0] if valor else None
+            valor = primero.get("href") if isinstance(primero, dict) else primero
+        if isinstance(valor, str) and valor.startswith("http"):
+            return valor
+        return None
+
     def _player(competitor: dict) -> dict:
         ath = competitor.get("athlete") or {}
         name = ath.get("displayName") or ath.get("fullName") or "?"
-        flag = ath.get("flag") or ath.get("logo")
-        if isinstance(flag, list):
-            flag = flag[0] if flag else None
+        # Foto de la jugadora primero; si no hay, bandera del pais.
+        imagen = (
+            _extraer_url(ath.get("headshot"))
+            or _extraer_url(ath.get("flag"))
+            or _extraer_url(ath.get("logo"))
+        )
         return {
             "id": ath.get("id"),
             "name": name,
             "short_name": ath.get("shortName") or name,
             "abbr": ath.get("shortName") or "",
-            "logo": flag,
+            "logo": imagen,
             "color": None,
             "alt_color": None,
             "score": _parse_number(competitor.get("score")),

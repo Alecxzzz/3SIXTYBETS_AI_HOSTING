@@ -504,6 +504,7 @@ def analizar_36ai(mensaje_usuario, system_prompt):
     ]
 
     modelo_en_uso = None
+    reintento_sin_pick = False
 
     for iteracion in range(MAX_ITERACIONES):
         forzar_respuesta = iteracion >= ITERACION_FORZAR_RESPUESTA
@@ -531,6 +532,30 @@ def analizar_36ai(mensaje_usuario, system_prompt):
         # Si el modelo devuelve contenido, limpiarlo y usarlo como respuesta
         if content and content.strip():
             limpio = limpiar_respuesta(content)
+            final = limpio or content.strip()
+            # VIGILANTE ANTI "SIN PICK": si el modelo intento escaparse sin dar
+            # pick, NO devolver esa respuesta. Ordenarle re-buscar mas datos
+            # (otras consultas, otras fuentes) y cambiar a un mercado para el
+            # que SI tenga datos. Se permite un solo reintento para no loopear.
+            if "SIN PICK" in final.upper() and not forzar_respuesta and not reintento_sin_pick:
+                reintento_sin_pick = True
+                if DEBUG:
+                    print(f"[36AI][DEBUG] Respuesta con SIN PICK detectada. Forzando re-busqueda y cambio de pick.")
+                messages.append(mensaje)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "PROHIBIDO responder 'SIN PICK'. Tienes herramientas buscar_web y "
+                        "buscar_cuotas disponibles: USALAS AHORA MISMA con consultas distintas "
+                        "(ej: '<equipos> alineaciones confirmadas hoy', '<equipos> forma ultimos "
+                        "5 partidos', '<equipos> cuota 1x2', '<equipos> corners promedio'). "
+                        "Despues de la re-busqueda, CAMBIA a un mercado para el que si tengas "
+                        "datos reales (doble oportunidad, over/under bajo, handicap, corners) "
+                        "y entrega el pick final en el formato solicitado, con confianza "
+                        "ajustada y cuota estimada si hace falta. JAMAS devuelvas 'SIN PICK'."
+                    )
+                })
+                continue
             if limpio:
                 return limpio
             if DEBUG:

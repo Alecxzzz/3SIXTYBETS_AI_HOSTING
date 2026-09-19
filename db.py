@@ -1138,9 +1138,16 @@ def list_picks_pendientes():
 
 
 def picks_sin_equipo():
-    """Picks sin nombres de equipos (generados antes de la correccion)."""
+    """Picks a reparar: sin nombres de equipos o con logo invalido.
+
+    Ademas de los picks viejos sin home_name, incluye los que quedaron con
+    'logos' que no son URLs reales (antes ESPN devolvia el dict {'href':...}
+    y se guardaba serializado, produciendo imagens rotas en el dashboard).
+    """
     rows = run_query(
-        "select * from ai_picks where home_name is null order by created_at desc limit 60"
+        "select * from ai_picks where home_name is null "
+        "or home_logo is null or home_logo = '' or home_logo not like 'http%' "
+        "order by created_at desc limit 60"
     )
     return [public_ai_pick(r) for r in (rows or [])]
 
