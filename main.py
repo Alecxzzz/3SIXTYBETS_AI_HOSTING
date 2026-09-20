@@ -1513,53 +1513,10 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
     return {"ok": ok}
 
 
-@app.get("/stats/stream")
-def stats_stream(sport: str = "soccer", league: str = None,
-                 token: str = None):
-    """Stream SSE de partidos (marcadores que se actualizan solos).
-
-    EventSource del navegador no puede mandar el header Authorization, asi
-    que el token viaja por query (?token=...). Formato por evento:
-      {"games": [...], "live_count": N, "updated_at": "...", "error": null}
-    Cada 15s si hay partidos en vivo; 30s en descanso. El cliente detecta
-    la caida con onerror y vuelve al polling de 60s.
-    """
-    if not token:
-        raise HTTPException(401, "Necesitas iniciar sesion.")
-    user = db.get_user_by_token(token)
-    if not user:
-        raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
-
-    sport_l = (sport or "soccer").strip().lower()
-    try:
-        sports.get_sport_games(sport_l, league=league)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-    def _gen():
-        intervalo = 15
-        for _ciclo in range(240):  # ~1-2h de vida; el cliente reconecta solo
-            try:
-                data = sports.get_sport_games(sport_l, league=league)
-            except ValueError as exc:
-                yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
-                return
-            except Exception as exc:
-                data = {"games": [], "live_count": 0, "error": str(exc)}
-            vivo = any(g.get("state") == "in" for g in (data.get("games") or []))
-            payload = json.dumps(data, ensure_ascii=False, default=str)
-            yield f"data: {payload}\n\n"
-            time.sleep(intervalo if vivo else 30)
-
-    return StreamingResponse(
-        _gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+# NOTA: el SSE (/stats/stream) se retiro: el proxy de Northflank bufferiza la
+# respuesta y los eventos nunca llegan al cliente (verificado en produccion).
+# La actualizacion en vivo queda cubierta por el calentador de cache + el
+# polling de 60s del frontend.
 
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
