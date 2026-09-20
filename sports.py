@@ -759,21 +759,35 @@ def get_standings(league: str) -> dict:
         hoy = datetime.now(timezone.utc).date()
         desde = (hoy - timedelta(days=21)).strftime("%Y%m%d")
         hasta = hoy.strftime("%Y%m%d")
-        sb = _espn_get(
-            f"{ESPN_HOSTS[_espn_host_idx['i'] % len(ESPN_HOSTS)]}/soccer/{league}/scoreboard",
-            params={"dates": f"{desde}-{hasta}"},
-            timeout=15,
-        ).json()
+        sb = None
+        ultimo_exc = None
+        for _intento in range(2):
+            try:
+                sb = _espn_get(
+                    f"{ESPN_HOSTS[_espn_host_idx['i'] % len(ESPN_HOSTS)]}/soccer/{league}/scoreboard",
+                    params={"dates": f"{desde}-{hasta}"},
+                    timeout=15,
+                ).json()
+                break
+            except Exception as exc:
+                ultimo_exc = exc
+                import time as _time
+                _time.sleep(2)
+        if sb is None:
+            raise ultimo_exc or Exception("scoreboard sin respuesta")
         resultados: dict = {}
         for ev in sb.get("events") or []:
             try:
                 comp = (ev.get("competitions") or [{}])[0]
                 comps = comp.get("competitors") or []
-                if len(comps) < 2 or (comp.get("status") or {}).get("type", {}).get("state") != "post":
+                if len(comps) < 2:
                     continue
                 c1, c2 = comps[0], comps[1]
                 s1, s2 = _parse_number(c1.get("score")), _parse_number(c2.get("score"))
-                if s1 is None or s2 is None:
+                # Solo partidos FINALIZADOS (con marcador y estado post; si el
+                # estado no viene, los marcadores de fechas pasadas cuentan).
+                estado = (comp.get("status") or {}).get("type", {}).get("state")
+                if s1 is None or s2 is None or (estado and estado != "post"):
                     continue
                 r1 = "W" if s1 > s2 else ("D" if s1 == s2 else "L")
                 r2 = "W" if s2 > s1 else ("D" if s1 == s2 else "L")
@@ -783,8 +797,8 @@ def get_standings(league: str) -> dict:
                 continue
         for tid, lista in resultados.items():
             forma_por_equipo[tid] = lista[-5:]
-    except Exception:
-        pass  # sin forma: la tabla se muestra igual
+    except Exception as exc:
+        print(f"[Standings] forma no disponible para {league}: {exc!r}", flush=True)
 
     grupos = []
     for child in data.get("children") or []:
