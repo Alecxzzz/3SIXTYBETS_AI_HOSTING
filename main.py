@@ -1463,6 +1463,57 @@ def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     except Exception as exc:
         raise HTTPException(502, f"Error obteniendo detalle del partido: {exc}")
 
+# Terminos de casa de apuestas que NINGUN modelo puede mostrar en el
+# analisis del detalle del partido (se filtran a nivel de texto, no solo prompt).
+_TERMINOS_PROHIBIDOS_ANALISIS = (
+    "empate no apuesta", "dnb", "handicap", "hándicap", "spread",
+    "over/under", "o/u", "under ", "over ", "línea", "linea de apuesta",
+    "edge", "apuesta segura", "apuesta recomendada", "cuota",
+)
+
+def _limpiar_analisis_ia(texto: str) -> str:
+    """Sanitiza la respuesta del modelo para el analisis del detalle.
+
+    Garantiza (independiente de que el modelo obedezca el prompt):
+    - sin markdown (asteriscos, almohadillas)
+    - sin encabezados duplicados tipo 'Análisis IA' ni emojis de decoracion
+    - sin terminologia de casa de apuestas (DNB, handicap, edge, O/U, cuota...)
+    - lineas vacias o duplicadas eliminadas
+    """
+    if not texto:
+        return texto
+    import re as _re
+
+    t = texto.replace("*", "").replace("#", "")
+
+    lineas_limpias = []
+    for linea in t.splitlines():
+        l = linea.strip()
+        # quitar emojis y encabezados duplicados
+        l = _re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\s]*", "", l).strip()
+        if _re.match(r"^an[aá]lisis\s+ia\s*:?\s*$", l, _re.IGNORECASE):
+            continue
+        if not l:
+            continue
+        # Limpiar frase por frase: si una sentencia contiene terminologia
+        # prohibida (DNB, handicap, edge, O/U...), se elimina SOLO esa
+        # sentencia, no toda la linea.
+        frases = _re.split(r"(?<=[.!?])\s+", l)
+        frases_ok = [
+            f for f in frases
+            if not any(term in f.lower() for term in _TERMINOS_PROHIBIDOS_ANALISIS)
+        ]
+        l = " ".join(frases_ok).strip()
+        if not l:
+            continue
+        # sin lineas repetidas consecutivas
+        if lineas_limpias and lineas_limpias[-1] == l:
+            continue
+        lineas_limpias.append(l)
+
+    return "\n".join(lineas_limpias).strip()
+
+
 @app.get("/stats/ai-analysis")
 def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user)):
     """Analisis de IA del partido: tendencias, jugador destacado y prediccion."""
@@ -1554,9 +1605,10 @@ Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
     try:
         from engine.search_engine import SearchEngine
         respuesta = SearchEngine().ask_you(prompt)
-        # Limpiar asteriscos de formato markdown
+        # Sanitizar: sin markdown, sin encabezados duplicados y sin
+        # terminologia de casa de apuestas, pase lo que pase con el modelo.
         if respuesta:
-            respuesta = respuesta.replace("*", "").replace("#", "")
+            respuesta = _limpiar_analisis_ia(respuesta)
         return {"analysis": respuesta, "context": contexto}
     except Exception as exc:
         return {"analysis": f"No se pudo generar analisis: {exc}", "context": contexto}
