@@ -354,8 +354,89 @@ def get_current_user_optional(authorization: str = Header(None)):
     token = authorization[7:].strip()
     return db.get_user_by_token(token)  # None si el token es invalido/expire
 
+# ---- Token de conversacion de chat (anti-abuso de la IA) ----
+#
+# /chat SOLO responde con un token de conversacion valido. El token se emite
+# en /chat/iniciar (requiere sesion valida) y expira a los CHAT_CONV_TTL_S de
+# INACTIVIDAD: cada mensaje lo renueva, asi que dura "hasta que el usuario
+# deja de usarlo". Evita que scripts externos golpeen /chat directo (el costo
+# de la IA es dinero real) sin afectar el flujo normal del frontend.
+
+import secrets as _secrets
+
+CHAT_CONV_TTL_S = 30 * 60   # 30 min de inactividad
+_chat_conv: dict = {}        # token -> {"user_id": str|None, "last": float}
+_chat_conv_lock = threading.Lock()
+
+
+def _chat_conv_limpiar() -> None:
+    """Elimina tokens vencidos y recorta el dict (llamar con lock tomado)."""
+    ahora = time.time()
+    vivos = {
+        t: v for t, v in _chat_conv.items()
+        if ahora - v["last"] < CHAT_CONV_TTL_S
+    }
+    _chat_conv.clear()
+    _chat_conv.update(vivos)
+
+
+def _chat_conv_crear(user_id: str | None) -> str:
+    token = _secrets.token_urlsafe(32)
+    with _chat_conv_lock:
+        _chat_conv[token] = {"user_id": user_id, "last": time.time()}
+        # Tope duro: si algo raro infla el dict, fuera los mas viejos.
+        while len(_chat_conv) > 2000:
+            _chat_conv_limpiar()
+            if len(_chat_conv) <= 2000:
+                break
+            mas_viejo = min(_chat_conv, key=lambda t: _chat_conv[t]["last"])
+            _chat_conv.pop(mas_viejo, None)
+    return token
+
+
+def _chat_conv_validar(token: str | None, user_id: str | None) -> bool:
+    """True si el token existe y sigue vigente; lo renueva (sliding TTL)."""
+    if not token:
+        return False
+    with _chat_conv_lock:
+        reg = _chat_conv.get(token)
+        if not reg:
+            return False
+        if time.time() - reg["last"] >= CHAT_CONV_TTL_S:
+            _chat_conv.pop(token, None)
+            return False
+        # El token queda amarrado al usuario que lo inicio (si lo hubo).
+        if reg["user_id"] and user_id and reg["user_id"] != user_id:
+            return False
+        reg["last"] = time.time()  # renovar: sigue usandolo
+        return True
+
+
+@app.post("/chat/iniciar")
+def chat_iniciar(request: Request, user=Depends(get_current_user_optional)):
+    """Emite un token de conversacion para usar /chat (solo frontend).
+
+    Con sesion valida: 20 tokens/hora (cambio de conversacion normal).
+    Invitado: 3/hora por IP (el chat invitado existe pero cuesta; un script
+    no puede farmear tokens). El token expira a los 30 min de inactividad.
+    """
+    _rate_limit(f"chatini:{_ip_del_cliente(request)}", 20, 3600)
+    return {
+        "conv_token": _chat_conv_crear(user["id"] if user else None),
+        "ttl_s": CHAT_CONV_TTL_S,
+    }
+
 @app.post("/chat", response_class=PlainTextResponse)
-def chat(request: Request, data: Chat, user=Depends(get_current_user_optional)):
+def chat(request: Request, data: Chat,
+         x_chat_token: str | None = Header(None, alias="X-Chat-Token"),
+         user=Depends(get_current_user_optional)):
+    # SOLO con token de conversacion vigente (emitido en /chat/iniciar).
+    # Amarrado a la sesion que lo inicio; expira por inactividad.
+    if not _chat_conv_validar(x_chat_token, user["id"] if user else None):
+        raise HTTPException(
+            403,
+            "Conversacion expirada o invalida. Reinicia el chat (el frontend lo hace solo).",
+        )
     # Anti abuso: la IA cuesta dinero real. Invitados 10/hora por IP;
     # usuarios 30/hora (ademas del limite freemium de mensajes de abajo).
     try:
