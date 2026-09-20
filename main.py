@@ -2578,17 +2578,17 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN Deportes + marcador y estadisticas del
-# partido destacado del dia (Barcelona vs Sevilla). Disponible
+# partido destacado del dia (Atlético Madrid vs Real Madrid). Disponible
 # solo durante la ventana de 2 horas alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("barcelona", "sevilla")   # equipos del partido destacado
+FREE_ESPN_MATCH = ("atlético madrid", "real madrid")   # equipos del partido destacado
 FREE_ESPN_WINDOW_BEFORE_MIN = 30             # se abre 30 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
 
 
 def _free_espn_buscar_partido():
-    """Busca el partido destacado (Barcelona vs Sevilla) en la agenda de hoy."""
+    """Busca el partido destacado (Atlético Madrid vs Real Madrid) en la agenda de hoy."""
     import sports
 
     data = sports.get_sport_games("soccer", "esp.1")

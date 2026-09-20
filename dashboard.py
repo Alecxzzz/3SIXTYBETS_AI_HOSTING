@@ -513,7 +513,7 @@ MERCADOS_FUTBOL = [
     "Over de tarjetas",
     "Goleador en cualquier momento",
     "Equipo A o B gana la primera mitad",
-    "Props de jugadores",
+     "Props de jugadores",
     "Under/Over de tiros generales equipo A o B",
     "Under/Over de tiros a puerta equipo A o B",
     "Total de faltas equipo A o B",
