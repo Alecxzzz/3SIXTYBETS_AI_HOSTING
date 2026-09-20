@@ -1998,6 +1998,19 @@ async def api_get_player_last5(
 # PANEL ADMIN (solo administradores)
 # ==============================
 
+@app.get("/api/standings/{league}")
+def api_standings(league: str, user=Depends(get_current_user)):
+    """Tabla de posiciones de una liga de futbol (ESPN), con grupos por zona."""
+    import sports
+
+    try:
+        return sports.get_standings(league)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo obtener la tabla: {exc}")
+
+
 @app.get("/api/game/{sport}/{game_id}/players")
 def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(get_current_user)):
     """Lista de jugadores clickeables de un partido (boxscore MLB / lineup futbol)."""

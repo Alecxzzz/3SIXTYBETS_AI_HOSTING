@@ -711,7 +711,131 @@ def _parse_tennis(events: list) -> list:
     return out
 
 
-def get_sport_games(sport: str, league: str | None = None) -> dict:
+def get_standings(league: str) -> dict:
+    """Tabla de posiciones de una liga de futbol (standings de ESPN).
+
+    Devuelve grupos (por nota de clasificacion: Champions League, Europa
+    League, etc. o "General") con equipos: PJ, G, E, P, DIF, GF, GC, PTS,
+    nota de zona y forma de los ultimos 5 (W/D/L) calculada del scoreboard
+    de las ultimas 3 semanas.
+    """
+    league = (league or "").strip()
+    if league not in SOCCER_LEAGUES:
+        raise ValueError(f"Liga no soportada: {league}")
+
+    cache_key = f"standings:{league}"
+    cached = _cache_get(cache_key, ttl=1800)  # 30 min: las tablas no cambian rapido
+    if cached is not None:
+        return cached
+
+    base = (
+        ESPN_HOSTS[_espn_host_idx["i"] % len(ESPN_HOSTS)]
+        .replace("apis/site/v2/sports", "apis/v2/sports")
+    )
+    data = _espn_get(f"{base}/{league}/standings", timeout=15).json()
+
+    def _stats_map(stats: list) -> dict:
+        out = {}
+        for s in stats or []:
+            nombre = s.get("name")
+            valor = s.get("value")
+            if nombre and valor is not None:
+                out[nombre] = valor
+        return out
+
+    def _num(m: dict, *nombres, default=None):
+        for n in nombres:
+            if n in m:
+                try:
+                    return float(m[n])
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    # Forma: ultimos resultados del scoreboard de las ultimas 3 semanas
+    forma_por_equipo: dict = {}
+    try:
+        from datetime import datetime, timedelta, timezone
+        hoy = datetime.now(timezone.utc).date()
+        desde = (hoy - timedelta(days=21)).strftime("%Y%m%d")
+        hasta = hoy.strftime("%Y%m%d")
+        sb = _espn_get(
+            f"{ESPN_HOSTS[_espn_host_idx['i'] % len(ESPN_HOSTS)]}/soccer/{league}/scoreboard",
+            params={"dates": f"{desde}-{hasta}"},
+            timeout=15,
+        ).json()
+        resultados: dict = {}
+        for ev in sb.get("events") or []:
+            try:
+                comp = (ev.get("competitions") or [{}])[0]
+                comps = comp.get("competitors") or []
+                if len(comps) < 2 or (comp.get("status") or {}).get("type", {}).get("state") != "post":
+                    continue
+                c1, c2 = comps[0], comps[1]
+                s1, s2 = _parse_number(c1.get("score")), _parse_number(c2.get("score"))
+                if s1 is None or s2 is None:
+                    continue
+                r1 = "W" if s1 > s2 else ("D" if s1 == s2 else "L")
+                r2 = "W" if s2 > s1 else ("D" if s1 == s2 else "L")
+                resultados.setdefault(str(c1.get("team", {}).get("id")), []).append(r1)
+                resultados.setdefault(str(c2.get("team", {}).get("id")), []).append(r2)
+            except Exception:
+                continue
+        for tid, lista in resultados.items():
+            forma_por_equipo[tid] = lista[-5:]
+    except Exception:
+        pass  # sin forma: la tabla se muestra igual
+
+    grupos = []
+    for child in data.get("children") or []:
+        st = child.get("standings") or {}
+        entries = st.get("entries") or []
+        filas = []
+        for e in entries:
+            tm = e.get("team") or {}
+            m = _stats_map(e.get("stats"))
+            pj = int(_num(m, "gamesPlayed") or 0)
+            g = int(_num(m, "wins") or 0)
+            e_ = int(_num(m, "ties") or 0)
+            p = int(_num(m, "losses") or 0)
+            pts = int(_num(m, "points") or 0)
+            gf = _num(m, "pointsFor", "goalsFor") or 0
+            gc = _num(m, "pointsAgainst", "goalsAgainst") or 0
+            dif = _num(m, "differential", "goalDifference")
+            if dif is None:
+                dif = gf - gc
+            gf, gc, dif = int(gf), int(gc), int(dif)
+            nota = ((e.get("note") or {}).get("description")
+                    or (e.get("note") or {}).get("color")
+                    or "")
+            logos = tm.get("logos") or []
+            logo = logos[0].get("href") if logos else (tm.get("logo") or None)
+            filas.append({
+                "team": tm.get("displayName") or "?",
+                "abbr": tm.get("abbreviation") or "",
+                "logo": logo,
+                "pj": pj, "g": g, "e": e_, "p": p,
+                "dif": dif, "gf": gf, "gc": gc,
+                "pts": pts,
+                "nota": nota,
+                "forma": forma_por_equipo.get(str(tm.get("id")), []),
+            })
+        if filas:
+            grupos.append({
+                "nombre": child.get("name") or child.get("displayName") or "General",
+                "equipos": filas,
+            })
+
+    respuesta = {
+        "league": league,
+        "liga": SOCCER_LEAGUES.get(league, league),
+        "grupos": grupos,
+    }
+    from datetime import datetime as _dt, timezone as _tz
+    respuesta["actualizado"] = _dt.now(_tz.utc).isoformat()
+    _cache_set(cache_key, respuesta)
+    return respuesta
+
     """Devuelve los partidos (en vivo, proximos y finalizados) de un deporte.
 
     Si sport == 'soccer' y se pasa league, filtra solo esa liga.
