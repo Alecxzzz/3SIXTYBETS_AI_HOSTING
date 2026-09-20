@@ -1974,7 +1974,6 @@ def _extract_first_variant_url(text: str, base_url: str) -> str | None:
 def hls_proxy(request: Request, url: str, referer: str = None):
     """Proxy transparente para streams HLS (.m3u8, .ts, .key, .aac)."""
     if not url or not re.match(r"^https?://", url.strip()):
-        from fastapi import HTTPException
         raise HTTPException(400, "Parámetro ?url= inválido o ausente")
 
     target = url.strip()
@@ -1993,7 +1992,6 @@ def hls_proxy(request: Request, url: str, referer: str = None):
             target, headers=headers, stream=True, timeout=(5, 30)
         )
     except http_requests.RequestException as exc:
-        from fastapi import HTTPException
         raise HTTPException(502, f"Error contacting upstream: {exc}")
 
     content_type = resp.headers.get("content-type", "")
@@ -2184,8 +2182,6 @@ def tv_cdnlivetv(request: Request, name: str, code: str):
     """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy."""
     stream = cdnlivetv_fresh(name, code)
     if not stream:
-        from fastapi import HTTPException
-
         raise HTTPException(503, f"No se pudo resolver el canal {name} ({code})")
     from fastapi.responses import RedirectResponse
 
