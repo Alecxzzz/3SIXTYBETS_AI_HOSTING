@@ -9,3 +9,14 @@ nul
 
 logs_picks_forzado.log
 logs_picks_forzado.err
+
+# Archivos de diagnostico con credenciales y logs locales: NUNCA al repo
+diag*.py
+diag*.log
+diag*.err
+audit*.py
+audit*.log
+audit*.err
+sse_test*.py
+*.log
+*.err

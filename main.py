@@ -2,7 +2,6 @@ import os
 import re
 import time
 from datetime import timedelta
-from urllib.parse import urljoin, quote
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +12,10 @@ import db
 import sports
 import transcoder
 import dashboard
+import ipaddress
+import socket
+import threading
+from urllib.parse import urlparse, urljoin, quote
 try:
     import sports_warming
 except Exception as _sw_err:
@@ -61,10 +64,98 @@ app.add_middleware(
     # propio, etc.). Sin esto, un origen no listado rompe TODOS los canales
     # dinamicos con manifestLoadError.
     allow_origin_regex=r"https?://.*",
-    allow_credentials=True,
+    # NOTA de seguridad: allow_credentials=False es intencional. La auth va
+    # por header Authorization (Bearer), NUNCA por cookies, asi que ninguna
+    # llamada legitima necesita credenciales CORS. Con False, un sitio malo
+    # NO puede acompanar credenciales aunque el regex refleje su origen.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==============================
+# SEGURIDAD: rate limit y anti-SSRF
+# ==============================
+
+_rate_bucket: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _ip_del_cliente(request: Request) -> str:
+    """IP real del cliente (detras del proxy de Northflank usa X-Forwarded-For)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "desconocida"
+
+
+def _rate_limit(clave: str, max_eventos: int, ventana_s: int):
+    """Limitador simple en memoria (por proceso). Lanza 429 al exceder."""
+    global _rate_bucket
+    ahora = time.time()
+    with _rate_lock:
+        eventos = [t for t in _rate_bucket.get(clave, []) if ahora - t < ventana_s]
+        if len(eventos) >= max_eventos:
+            raise HTTPException(
+                429, "Demasiadas peticiones. Espera unos minutos e intenta de nuevo."
+            )
+        eventos.append(ahora)
+        _rate_bucket[clave] = eventos
+        # Poda barata para que el dict no crezaca sin limite
+        if len(_rate_bucket) > 5000:
+            _rate_bucket = {
+                k: v for k, v in _rate_bucket.items() if v and ahora - v[-1] < ventana_s
+            }
+
+
+_dns_cache: dict = {}
+_dns_lock = threading.Lock()
+
+
+def _url_tiene_host_publico(url: str) -> bool:
+    """True si el host de la URL resuelve SOLO a IPs publicas (anti-SSRF).
+
+    Bloquea localhost, IPs privadas (10.x, 192.168.x, 172.16-31.x), link-local
+    (169.254.x -> metadatos del cloud), loopback, reserved y multicast.
+    Resolucion cacheada 5 min por host para no agregar latencia al proxy HLS.
+    """
+    global _dns_cache
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
+        return False
+    ahora = time.time()
+    with _dns_lock:
+        cacheado = _dns_cache.get(host)
+        if cacheado and ahora - cacheado[1] < 300:
+            return cacheado[0]
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False
+    ok = True
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            ok = False
+            break
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            ok = False
+            break
+    with _dns_lock:
+        _dns_cache[host] = (ok, ahora)
+        if len(_dns_cache) > 1000:
+            _dns_cache = {
+                k: v for k, v in _dns_cache.items() if ahora - v[1] < 600
+            }
+    return ok
+
 
 class Chat(BaseModel):
     mensaje: str
@@ -264,7 +355,13 @@ def get_current_user_optional(authorization: str = Header(None)):
     return db.get_user_by_token(token)  # None si el token es invalido/expire
 
 @app.post("/chat", response_class=PlainTextResponse)
-def chat(data: Chat, user=Depends(get_current_user_optional)):
+def chat(request: Request, data: Chat, user=Depends(get_current_user_optional)):
+    # Anti abuso: la IA cuesta dinero real. Invitados 10/hora por IP;
+    # usuarios 30/hora (ademas del limite freemium de mensajes de abajo).
+    try:
+        _rate_limit(f"chat:{_ip_del_cliente(request)}", 10, 3600)
+    except HTTPException:
+        raise
     # Chat freemium: tambien bloquear la generacion de respuesta si el usuario
     # gratuito ya uso su limite (defensa en profundidad).
     if user and not db.es_premium_row(user):
@@ -801,7 +898,10 @@ def post_message(data: MessageIn, user=Depends(get_current_user)):
     return msg
 
 @app.post("/redeem")
-def redeem_key(data: RedeemIn, user=Depends(get_current_user)):
+def redeem_key(request: Request, data: RedeemIn, user=Depends(get_current_user)):
+    # Los codigos tienen formato predecible: sin este tope se podrian adivinar
+    # por fuerza bruta. 5 intentos/hora por usuario.
+    _rate_limit(f"redeem:{user['id']}", 5, 3600)
     try:
         result = db.redeem_key_for_user(user["id"], data.redeem_code)
     except ValueError as exc:
@@ -1075,10 +1175,11 @@ def pagadito_plans():
     }
 
 @app.get("/pagadito/debug")
-def pagadito_debug():
+def pagadito_debug(user=Depends(get_admin)):
     """
     Diagnostico: prueba connect() contra Pagadito con las credenciales
     configuradas y devuelve el resultado crudo (sin exponer el WSK).
+    SOLO ADMIN: revela detalles de la configuracion de pagos.
     """
     uid = os.getenv("PAGADITO_UID", "").strip()
     wsk = os.getenv("PAGADITO_WSK", "").strip()
@@ -1877,6 +1978,9 @@ def hls_proxy(request: Request, url: str, referer: str = None):
         raise HTTPException(400, "Parámetro ?url= inválido o ausente")
 
     target = url.strip()
+    # Anti-SSRF: bloquear hosts internos (localhost, IPs privadas, metadatos)
+    if not _url_tiene_host_publico(target):
+        raise HTTPException(400, "Host no permitido")
 
     headers = {"User-Agent": HLS_USER_AGENT}
     if referer:
@@ -1918,7 +2022,7 @@ def hls_proxy(request: Request, url: str, referer: str = None):
         # que se pide en el mismo instante.
         if _is_master_playlist(text):
             variant_url = _extract_first_variant_url(text, final_url)
-            if variant_url:
+            if variant_url and _url_tiene_host_publico(variant_url):
                 try:
                     sub_resp = http_requests.get(
                         variant_url, headers=headers, stream=True, timeout=(5, 30)
@@ -2328,6 +2432,9 @@ def event_resolve(url: str, user=Depends(get_current_user)):
             ultimo_error = "No se encontro el stream en la pagina."
             continue
         candidato = match.group(1)
+        # Anti-SSRF: el candidato viene de una pagina scrapeada, validar host
+        if not _url_tiene_host_publico(candidato):
+            continue
         try:
             check = http_requests.get(
                 candidato,

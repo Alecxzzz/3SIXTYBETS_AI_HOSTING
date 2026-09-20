@@ -546,7 +546,7 @@ def health_status():
     return {
         "db_ok": db_ok,
         "admin_configured": bool(admin_username and admin_password),
-        "admin_username": admin_username or None,
+        # NOTA: el username del admin NO se expone (habilita fuerza bruta).
         "admin_exists": bool(admin),
         "admin_role": admin["role"] if admin else None,
     }
@@ -565,10 +565,13 @@ def delete_session(token):
     run_query("delete from sessions where token = %s", (token,))
 
 
+SESION_DIAS = 30  # vida maxima de una sesion (antes: sin expiracion)
+
+
 def get_user_by_token(token):
-    return run_query(
+    fila = run_query(
         """
-        select users.*
+        select users.*, sessions.created_at as _session_created_at
         from sessions
         join users on users.id = sessions.user_id
         where sessions.token = %s
@@ -576,6 +579,20 @@ def get_user_by_token(token):
         (token,),
         fetchone=True,
     )
+    if not fila:
+        return None
+    # Expiracion de sesion: un token sirve maximo SESION_DIAS. Antes las
+    # sesiones vivian para siempre (token filtrado = acceso perpetuo).
+    creada = fila.pop("_session_created_at", None)
+    if creada is not None:
+        try:
+            edad = now_utc() - creada
+            if edad > timedelta(days=SESION_DIAS):
+                run_query("delete from sessions where token = %s", (token,))
+                return None
+        except TypeError:
+            pass
+    return fila
 
 
 def list_messages(user_id):
