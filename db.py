@@ -243,6 +243,20 @@ def init_db():
             index support_chats_date_idx (created_at)
         )
         """,
+        """
+        create table if not exists favoritos (
+            user_id varchar(64) not null,
+            tipo varchar(10) not null,
+            ref_id varchar(120) not null,
+            nombre varchar(200) not null,
+            sport varchar(20) not null,
+            logo varchar(400) null,
+            league_code varchar(40) null,
+            created_at datetime not null,
+            primary key (user_id, tipo, ref_id),
+            index favoritos_user_idx (user_id)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -1424,5 +1438,84 @@ def list_support_chats(limit: int = 100, user_id: str | None = None) -> list:
             "fecha": r["created_at"].isoformat() if r.get("created_at") else None,
         })
     return salida
+
+
+# ==============================
+# FAVORITOS (equipos / ligas)
+# ==============================
+
+def list_favoritos(user_id: str) -> list:
+    """Favoritos del usuario, los mas recientes primero."""
+    rows = run_query(
+        """
+        select tipo, ref_id, nombre, sport, logo, league_code
+        from favoritos
+        where user_id = %s
+        order by created_at desc
+        """,
+        (user_id,),
+    )
+    if not rows:
+        return []
+    return [
+        {
+            "tipo": r.get("tipo"),
+            "ref_id": r.get("ref_id"),
+            "nombre": r.get("nombre"),
+            "sport": r.get("sport"),
+            "logo": r.get("logo"),
+            "league_code": r.get("league_code"),
+        }
+        for r in rows
+    ]
+
+
+def add_favorito(user_id: str, tipo: str, ref_id: str, nombre: str, sport: str,
+                 logo: str | None = None, league_code: str | None = None) -> bool:
+    """Agrega un favorito (idempotente). tipo: 'equipo' o 'liga'."""
+    tipo = (tipo or "").strip().lower()
+    if tipo not in ("equipo", "liga"):
+        raise ValueError("tipo debe ser 'equipo' o 'liga'")
+    if not str(ref_id or "").strip():
+        raise ValueError("ref_id requerido")
+    if not sport:
+        raise ValueError("sport requerido")
+    return bool(run_query(
+        """
+        insert into favoritos (user_id, tipo, ref_id, nombre, sport, logo, league_code, created_at)
+        values (%s, %s, %s, %s, %s, %s, %s, now())
+        on duplicate key update
+            nombre = values(nombre),
+            logo = values(logo),
+            league_code = values(league_code)
+        """,
+        (user_id, tipo, str(ref_id)[:120], (nombre or "?")[:200], sport,
+         (logo or None), (league_code or None)),
+    ))
+
+
+def remove_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
+    """Quita un favorito. Devuelve True si se elimino alguna fila."""
+    tipo = (tipo or "").strip().lower()
+    if tipo not in ("equipo", "liga"):
+        raise ValueError("tipo debe ser 'equipo' o 'liga'")
+    r = run_query(
+        "delete from favoritos where user_id = %s and tipo = %s and ref_id = %s",
+        (user_id, tipo, str(ref_id)[:120]),
+    )
+    return bool(r)
+
+
+def is_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
+    """True si (tipo, ref_id) es favorito del usuario."""
+    tipo = (tipo or "").strip().lower()
+    if tipo not in ("equipo", "liga"):
+        return False
+    row = run_query(
+        "select 1 as x from favoritos where user_id = %s and tipo = %s and ref_id = %s limit 1",
+        (user_id, tipo, str(ref_id)[:120]),
+        fetchone=True,
+    )
+    return bool(row)
 
 

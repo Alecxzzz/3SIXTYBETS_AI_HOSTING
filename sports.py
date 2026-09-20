@@ -1348,12 +1348,24 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     return result
 
 
-def get_sport_games(sport: str, league: str | None = None) -> dict:
-    """Partidos de un deporte: en vivo, proximos y finalizados.
+_inflight: dict = {}
+_inflight_guard = threading.Lock()
 
-    Devuelve {"sport", "label", "games": [...], "live_count", "error"}.
-    Cada game tiene: id, sport, sport_path, league, league_code, date, name,
-    state (pre|in|post), status, clock, period, home, away, linescores, odds.
+
+def _inflight_lock_for(key: str) -> threading.Lock:
+    """Lock por clave: evita que dos peticiones simultaneas (usuario +
+    calentador de cache) le peguen a ESPN a la vez con el cache vencido."""
+    with _inflight_guard:
+        if key not in _inflight:
+            _inflight[key] = threading.Lock()
+        return _inflight[key]
+
+
+def get_sport_games(sport: str, league: str | None = None) -> dict:
+    """Partidos de un deporte: en vivo, proximos y finalizados (cache 60s).
+
+    Si dos peticiones llegan juntas con el cache vencido, solo una consulta
+    a ESPN y la otra reutiliza el resultado.
     """
     sport = (sport or "").strip().lower()
     if sport not in SPORTS:
@@ -1365,6 +1377,16 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
     if cached is not None:
         return cached
 
+    with _inflight_lock_for(cache_key):
+        # Doble chequeo: otro hilo pudo llenar el cache mientras esperabamos.
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        return _sport_games_fresh(sport, league, path, label, cache_key)
+
+
+def _sport_games_fresh(sport: str, league: str | None, path: str, label: str, cache_key: str) -> dict:
+    """Version sin cache: consulta ESPN (llamar SIEMPRE con el lock tomado)."""
     games: list = []
     error = None
 
@@ -1469,6 +1491,35 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
         return result
     _cache_set(cache_key, result)
     return result
+
+
+def filtrar_por_dia(data: dict, delta: int) -> dict:
+    """Filtra los juegos de una respuesta get_sport_games por dia (hora Nicaragua).
+
+    delta: -1 ayer, 0 hoy, 1 manana, 2 pasado manana. Los partidos EN VIVO
+    siempre pasan el filtro (un partido en curso es de hoy por definicion).
+    """
+    hoy = datetime.now(timezone.utc).astimezone(TZ_NIC).date()
+
+    def _delta_de(g: dict):
+        fecha = (g.get("date") or "").strip()
+        if not fecha:
+            return None
+        try:
+            local = datetime.fromisoformat(fecha.replace("Z", "+00:00")).astimezone(TZ_NIC)
+            return (local.date() - hoy).days
+        except (ValueError, TypeError):
+            return None
+
+    filtrados = [
+        g for g in (data.get("games") or [])
+        if g.get("state") == "in" or _delta_de(g) == delta
+    ]
+    out = dict(data)
+    out["games"] = filtrados
+    out["live_count"] = sum(1 for g in filtrados if g.get("state") == "in")
+    out["day"] = delta
+    return out
 
 
 def get_all_sports_summary() -> dict:

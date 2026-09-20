@@ -13,6 +13,11 @@ import db
 import sports
 import transcoder
 import dashboard
+try:
+    import sports_warming
+except Exception as _sw_err:
+    print(f"[WARN] sports_warming no disponible: {_sw_err}")
+    sports_warming = None
 from engine.search_engine import SearchEngine
 try:
     from backend.player_stats.player_stats_service import player_stats_service
@@ -681,6 +686,14 @@ def _init_database():
                 event_scheduler.iniciar_scheduler()
             except Exception as exc:
                 print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
+
+            # Estadisticas: calentador de cache (scoreboards frescos y
+            # respuestas instantaneas; el trafico a ESPN queda centralizado).
+            if sports_warming:
+                try:
+                    sports_warming.iniciar_calentador()
+                except Exception as exc:
+                    print(f"[startup] Calentador de stats no iniciado: {exc}", flush=True)
 
             break
 
@@ -1442,16 +1455,111 @@ def stats_leagues(user=Depends(get_current_user)):
     return sports.get_available_leagues()
 
 @app.get("/stats/live")
-def stats_live(sport: str = "soccer", league: str = None, user=Depends(get_current_user)):
+def stats_live(sport: str = "soccer", league: str = None,
+               dia: int = None, user=Depends(get_current_user)):
     """Partidos de un deporte: en vivo, proximos y finalizados.
 
-    Deportes: soccer, nba, mlb, nfl, tennis
+    Deportes: soccer, nba, mlb, nfl, tennis, mma
     Para soccer se puede filtrar por liga con ?league=esp.1
+    Filtro opcional por dia (hora Nicaragua): dia=-1 ayer, 0 hoy,
+    1 manana, 2 pasado manana. Los partidos EN VIVO siempre pasan el filtro.
     """
     try:
-        return sports.get_sport_games(sport, league=league)
+        data = sports.get_sport_games(sport, league=league)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if dia is not None:
+        try:
+            data = sports.filtrar_por_dia(data, int(dia))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "dia debe ser un entero: -1, 0, 1 o 2")
+    return data
+
+# ---- Favoritos (equipos / ligas) ----
+
+class FavoritoIn(BaseModel):
+    tipo: str          # "equipo" | "liga"
+    ref_id: str
+    nombre: str
+    sport: str
+    logo: str | None = None
+    league_code: str | None = None
+
+
+@app.get("/favoritos")
+def favoritos_listar(user=Depends(get_current_user)):
+    """Favoritos del usuario (equipos y ligas)."""
+    return {"favoritos": db.list_favoritos(user["id"])}
+
+
+@app.post("/favoritos")
+def favoritos_agregar(data: FavoritoIn, user=Depends(get_current_user)):
+    try:
+        ok = db.add_favorito(
+            user["id"], data.tipo, data.ref_id, data.nombre, data.sport,
+            logo=data.logo, league_code=data.league_code,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": ok}
+
+
+@app.delete("/favoritos/{tipo}/{ref_id}")
+def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
+    try:
+        ok = db.remove_favorito(user["id"], tipo, ref_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": ok}
+
+
+@app.get("/stats/stream")
+def stats_stream(sport: str = "soccer", league: str = None,
+                 token: str = None):
+    """Stream SSE de partidos (marcadores que se actualizan solos).
+
+    EventSource del navegador no puede mandar el header Authorization, asi
+    que el token viaja por query (?token=...). Formato por evento:
+      {"games": [...], "live_count": N, "updated_at": "...", "error": null}
+    Cada 15s si hay partidos en vivo; 30s en descanso. El cliente detecta
+    la caida con onerror y vuelve al polling de 60s.
+    """
+    if not token:
+        raise HTTPException(401, "Necesitas iniciar sesion.")
+    user = db.get_user_by_token(token)
+    if not user:
+        raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
+
+    sport_l = (sport or "soccer").strip().lower()
+    try:
+        sports.get_sport_games(sport_l, league=league)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    def _gen():
+        intervalo = 15
+        for _ciclo in range(240):  # ~1-2h de vida; el cliente reconecta solo
+            try:
+                data = sports.get_sport_games(sport_l, league=league)
+            except ValueError as exc:
+                yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                return
+            except Exception as exc:
+                data = {"games": [], "live_count": 0, "error": str(exc)}
+            vivo = any(g.get("state") == "in" for g in (data.get("games") or []))
+            payload = json.dumps(data, ensure_ascii=False, default=str)
+            yield f"data: {payload}\n\n"
+            time.sleep(intervalo if vivo else 30)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
