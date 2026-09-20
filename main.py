@@ -2586,6 +2586,7 @@ FREE_ESPN_MATCH = ("atlético madrid", "real madrid")   # equipos del partido de
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
+FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream principal
 
 
 def _free_espn_buscar_partido():
@@ -2653,8 +2654,12 @@ def free_espn_match():
             "statistics": stats,
         })
 
+    dentro_ventana = (apertura <= ahora <= cierre) and game.get("state") != "post"
+    tiempo_restante = max(0, int((cierre - ahora).total_seconds())) if dentro_ventana else 0
+
     return {
-        "disponible": (apertura <= ahora <= cierre) and game.get("state") != "post",
+        "disponible": dentro_ventana,
+        "tiempo_restante_seg": tiempo_restante,
         "apertura": apertura.isoformat(),
         "cierre": cierre.isoformat(),
         "kickoff": game.get("date"),
@@ -2664,6 +2669,12 @@ def free_espn_match():
         "liga": detail.get("league") or game.get("league") or "LaLiga",
         "event_id": str(game.get("id")),
         "teams": teams,
+        "suscripcion": {
+            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
+            "planes_endpoint": "/pagadito/plans",
+            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
+            "planes": get_pagadito_plans(),
+        },
     }
 
 
@@ -2718,9 +2729,8 @@ def free_espn_stream(request: Request):
         raise
 
     # --- Candidatos (fubo18 del partido, en orden de preferencia) ---
-    # 1) Stream fijo. 2) Tokens FRESCOS de los otros canales que transmiten
-    #    el mismo partido (Partidos de Hoy). 3) Tokens guardados en la BD.
-    candidatos = [(url_fija, None)]
+    # 1) Stream principal (admin2). 2) Stream fijo de respaldo. 3) HTML embed
+    candidatos = [(FREE_ESPN_STREAM_URL, None), (url_fija, None)]
     # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
     candidatos.append((FREE_ESPN_STREAM_EXTRA, None))
 
@@ -2770,10 +2780,21 @@ def free_espn_stream(request: Request):
             })
 
     if not opciones:
-        # Nada validado ahora mismo: entregar el fijo de todos modos
-        opciones.append({"label": "Opción 1", "url": _wrap(url_fija, proxy_base)})
+        # Nada validado ahora mismo: entregar el stream principal de todos modos
+        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_URL, proxy_base)})
 
-    respuesta = {"opciones": opciones}
+    ahora2 = datetime.now(timezone.utc)
+    tiempo_restante = max(0, int((cierre - ahora2).total_seconds())) if cierre else 0
+    respuesta = {
+        "opciones": opciones,
+        "tiempo_restante_seg": tiempo_restante,
+        "suscripcion": {
+            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
+            "planes_endpoint": "/pagadito/plans",
+            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
+            "planes": get_pagadito_plans(),
+        },
+    }
     if cierre:
         respuesta["expira"] = cierre.isoformat()
     return respuesta
