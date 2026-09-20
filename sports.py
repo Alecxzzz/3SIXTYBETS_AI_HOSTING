@@ -1392,11 +1392,41 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
             ]
             return out, None
 
+        # 1a pasada: todas las ligas en paralelo. Si ESPN bloquea alguna por
+        # rafaga (403/429), esa liga falla completa pero no tira las demas.
+        fallidas: list = []
+        errores: list = []
         with ThreadPoolExecutor(max_workers=6) as ex:
-            for resultado, err in ex.map(_liga, ligas.items()):
+            for args, (resultado, err) in zip(list(ligas.items()), ex.map(_liga, ligas.items())):
                 if err:
-                    error = err
+                    fallidas.append(args)
+                    errores.append(err)
+                    continue
                 games.extend(resultado)
+
+        # 2a pasada: reintentar en SERIE las fallidas. ESPN bloquea rafagas
+        # paralelas; liga por liga (con respiro entre cada una) casi siempre
+        # recupera. Con tope de ~20s para no demorar la respuesta si ESPN
+        # esta caida de verdad.
+        if fallidas:
+            import time as _time
+
+            limite = _time.monotonic() + 20
+            for args in fallidas:
+                if _time.monotonic() > limite:
+                    break
+                _time.sleep(0.4)
+                resultado, err = _liga(args)
+                if not err:
+                    games.extend(resultado)
+
+        # Con que UNA liga cargue ya hay partidos: NO se reporta error global
+        # (el banner rojo del frontend taparia los 50+ partidos que si
+        # cargaron). El error solo sale si no se recupero NINGUNA liga.
+        if games:
+            error = None
+        elif errores:
+            error = errores[0]
     else:
         # NBA, MLB, NFL, MMA: un solo scoreboard por deporte
         try:
@@ -1433,6 +1463,10 @@ def get_sport_games(sport: str, league: str | None = None) -> dict:
     }
     if error:
         result["error"] = error
+    if error and not games:
+        # No cachear fallos: el proximo auto-refresh (60s) reintenta contra
+        # ESPN en vez de servir el mismo error desde cache.
+        return result
     _cache_set(cache_key, result)
     return result
 
