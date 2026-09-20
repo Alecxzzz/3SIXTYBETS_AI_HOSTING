@@ -1347,6 +1347,95 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     return result
 
 
+def get_sport_games(sport: str, league: str | None = None) -> dict:
+    """Partidos de un deporte: en vivo, proximos y finalizados.
+
+    Devuelve {"sport", "label", "games": [...], "live_count", "error"}.
+    Cada game tiene: id, sport, sport_path, league, league_code, date, name,
+    state (pre|in|post), status, clock, period, home, away, linescores, odds.
+    """
+    sport = (sport or "").strip().lower()
+    if sport not in SPORTS:
+        raise ValueError(f"Deporte no soportado: {sport}")
+
+    path, label = SPORTS[sport]
+    cache_key = f"sport_games:{sport}:{league or ''}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    games: list = []
+    error = None
+
+    if sport == "tennis":
+        # El tenis usa su propio parser (eventos anidados por torneo)
+        try:
+            data = _fetch_scoreboard(path)
+            games = _parse_tennis(data.get("events", []))
+        except Exception as exc:
+            error = str(exc)
+    elif sport == "soccer":
+        # Futbol: todas las ligas registradas (o una sola si filtran)
+        ligas = {league: SOCCER_LEAGUES[league]} if league in SOCCER_LEAGUES else SOCCER_LEAGUES
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _liga(args):
+            codigo, nombre = args
+            try:
+                data = _fetch_scoreboard(path, codigo)
+            except Exception as exc:
+                return [], str(exc)
+            out = [
+                _parse_event(ev, nombre, codigo)
+                for ev in data.get("events", [])
+            ]
+            return out, None
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for resultado, err in ex.map(_liga, ligas.items()):
+                if err:
+                    error = err
+                games.extend(resultado)
+    else:
+        # NBA, MLB, NFL, MMA: un solo scoreboard por deporte
+        try:
+            data = _fetch_scoreboard(path, league)
+            games = [
+                _parse_event(ev, label, league)
+                for ev in data.get("events", [])
+            ]
+        except Exception as exc:
+            error = str(exc)
+
+    # Etiquetar deporte y completar campos que faltan por juego
+    for g in games:
+        g["sport"] = sport
+        if not g.get("sport_path"):
+            g["sport_path"] = path
+        g.setdefault("home_linescores", [])
+        g.setdefault("away_linescores", [])
+        if g.get("home") is None:
+            g["home"] = {}
+        if g.get("away") is None:
+            g["away"] = {}
+
+    # Orden: en vivo primero, luego por hora
+    games.sort(key=lambda g: (g.get("state") != "in", g.get("date") or ""))
+
+    live_count = sum(1 for g in games if g.get("state") == "in")
+    result = {
+        "sport": sport,
+        "label": label,
+        "games": games,
+        "live_count": live_count,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    _cache_set(cache_key, result)
+    return result
+
+
 def get_all_sports_summary() -> dict:
     """Resumen de todos los deportes (para la vista general de Estadisticas)."""
     summary = {"sports": [], "updated_at": datetime.now(timezone.utc).isoformat()}
