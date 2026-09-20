@@ -28,6 +28,13 @@ ODDS_MINIMA = 1.20
 HORA_CORTE_ACERTADOS = 20
 # La IA solo empieza a analizar/generar picks desde las 21:00 (9 PM) Nicaragua
 HORA_INICIO_ANALISIS = 21
+# Las 5 mejores ligas de Europa: se analizan PRIMERO (prioridad del dashboard).
+LIGAS_TOP_EUROPA = ("eng.1", "esp.1", "ita.1", "ger.1", "fra.1")
+# Ventana de analisis: partidos que arrancan dentro de las proximas N horas
+# (los EN VIVO siempre entran). A las 9 PM las grandes ligas europeas juegan
+# de madrugada/manana siguiente, asi que sin ventana no habria nada que
+# analizar a esa hora.
+VENTANA_ANALISIS_H = 32
 # Verificacion estricta de aciertos: N pasadas independientes de la IA contra
 # fuentes externas (Sofascore/Flashscore/Fotmob); TODAS deben coincidir.
 VERIFICACIONES_ACIERTO = 6
@@ -635,10 +642,20 @@ REGLAS OBLIGATORIAS:
 
 
 def _partidos_hoy():
-    """Trae los partidos de hoy de todos los deportes del dashboard."""
+    """Partidos elegibles para analisis: en vivo + los que arrancan pronto.
+
+    Ventana: los que inician dentro de las proximas VENTANA_ANALISIS_H horas
+    (y los EN VIVO siempre). A las 21:00 Nicaragua los partidos de las grandes
+    ligas europeas arrancan de madrugada/manana: sin esta ventana no se
+    analizaria ninguno. Los finalizados nunca entran.
+
+    Orden: PRIMERO las 5 mejores ligas de Europa (en orden de prioridad y por
+    hora de inicio), luego el resto de ligas y deportes.
+    """
     import sports
 
-    ahora_local = datetime.now(timezone.utc).astimezone(sports.TZ_NIC)
+    ahora_utc = datetime.now(timezone.utc)
+    limite = ahora_utc + timedelta(hours=VENTANA_ANALISIS_H)
     partidos = []
     for sport in DEPORTES_DASHBOARD:
         try:
@@ -646,16 +663,17 @@ def _partidos_hoy():
             for g in data.get("games", []):
                 if g.get("state") == "post":
                     continue  # ya finalizados: no generar pick nuevo
-                # Solo partidos de HOY (hora Nicaragua) o que esten en vivo.
-                # El usuario NO quiere picks de manana.
                 if g.get("state") != "in":
+                    # Programado: debe arrancar dentro de la ventana.
                     try:
-                        fecha = datetime.fromisoformat(
+                        inicio = datetime.fromisoformat(
                             str(g.get("date", "")).replace("Z", "+00:00")
-                        ).astimezone(sports.TZ_NIC).date()
+                        )
+                        if inicio.tzinfo is None:
+                            inicio = inicio.replace(tzinfo=timezone.utc)
                     except (ValueError, TypeError):
-                        fecha = ahora_local.date()
-                    if fecha != ahora_local.date():
+                        continue
+                    if not (ahora_utc <= inicio <= limite):
                         continue
                 home = g.get("home") or {}
                 away = g.get("away") or {}
@@ -676,11 +694,34 @@ def _partidos_hoy():
                     "home_logo": home.get("logo"),
                     "away_logo": away.get("logo"),
                     "date": g.get("date", ""),
+                    "state": g.get("state"),
                     "odds": g.get("odds"),
                     "league": g.get("league_code"),
                 })
         except Exception as exc:
             print(f"[Dashboard] Error trayendo partidos {sport}: {exc}")
+
+    # PRIORIDAD: primero las 5 mejores ligas de Europa (en el orden de
+    # LIGAS_TOP_EUROPA y por hora de arranque), despues el resto (en vivo
+    # primero, luego por hora). Con max_partidos=80 y jornadas cargadas, sin
+    # este orden las grandes ligas podian quedar fuera del recorte.
+    def _clave(p):
+        liga = (p.get("league") or "").lower()
+        if liga in LIGAS_TOP_EUROPA:
+            return (0, LIGAS_TOP_EUROPA.index(liga), p.get("date") or "")
+        return (1, 0 if p.get("state") == "in" else 1, p.get("date") or "")
+
+    partidos.sort(key=_clave)
+
+    grandes = sum(
+        1 for p in partidos if (p.get("league") or "").lower() in LIGAS_TOP_EUROPA
+    )
+    if partidos:
+        print(
+            f"[Dashboard] Partidos en ventana: {len(partidos)} "
+            f"(5 grandes ligas: {grandes})",
+            flush=True,
+        )
     return partidos
 
 

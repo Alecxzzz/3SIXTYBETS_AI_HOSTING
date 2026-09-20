@@ -1052,9 +1052,15 @@ def dashboard_salud(user=Depends(get_current_user)):
 
 
 @app.post("/dashboard/generate")
-def dashboard_generate(user=Depends(get_admin)):
-    """Fuerza la generacion de picks ahora (admin)."""
-    return dashboard.generar_picks_dia()
+def dashboard_generate(max_partidos: int = 80, forzar: bool = False,
+                       user=Depends(get_admin)):
+    """Fuerza la generacion de picks ahora (admin).
+
+    max_partidos acota el lote para que la peticion HTTP no muera por
+    timeout: los partidos de las 5 mejores ligas de Europa van SIEMPRE
+    primero, asi un lote corto cubre las grandes ligas antes.
+    """
+    return dashboard.generar_picks_dia(max_partidos=max_partidos, forzar=forzar)
 
 
 @app.post("/dashboard/resolve")
