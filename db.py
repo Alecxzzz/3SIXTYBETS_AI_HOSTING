@@ -1161,6 +1161,22 @@ def pick_existe(event_id):
     return bool(row)
 
 
+def eventos_con_pick(dias: int = 2) -> set:
+    """Set de event_id con pick vigente (mismo criterio que pick_existe).
+
+    Version masiva: 1 sola consulta en vez de N (el dashboard analizaba 64
+    partidos = 64 viajes a MySQL, ~30s de espera en el endpoint de salud y en
+    cada ciclo de generacion).
+    """
+    desde = (now_utc() - timedelta(days=dias)).date()
+    rows = run_query(
+        "select distinct event_id from ai_picks "
+        "where result != 'ANULADO' and pick_date >= %s",
+        (desde,),
+    )
+    return {r["event_id"] for r in (rows or []) if r.get("event_id")}
+
+
 def list_picks_hoy():
     rows = run_query(
         "select * from ai_picks where pick_date = %s order by created_at asc",

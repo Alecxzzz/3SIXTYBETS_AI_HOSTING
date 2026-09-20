@@ -900,9 +900,10 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
         pass
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
+    con_pick = db.eventos_con_pick()
 
     for p in partidos[:max_partidos]:
-        if db.pick_existe(p["event_id"]):
+        if p["event_id"] in con_pick:
             omitidos += 1
             continue
         if p["event_id"] in descartes:
@@ -2244,24 +2245,31 @@ def salud_scheduler() -> dict:
     except Exception:
         s["pendientes"] = None
     # Avance de la jornada en las 5 grandes ligas: cuantos partidos de la
-    # ventana ya tienen pick (la IA los analiza primero).
-    try:
-        elegibles = _partidos_hoy()
-        con_pick = 0
-        for p in elegibles:
-            try:
-                if db.pick_existe(p["event_id"]):
-                    con_pick += 1
-            except Exception:
-                pass
-        s["partidos_en_ventana"] = len(elegibles)
-        s["partidos_con_pick"] = con_pick
-        s["partidos_5_grandes"] = sum(
-            1 for p in elegibles
-            if (p.get("league") or "").lower() in LIGAS_TOP_EUROPA
-        )
-    except Exception:
-        pass
+    # ventana ya tienen pick (la IA los analiza primero). Se cachea 2 min:
+    # _partidos_hoy() consulta varios scoreboards y este endpoint es de
+    # monitoreo (debe responder rapido aunque el cache este frio).
+    global _avance_cache
+    ahora = time.time()
+    if _avance_cache and ahora - _avance_cache[0] < 120:
+        s.update(_avance_cache[1])
+    else:
+        try:
+            elegibles = _partidos_hoy()
+            con_pick_ids = db.eventos_con_pick()
+            avance = {
+                "partidos_en_ventana": len(elegibles),
+                "partidos_con_pick": sum(
+                    1 for p in elegibles if p["event_id"] in con_pick_ids
+                ),
+                "partidos_5_grandes": sum(
+                    1 for p in elegibles
+                    if (p.get("league") or "").lower() in LIGAS_TOP_EUROPA
+                ),
+            }
+            _avance_cache = (ahora, avance)
+            s.update(avance)
+        except Exception:
+            pass
     # Integraciones: solo booleanos (configurada o no), nunca el valor de la
     # variable, para saber desde produccion que falta sin filtrar secretos.
     try:

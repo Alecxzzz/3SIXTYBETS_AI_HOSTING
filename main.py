@@ -236,7 +236,8 @@ Contenido: {contenido}
                 )
 
     except Exception as e:
-        return f"No se pudo buscar en web. Error: {e}"
+        print(f"[busqueda-web] error: {e}", flush=True)
+        return "No se pudo completar la busqueda web en este momento."
 
     if not resultados:
         return "No se encontraron resultados web."
@@ -1330,7 +1331,8 @@ def pagadito_create_payment(data: PagaditoPaymentIn, user=Depends(get_current_us
             user["id"], plan["code"], plan["amount"], currency="USD"
         )
     except RuntimeError as exc:
-        raise HTTPException(500, str(exc))
+        print(f"[pagos] create_pagadito_order fallo: {exc}", flush=True)
+        raise HTTPException(500, "No se pudo registrar la orden de pago. Intenta de nuevo.")
 
     client = PagaditoClient()
     try:
@@ -1349,13 +1351,17 @@ def pagadito_create_payment(data: PagaditoPaymentIn, user=Depends(get_current_us
             currency="USD",
         )
     except PagaditoAuthError as exc:
-        raise HTTPException(502, f"Pagadito rechazo las credenciales: {exc}")
+        print(f"[pagos] Pagadito auth: {exc}", flush=True)
+        raise HTTPException(502, "La pasarela de pago no esta disponible en este momento.")
     except PagaditoConnectionError as exc:
-        raise HTTPException(502, f"Pagadito no disponible: {exc}")
+        print(f"[pagos] Pagadito conexion: {exc}", flush=True)
+        raise HTTPException(502, "La pasarela de pago no esta disponible en este momento.")
     except PagaditoTransactionError as exc:
-        raise HTTPException(400, f"Pagadito rechazo la transaccion: {exc}")
+        print(f"[pagos] Pagadito transaccion: {exc}", flush=True)
+        raise HTTPException(400, "La pasarela rechazo la transaccion. Verifica los datos.")
     except PagaditoError as exc:
-        raise HTTPException(500, f"Error inesperado con Pagadito: {exc}")
+        print(f"[pagos] Pagadito inesperado: {exc}", flush=True)
+        raise HTTPException(500, "Error procesando el pago. Intenta de nuevo.")
 
     # La URL de checkout contiene el token de la TRANSACCION
     # (necesario para get_status en el retorno), ej:
@@ -1731,7 +1737,8 @@ def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
-        raise HTTPException(502, f"Error obteniendo detalle del partido: {exc}")
+        print(f"[stats/game] fallo {sport}/{event_id}: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener el detalle del partido.")
 
 # Terminos de casa de apuestas que NINGUN modelo puede mostrar en el
 # analisis del detalle del partido (se filtran a nivel de texto, no solo prompt).
@@ -1792,7 +1799,8 @@ def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
-        raise HTTPException(502, f"Error obteniendo detalle: {exc}")
+        print(f"[stats/ai-analysis] detalle {sport}/{event_id} fallo: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener el detalle del partido.")
 
     # Construir contexto para la IA
     teams = detail.get("teams", [])
@@ -1881,7 +1889,9 @@ Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
             respuesta = _limpiar_analisis_ia(respuesta)
         return {"analysis": respuesta, "context": contexto}
     except Exception as exc:
-        return {"analysis": f"No se pudo generar analisis: {exc}", "context": contexto}
+        print(f"[stats/ai-analysis] generacion fallo: {exc}", flush=True)
+        return {"analysis": "No se pudo generar el analisis en este momento. "
+                            "Intenta de nuevo en unos segundos.", "context": contexto}
 
 @app.get("/admin/keys")
 def admin_list_keys(user=Depends(get_admin)):
@@ -2096,7 +2106,9 @@ def hls_proxy(request: Request, url: str, referer: str = None):
             target, headers=headers, stream=True, timeout=(5, 30)
         )
     except http_requests.RequestException as exc:
-        raise HTTPException(502, f"Error contacting upstream: {exc}")
+        # No exponer detalles internos (URLs/hosts de origen) al cliente.
+        print(f"[hls-proxy] upstream fallo: {exc}", flush=True)
+        raise HTTPException(502, "La fuente de video no responde.")
 
     content_type = resp.headers.get("content-type", "")
     final_url = resp.url  # refleja redirects -> base correcta para rewrite
@@ -2333,7 +2345,8 @@ def api_standings(league: str, user=Depends(get_current_user)):
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:
-        raise HTTPException(502, f"No se pudo obtener la tabla: {exc}")
+        print(f"[standings] {league} fallo: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener la tabla de posiciones.")
 
 
 @app.get("/api/game/{sport}/{game_id}/players")
@@ -2395,6 +2408,8 @@ def admin_channel_test(url: str, user=Depends(get_admin)):
     """Prueba un m3u8/canal desde el servidor: status, content-type y si es HLS."""
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "URL invalida")
+    if not _url_tiene_host_publico(url):
+        raise HTTPException(400, "Host no permitido.")
     try:
         resp = http_requests.get(
             url,
@@ -2412,7 +2427,9 @@ def admin_channel_test(url: str, user=Depends(get_admin)):
             "ok": resp.status_code == 200 and is_hls,
         }
     except Exception as exc:
-        return {"url": url, "status": 0, "ok": False, "error": str(exc)}
+        print(f"[channel-test] {url[:80]} fallo: {exc}", flush=True)
+        return {"url": url, "status": 0, "ok": False,
+                "error": "La fuente no respondio."}
 
 
 @app.delete("/admin/keys/{code}")
