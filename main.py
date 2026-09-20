@@ -1531,21 +1531,25 @@ def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user))
 
     contexto = "\n".join(context_parts)
 
-    prompt = f"""Eres 3SIXTYBETS AI - analista deportivo. Analiza este partido y da:
-1. Tendencia del partido (quien domina, momento del juego)
-2. Jugador destacado (si hay datos) y por que
-3. Pronostico/edge si aplica
+    prompt = f"""Eres 3SIXTYBETS AI, analista deportivo. Analiza este partido y responde
+UNICAMENTE con las 4 secciones numeradas de abajo, en este orden exacto, sin
+encabezados extra, sin repetir el titulo, sin asteriscos ni markdown:
+
+1) Momento del partido: una o dos frases sobre como llega cada equipo y quien domina.
+2) Dato clave: la estadistica o el historial que mas pesa (citando numeros concretos).
+3) Jugador destacado: nombre y razon breve (si hay datos).
+4) Pronostico: el resultado deportivo esperado y tu nivel de confianza (alto/medio/bajo), en una sola frase.
+
+PROHIBIDO:
+- No menciones mercados ni terminos de casa de apuestas: nunca digas "empate no
+  apuesta", "DNB", "handicap", "linea", "edge", "O/U", "spread" ni similar.
+- No repitas el titulo "Analisis IA" ni agregues emojis de encabezado.
+- No inventes datos que no esten en la informacion del partido.
 
 DATOS DEL PARTIDO:
 {contexto}
 
-Responde en espanol, conciso (max 200 palabras), formato:
-🧠 Analisis IA:
-[jugada a jugada]
-⭐ Jugador destacado:
-[nombre y razon]
-🎯 Pronostico:
-[pronostico]"""
+Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
 
     try:
         from engine.search_engine import SearchEngine

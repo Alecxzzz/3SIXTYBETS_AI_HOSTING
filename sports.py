@@ -1333,6 +1333,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         "label": label,
         "event_id": event_id,
         "league": (SOCCER_LEAGUES.get(league_code) if league_code else label),
+        "league_code": league_code,
         "state": type_info.get("state"),
         "status": type_info.get("shortDetail", ""),
         "clock": status.get("displayClock", ""),
