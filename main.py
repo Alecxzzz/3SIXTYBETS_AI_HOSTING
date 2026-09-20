@@ -849,6 +849,16 @@ def _init_database():
 
             print("[startup] Database initialized successfully", flush=True)
 
+            # Limpieza de legado: picks guardados con mercados prohibidos
+            # (ej. "apuesta sin empate" = DNB). Se anulan para que no salgan
+            # en el dashboard y el partido pueda regenerarse con mercado valido.
+            try:
+                n = db.purgar_picks_prohibidos()
+                if n:
+                    print(f"[startup] {n} pick(s) anulados por mercado prohibido", flush=True)
+            except Exception as exc:
+                print(f"[startup] Purga de picks prohibidos fallo: {exc}", flush=True)
+
             # Dashboard: arrancar generacion automatica de picks en background
             try:
                 dashboard.iniciar_scheduler()
@@ -931,7 +941,9 @@ def health():
     return db.health_status()
 
 @app.post("/auth/signup")
-def auth_signup(data: AuthSignup):
+def auth_signup(data: AuthSignup, request: Request):
+    # Anti fuerza bruta / creacion masiva de cuentas (el registro es gratis).
+    _rate_limit(f"signup:{_ip_del_cliente(request)}", 5, 3600)
     try:
         user = db.create_user(data.username, data.password, data.redeem_code)
     except ValueError as exc:
@@ -940,7 +952,12 @@ def auth_signup(data: AuthSignup):
     return {"access_token": token, "user": user}
 
 @app.post("/auth/signin")
-def auth_signin(data: AuthSignin):
+def auth_signin(data: AuthSignin, request: Request):
+    # Anti fuerza bruta: 10 intentos por IP cada 15 min. Antes no habia limite
+    # y /health confirmaba ademas si el admin existia.
+    _rate_limit(f"signin:{_ip_del_cliente(request)}", 10, 900)
+    if data.username:
+        _rate_limit(f"signin-user:{data.username.strip().lower()}", 10, 900)
     user = db.get_user_by_username(data.username)
     if not user or not db.verify_password(data.password, user["password_hash"]):
         raise HTTPException(401, "Usuario o contrasena incorrecta.")
@@ -2339,6 +2356,13 @@ def live_index(request: Request, url: str, referer: str = None):
     """
     if not url or not re.match(r"^https?://", url.strip()):
         raise HTTPException(400, "URL invalida")
+    # Anti-SSRF: FFmpeg descargaria la URL desde el servidor. Sin este filtro
+    # cualquiera podia apuntarlo a localhost / metadatos de la nube / red
+    # interna y usar el backend como proxy ciego.
+    if not _url_tiene_host_publico(url.strip()):
+        raise HTTPException(403, "Host no permitido")
+    # Coste alto (proceso FFmpeg): limite por IP ademas del tope global.
+    _rate_limit(f"transcode:{_ip_del_cliente(request)}", 12, 600)
     try:
         key = transcoder.start_session(url.strip(), (referer or "").strip() or None)
         playlist = transcoder.get_playlist(key)

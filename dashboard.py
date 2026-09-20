@@ -93,8 +93,10 @@ def _texto_sin_datos(texto) -> bool:
 def _pick_calidad_ok(pick: dict) -> bool:
     """Gate de calidad para MOSTRAR un pick (pendientes y aciertos).
 
-    Rechaza: equipos '?', nombres genericos, sin cuota, cuota <= 1.20
-    y rationale/titulo con frases de 'sin datos'.
+    Rechaza: equipos '?', nombres genericos, sin cuota, cuota <= 1.20,
+    rationale/titulo con frases de 'sin datos' y mercados prohibidos
+    ('sin empate' / DNB). Es la ultima barrera: aunque un pick prohibido
+    llegara a la BD, nunca se muestra en el dashboard.
     """
     if not (_nombre_valido(pick.get("homeName")) and _nombre_valido(pick.get("awayName"))):
         return False
@@ -103,6 +105,8 @@ def _pick_calidad_ok(pick: dict) -> bool:
     if _texto_sin_datos(pick.get("rationale")) or _texto_sin_datos(pick.get("titulo")):
         return False
     if _texto_sin_datos(pick.get("eventName")):
+        return False
+    if _mercado_prohibido(pick.get("titulo"), pick.get("market"), pick.get("selection")):
         return False
     return True
 

@@ -1588,4 +1588,51 @@ def limpiar_descartes(horas: int = 48) -> bool:
     ))
 
 
+# ==============================
+# PURGA DE PICKS CON MERCADOS PROHIBIDOS
+# ==============================
+
+# Frases que NUNCA deben salir en un pick (mismo criterio que el catalogo de
+# dashboard.py). Se revisan contra titulo, market y selection.
+_FRASES_MERCADO_PROHIBIDO = (
+    "sin empate", "empate no", "no apuesta", "draw no bet", "dnb",
+)
+
+
+def purgar_picks_prohibidos() -> int:
+    """Anula picks ya guardados con mercados prohibidos (legado).
+
+    Los marca ANULADO (no los borra: conserva el historico) para que
+    desaparezcan del dashboard de inmediato y para que pick_existe() permita
+    regenerar el partido con un mercado valido. Devuelve cuantas filas anulo.
+    """
+    condiciones = " or ".join(
+        "(lower(coalesce(titulo, '')) like %s"
+        " or lower(coalesce(market, '')) like %s"
+        " or lower(coalesce(selection, '')) like %s)"
+        for _ in _FRASES_MERCADO_PROHIBIDO
+    )
+    params: list = []
+    for frase in _FRASES_MERCADO_PROHIBIDO:
+        patron = f"%{frase}%"
+        params.extend([patron, patron, patron])
+
+    sql = (
+        "update ai_picks set result = 'ANULADO', updated_at = now() "
+        "where result != 'ANULADO' and (" + condiciones + ")"
+    )
+    try:
+        run_query(sql, tuple(params))
+        filas = run_query(
+            "select count(*) as cnt from ai_picks where result = 'ANULADO'"
+            " and updated_at >= %s",
+            (now_utc() - timedelta(minutes=2),),
+            fetchone=True,
+        )
+        return int((filas or {}).get("cnt") or 0)
+    except Exception as exc:
+        print(f"[db] purgar_picks_prohibidos fallo: {exc}", flush=True)
+        return 0
+
+
 

@@ -20,6 +20,10 @@ import threading
 import time
 
 SESSION_TTL = 75          # segundos sin peticiones antes de apagar ffmpeg
+# Limite de sesiones simultaneas: /live/index.m3u8 es publico y cada sesion es
+# un FFmpeg consumiendo CPU. Sin tope, cualquiera podia agotar el servidor
+# (DoS trivial). Con el tope, el excedente recibe 503.
+MAX_SESIONES = int(os.environ.get("MAX_TRANSCODER_SESIONES", "4"))
 START_TIMEOUT = 30        # segundos max esperando la primera playlist
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
@@ -114,6 +118,15 @@ def start_session(url: str, referer: str | None = None) -> str:
             except Exception:
                 pass
             shutil.rmtree(sess["dir"], ignore_errors=True)
+        # Tope de sesiones vivas (DoS): contar procesos realmente activos.
+        vivas = sum(
+            1 for s in _sessions.values()
+            if s.get("proc") is not None and s["proc"].poll() is None
+        )
+        if vivas >= MAX_SESIONES:
+            raise RuntimeError(
+                "El servidor de video esta ocupado. Intenta de nuevo en un minuto."
+            )
         out_dir = _session_dir(key)
         shutil.rmtree(out_dir, ignore_errors=True)
         os.makedirs(out_dir, exist_ok=True)
