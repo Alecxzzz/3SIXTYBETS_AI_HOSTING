@@ -2583,8 +2583,9 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
 FREE_ESPN_MATCH = ("atlético madrid", "real madrid")   # equipos del partido destacado
-FREE_ESPN_WINDOW_BEFORE_MIN = 30             # se abre 30 min antes del kickoff
+FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
+FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 
 
 def _free_espn_buscar_partido():
@@ -2653,7 +2654,7 @@ def free_espn_match():
         })
 
     return {
-        "disponible": apertura <= ahora <= cierre,
+        "disponible": (apertura <= ahora <= cierre) and game.get("state") != "post",
         "apertura": apertura.isoformat(),
         "cierre": cierre.isoformat(),
         "kickoff": game.get("date"),
@@ -2686,7 +2687,17 @@ def free_espn_stream(request: Request):
             if referer:
                 headers["Referer"] = referer
             r = http_requests.get(u, headers=headers, timeout=8)
-            return r.status_code == 200 and "#EXTM3U" in r.text
+            if r.status_code != 200:
+                return False
+            text = r.text
+            # HLS playlist (m3u8)
+            if "#EXTM3U" in text:
+                return True
+            # Página embed HTML con player de video (iframe, video, o referencia m3u8)
+            low = text.lower()
+            if "<iframe" in low or "<video" in low or "m3u8" in low:
+                return True
+            return False
         except Exception:
             return False
 
@@ -2699,6 +2710,8 @@ def free_espn_stream(request: Request):
             if ahora < apertura:
                 segundos = int((apertura - ahora).total_seconds())
                 raise HTTPException(403, f"El acceso abre en {segundos // 60} minutos.")
+            if game.get("state") == "post":
+                raise HTTPException(403, "El partido ya termino.")
             if ahora > cierre:
                 raise HTTPException(403, "El acceso gratuito termino.")
     except HTTPException:
@@ -2708,6 +2721,8 @@ def free_espn_stream(request: Request):
     # 1) Stream fijo. 2) Tokens FRESCOS de los otros canales que transmiten
     #    el mismo partido (Partidos de Hoy). 3) Tokens guardados en la BD.
     candidatos = [(url_fija, None)]
+    # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
+    candidatos.append((FREE_ESPN_STREAM_EXTRA, None))
 
     try:
         tokens = [t.lower() for t in FREE_ESPN_MATCH]
