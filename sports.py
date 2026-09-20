@@ -732,7 +732,7 @@ def get_standings(league: str) -> dict:
         ESPN_HOSTS[_espn_host_idx["i"] % len(ESPN_HOSTS)]
         .replace("apis/site/v2/sports", "apis/v2/sports")
     )
-    data = _espn_get(f"{base}/{league}/standings", timeout=15).json()
+    data = _espn_get(f"{base}/soccer/{league}/standings", timeout=15).json()
 
     def _stats_map(stats: list) -> dict:
         out = {}
