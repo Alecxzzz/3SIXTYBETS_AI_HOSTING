@@ -20,3 +20,8 @@ audit*.err
 sse_test*.py
 *.log
 *.err
+
+# Scripts temporales de diagnostico local (llevan credenciales de prueba)
+_*.py
+_tmp_*.py
+sec_verify.py

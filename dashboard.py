@@ -110,11 +110,12 @@ def _pick_calidad_ok(pick: dict) -> bool:
 # CUOTAS REALES (odds-api.io)
 # ============================================================
 
-ODDS_API_KEY = (
-    os.getenv("ODDS_API_KEY")
-    or os.getenv("AI36_ODDS_API_KEY")
-    or "629022e8c84bef4696b26fd180f45a503d5a5aec633e826ef3f051984648ae4b"
-)
+ODDS_API_KEY = os.getenv("ODDS_API_KEY") or os.getenv("AI36_ODDS_API_KEY") or ""
+if not ODDS_API_KEY:
+    # Sin key, el sitio sigue funcionando: las cuotas caen a ESPN/estimadas.
+    # Configurar ODDS_API_KEY en las variables de entorno del hosting.
+    print("[WARN] ODDS_API_KEY no configurada: cuotas reales de odds-api.io "
+          "deshabilitadas (se usan cuotas de ESPN/estimadas).", flush=True)
 ODDS_API_BASE = "https://api.odds-api.io/v3"
 # Plan free: solo 2 bookmakers permitidos por la cuenta: Bet365 y Winpot MX.
 # (1xbet/Stake daban 403 "Access denied" y por eso faltaban cuotas reales.)
@@ -464,6 +465,23 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
 # MERCADOS DEFINIDOS POR DEPORTE (unico catalogo permitido)
 # ============================================================
 
+# Mercados PROHIBIDOS: "sin empate" (Draw No Bet) se retiro del catalogo
+# porque confundia ("Liverpool empate no apuesta (DNB)"). Si un modelo lo
+# devuelve igual, el pick se descarta: nunca se muestra en el dashboard.
+MERCADOS_PROHIBIDOS = (
+    "sin empate", "empate no", "no apuesta", "draw no bet", "dnb",
+)
+
+
+def _mercado_prohibido(*textos: str) -> bool:
+    """True si algun texto menciona un mercado prohibido."""
+    for t in textos:
+        bajo = (t or "").lower()
+        if any(frase in bajo for frase in MERCADOS_PROHIBIDOS):
+            return True
+    return False
+
+
 MERCADOS_FUTBOL = [
     "1X2 (equipo A o B)",
     "Over de goles (minimo 1.25 segun la cuota)",
@@ -476,7 +494,6 @@ MERCADOS_FUTBOL = [
     "Ambos equipos +1 tarjeta cada uno (SI/NO)",
     "Ambos equipos +2 tarjetas cada uno (SI/NO)",
     "Ambos equipos marcan",
-    "Apuesta sin empate",
     "Handicap europeo o asiatico equipo A o B (min +3.5 / max -2.5)",
     "Equipo A total de goles over 0.5",
     "Equipo B total de goles over 0.5",
@@ -850,9 +867,11 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
             "partidos": 0,
             "generados": 0,
             "omitidos_ya_con_pick": 0,
+            "omitidos_descartados": 0,
             "errores": 0,
             "rechazados_cuota": 0,
             "rechazados_calidad": 0,
+            "rechazados_prohibido": 0,
             "mensaje": (
                 f"El analisis inicia a las {HORA_INICIO_ANALISIS}:00 Nicaragua; "
                 f"ahora son las {ahora_local.strftime('%H:%M')}."
@@ -862,15 +881,28 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
     partidos = _partidos_hoy()
     generados = 0
     omitidos = 0
+    omitidos_descartados = 0
     errores = 0
     rechazados_cuota = 0
     rechazados_calidad = 0
+    rechazados_prohibido = 0
+
+    # Partidos ya analizados y descartados hace poco (cuota baja, sin datos,
+    # mercado prohibido...): no se vuelven a gastar llamadas de IA en ellos.
+    descartes = db.descartes_recientes(horas=6)
+    try:
+        db.limpiar_descartes(horas=48)
+    except Exception:
+        pass
 
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
 
     for p in partidos[:max_partidos]:
         if db.pick_existe(p["event_id"]):
             omitidos += 1
+            continue
+        if p["event_id"] in descartes:
+            omitidos_descartados += 1
             continue
 
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
@@ -941,10 +973,25 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
         pick = _parsear_pick_json(texto)
 
         if not pick:
-            errores += 1
+            # {"error": "sin datos"} es una respuesta valida de la IA: ese
+            # partido no tiene datos, no se reintenta cada ciclo. Un fallo
+            # transitorio (respuesta vacia/cortada) SI se reintenta.
+            if '"error"' in (texto or "").lower():
+                db.registrar_descarte(p["event_id"], "sin_datos")
+            else:
+                errores += 1
             continue
 
         market = (pick.get("market") or "").strip()
+
+        # Mercados prohibidos: "sin empate" (DNB) y similares nunca se muestran.
+        if _mercado_prohibido(
+            market, str(pick.get("titulo") or ""), str(pick.get("selection") or "")
+        ):
+            rechazados_prohibido += 1
+            db.registrar_descarte(p["event_id"], "mercado_prohibido")
+            continue
+
         # Validar que el mercado pertenece al catalogo del deporte y no repite
         # (el no-repetir solo bloquea en deportes que NO son futbol: en futbol
         # se genera pick para cada partido con mas volumen)
@@ -962,6 +1009,7 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
             odds_pick = 0
         if not odds_pick or odds_pick <= ODDS_MINIMA:
             rechazados_cuota += 1
+            db.registrar_descarte(p["event_id"], "cuota_baja")
             continue
 
         # Gate de calidad: nada de picks genericos o sin datos reales
@@ -974,6 +1022,7 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
             or _texto_sin_datos(p["event_name"])
         ):
             rechazados_calidad += 1
+            db.registrar_descarte(p["event_id"], "calidad")
             continue
 
         # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
@@ -986,6 +1035,7 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
         if cuota_real is not None:
             if cuota_real <= ODDS_MINIMA:
                 rechazados_cuota += 1
+                db.registrar_descarte(p["event_id"], "cuota_baja")
                 continue
             odds_final = round(cuota_real, 3)
         else:
@@ -1001,6 +1051,7 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
                 try:
                     if float(odds_final or 0) > 4.0:
                         rechazados_cuota += 1
+                        db.registrar_descarte(p["event_id"], "prop_cuota")
                         continue
                 except (TypeError, ValueError):
                     pass
@@ -1036,9 +1087,11 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
         "partidos": len(partidos),
         "generados": generados,
         "omitidos_ya_con_pick": omitidos,
+        "omitidos_descartados": omitidos_descartados,
         "errores": errores,
         "rechazados_cuota": rechazados_cuota,
         "rechazados_calidad": rechazados_calidad,
+        "rechazados_prohibido": rechazados_prohibido,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2172,7 +2225,11 @@ def _archivo_diario():
 def salud_scheduler() -> dict:
     """Idea 20: estado del scheduler para monitoreo (endpoint /dashboard/salud)."""
     s = dict(_salud)
-    s["ventana_analisis"] = f"{HORA_INICIO_ANALISIS}:00 Nicaragua"
+    s["ventana_analisis"] = (
+        f"desde {HORA_INICIO_ANALISIS}:00 Nicaragua, "
+        f"partidos dentro de {VENTANA_ANALISIS_H}h"
+    )
+    s["ligas_prioritarias"] = list(LIGAS_TOP_EUROPA)
     s["verificaciones_por_acierto"] = VERIFICACIONES_ACIERTO
     if _salud.get("ultima_generacion_ts"):
         s["ultima_generacion_hace_min"] = round(
@@ -2182,6 +2239,56 @@ def salud_scheduler() -> dict:
         s["pendientes"] = len(db.list_picks_pendientes() or [])
     except Exception:
         s["pendientes"] = None
+    # Avance de la jornada en las 5 grandes ligas: cuantos partidos de la
+    # ventana ya tienen pick (la IA los analiza primero).
+    try:
+        elegibles = _partidos_hoy()
+        con_pick = 0
+        for p in elegibles:
+            try:
+                if db.pick_existe(p["event_id"]):
+                    con_pick += 1
+            except Exception:
+                pass
+        s["partidos_en_ventana"] = len(elegibles)
+        s["partidos_con_pick"] = con_pick
+        s["partidos_5_grandes"] = sum(
+            1 for p in elegibles
+            if (p.get("league") or "").lower() in LIGAS_TOP_EUROPA
+        )
+    except Exception:
+        pass
+    # Integraciones: solo booleanos (configurada o no), nunca el valor de la
+    # variable, para saber desde produccion que falta sin filtrar secretos.
+    try:
+        import os as _os
+        s["integraciones"] = {
+            "odds_api": bool(ODDS_API_KEY),
+            "groq": bool(_os.getenv("GROQ_API_KEY")),
+            "you_api": bool(_os.getenv("YOU_API_KEY")),
+            "pagadito": bool(
+                _os.getenv("PAGADITO_UID") and _os.getenv("PAGADITO_WSK")
+            ),
+            "db": bool(
+                _os.getenv("MYSQL_URL") or _os.getenv("DATABASE_URL")
+                or _os.getenv("MYSQL_HOST")
+            ),
+            "ai36": bool(_os.getenv("AI36_GROQ_API_KEY")),
+        }
+    except Exception:
+        pass
+    # Descartes recientes: partidos ya analizados que no pasaron filtros
+    # (cuota baja, sin datos, mercado prohibido) -> llamadas de IA ahorradas.
+    try:
+        motivos = db.descartes_recientes(horas=6)
+        conteo: dict = {}
+        for motivo in motivos.values():
+            clave = motivo or "?"
+            conteo[clave] = conteo.get(clave, 0) + 1
+        s["descartes_6h"] = conteo
+        s["descartes_6h_total"] = len(motivos)
+    except Exception:
+        pass
     return s
 
 

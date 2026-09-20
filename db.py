@@ -257,6 +257,14 @@ def init_db():
             index favoritos_user_idx (user_id)
         )
         """,
+        """
+        create table if not exists ai_picks_descartados (
+            event_id varchar(64) primary key,
+            motivo varchar(40) not null,
+            created_at datetime not null,
+            index ai_picks_descartados_fecha_idx (created_at)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -1534,5 +1542,50 @@ def is_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
         fetchone=True,
     )
     return bool(row)
+
+
+# ==============================
+# PARTIDOS DESCARTADOS (ahorro de llamadas a la IA)
+# ==============================
+
+def registrar_descarte(event_id: str, motivo: str) -> bool:
+    """Anota un partido ya analizado y descartado (cuota baja, mala calidad).
+
+    Idempotente por event_id: si se vuelve a descartar, refresca la fecha.
+    """
+    if not event_id:
+        return False
+    return bool(run_query(
+        """
+        insert into ai_picks_descartados (event_id, motivo, created_at)
+        values (%s, %s, now())
+        on duplicate key update motivo = values(motivo), created_at = now()
+        """,
+        (str(event_id)[:64], (motivo or "?")[:40]),
+    ))
+
+
+def descartes_recientes(horas: int = 6) -> dict:
+    """{event_id: motivo} de los partidos descartados en las ultimas N horas.
+
+    Evita que el generador vuelva a gastar llamadas de IA en partidos que ya
+    se analizaron y no pasaron los filtros (cuota/calidad).
+    """
+    desde = now_utc() - timedelta(hours=horas)
+    rows = run_query(
+        "select event_id, motivo from ai_picks_descartados where created_at >= %s",
+        (desde,),
+    )
+    return {r["event_id"]: r.get("motivo") for r in (rows or [])}
+
+
+def limpiar_descartes(horas: int = 48) -> bool:
+    """Purga descartes viejos para que la tabla no crezca sin limite."""
+    desde = now_utc() - timedelta(hours=horas)
+    return bool(run_query(
+        "delete from ai_picks_descartados where created_at < %s",
+        (desde,),
+    ))
+
 
 
