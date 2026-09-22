@@ -1037,7 +1037,7 @@ def dashboard_home(user=Depends(get_current_user_optional)):
                 continue
             for campo in (
                 "titulo", "selection", "odds", "porque", "rationale",
-                "stats", "market", "confidence",
+                "stats", "market", "confidence", "tier", "verificado",
             ):
                 pick[campo] = None
             pick["bloqueado"] = True

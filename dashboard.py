@@ -22,8 +22,15 @@ from datetime import datetime, timedelta, timezone
 import db
 
 
-# Cuota minima aceptada para mostrar/generar un pick (todo debe estar ARRIBA de 1.20)
-ODDS_MINIMA = 1.20
+# Cuota GOLDEN PICK: rango publicable (todo debe estar entre 1.35 y 1.40)
+ODDS_MINIMA = 1.35
+ODDS_MAXIMA = 1.40
+TIER_GOLDEN = "GOLDEN PICK"
+# Minimo de partidos a cubrir manana (la IA analiza hasta lograrlo)
+MIN_JUEGOS_MANANA = 15
+# Doble verificacion antes de publicar: 2 pasadas independientes de la IA
+# contra fuentes externas; AMBAS deben coincidir.
+VERIFICACIONES_PUBLICAR = 2
 # Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
 HORA_CORTE_ACERTADOS = 20
 # La IA solo empieza a analizar/generar picks desde las 21:00 (9 PM) Nicaragua
@@ -59,14 +66,14 @@ def _hora_nicaragua():
 
 
 def _cuota_valida(pick):
-    """True si el pick no tiene cuota (se permite) o su cuota es > ODDS_MINIMA."""
+    """True si la cuota esta en el rango GOLDEN (1.35 - 1.40)."""
     odds = pick.get("odds")
     if odds is None:
-        return True
+        return False  # GOLDEN exige cuota real en rango
     try:
-        return float(odds) > ODDS_MINIMA
+        return ODDS_MINIMA <= float(odds) <= ODDS_MAXIMA
     except (TypeError, ValueError):
-        return True
+        return False
 
 
 # Frases que delatan picks generados SIN datos reales (basura que no se muestra)
@@ -643,7 +650,10 @@ REGLAS OBLIGATORIAS:
 3. NUNCA repitas el mismo mercado en los diferentes o mismos partidos.
 4. SIEMPRE ve variando las opciones: no te centres solo en 1X2 o goles.
 5. Busca SIEMPRE la apuesta mas FACIL de acertar CON VALOR (cuota justa vs probabilidad real).
-6. Respeta los minimos indicados (cuotas minimas, handicap minimo, under mas bajo en NBA/tenis).
+6. CUOTA OBLIGATORIA: el campo "odds" DEBE ser un numero entre 1.35 y 1.40
+   (GOLDEN PICK). Si el mercado no tiene cuota en ese rango, ELIGE OTRO
+   mercado/linea que si la tenga. PROHIBIDO devolver null o fuera de rango.
+7. Respeta los minimos indicados (handicap minimo, under mas bajo en NBA/tenis).
 7. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
 {
   "market": "<nombre del mercado del catalogo que elegiste (para validar)>",
@@ -856,8 +866,52 @@ def _ultimos5(sport: str, event_id: str, home_name: str, away_name: str) -> dict
     return salida
 
 
-def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
-    """Genera picks automaticos para los partidos de hoy.
+def _doble_verificar_pick(p: dict, market: str, selection: str, label: str) -> int:
+    """Doble verificacion antes de publicar un GOLDEN PICK.
+
+    Hace VERIFICACIONES_PUBLICAR (2) pasadas independientes de la IA contra
+    fuentes externas; cada pasada debe confirmar el MISMO mercado+seleccion.
+    Devuelve el nro de pasadas coincidentes (0..2). Solo con 2 se publica.
+    """
+    ok = 0
+    for i in range(VERIFICACIONES_PUBLICAR):
+        pregunta = (
+            f"VERIFICACION {i + 1}/{VERIFICACIONES_PUBLICAR} (independiente).\n"
+            f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
+            f"Liga: {p.get('league') or '?'} · Fecha: {p.get('date') or '?'}\n"
+            f"Pick propuesto: mercado '{market}' - seleccion '{selection}' ({label}).\n"
+            "Busca en la web (Sofascore/Flashscore/Fotmob/estadisticas oficiales) "
+            "los ultimos 5 partidos, forma local/visita, bajas y H2H. "
+            "Responde SOLO JSON: {\"market\": \"...\", \"selection\": \"...\", "
+            "\"confirma\": true|false}. Confirma=true SOLO si los datos apoyan "
+            "esa misma seleccion; si no, confirma=false."
+        )
+        try:
+            texto, _modelo = _preguntar_ia(pregunta)
+            data = _parsear_pick_json(texto)
+            if not data:
+                import json as _json
+                try:
+                    data = _json.loads((texto or "").strip())
+                except Exception:
+                    data = None
+            if not data:
+                continue
+            m2 = _market_norm(str(data.get("market") or ""))
+            s2 = str(data.get("selection") or "").strip().lower()
+            confirma = bool(data.get("confirma", True))
+            if confirma and m2 == _market_norm(market) and s2 == str(selection or "").strip().lower():
+                ok += 1
+        except Exception:
+            continue
+    return ok
+
+
+def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
+    """Genera GOLDEN PICKS automaticos (cuota 1.35-1.40, doble verificados).
+
+    Cubre minimo MIN_JUEGOS_MANANA (15) juegos de manana: analiza hasta
+    max_partidos partidos de la ventana (hoy + manana).
 
     Idempotente: salta partidos que ya tienen pick guardado hoy.
     FUTBOL: se genera pick para CADA partido disponible (mas volumen), el
@@ -890,6 +944,7 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
     rechazados_cuota = 0
     rechazados_calidad = 0
     rechazados_prohibido = 0
+    rechazados_sin_verificar = 0
 
     # Partidos ya analizados y descartados hace poco (cuota baja, sin datos,
     # mercado prohibido...): no se vuelven a gastar llamadas de IA en ellos.
@@ -1007,14 +1062,14 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
             errores += 1
             continue
 
-        # Rechazar picks con cuota demasiado baja (debe estar arriba de 1.20)
+        # GOLDEN PICK: la cuota debe estar en 1.35-1.40 (rechazo fuera de rango)
         try:
             odds_pick = float(pick.get("odds") or 0)
         except (TypeError, ValueError):
             odds_pick = 0
-        if not odds_pick or odds_pick <= ODDS_MINIMA:
+        if not odds_pick or not (ODDS_MINIMA <= odds_pick <= ODDS_MAXIMA):
             rechazados_cuota += 1
-            db.registrar_descarte(p["event_id"], "cuota_baja")
+            db.registrar_descarte(p["event_id"], "cuota_fuera_rango")
             continue
 
         # Gate de calidad: nada de picks genericos o sin datos reales
@@ -1031,16 +1086,16 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
             continue
 
         # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
-        # Si existe, reemplaza la estimacion de la IA y se valida contra el
-        # minimo; si no hay cuota real, se usa la estimada.
+        # GOLDEN: si hay cuota real debe caer en 1.35-1.40; si no hay cuota
+        # real se usa la estimada (que ya paso el filtro de rango).
         cuota_real = _cuota_real_pick(
             p["sport"], p["home_name"], p["away_name"], market,
             str(pick.get("selection", "")), str(pick.get("titulo") or ""),
         )
         if cuota_real is not None:
-            if cuota_real <= ODDS_MINIMA:
+            if not (ODDS_MINIMA <= cuota_real <= ODDS_MAXIMA):
                 rechazados_cuota += 1
-                db.registrar_descarte(p["event_id"], "cuota_baja")
+                db.registrar_descarte(p["event_id"], "cuota_fuera_rango")
                 continue
             odds_final = round(cuota_real, 3)
         else:
@@ -1060,6 +1115,15 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
                         continue
                 except (TypeError, ValueError):
                     pass
+
+        # DOBLE VERIFICACION antes de publicar: 2 pasadas independientes de
+        # la IA contra fuentes externas; AMBAS deben coincidir en
+        # mercado+seleccion. Sin doble OK no se publica (no es GOLDEN).
+        verificado = _doble_verificar_pick(p, market, str(pick.get("selection", "")), label)
+        if verificado < VERIFICACIONES_PUBLICAR:
+            rechazados_sin_verificar += 1
+            db.registrar_descarte(p["event_id"], "sin_verificar")
+            continue
 
         creado = db.create_ai_pick(
             sport=p["sport"],
@@ -1083,22 +1147,27 @@ def generar_picks_dia(max_partidos: int = 80, forzar: bool = False) -> dict:
                 [str(s) for s in (pick.get("stats") or [])[:5]],
                 ensure_ascii=False,
             ) if isinstance(pick.get("stats"), list) and pick.get("stats") else None,
+            tier=TIER_GOLDEN,
+            verificado=verificado,
         )
         if creado:
             generados += 1
             mercados_usados.add(_market_norm(market))
 
-    return {
+    stats_out = {
         "partidos": len(partidos),
         "generados": generados,
+        "meta_min_juegos": MIN_JUEGOS_MANANA,
         "omitidos_ya_con_pick": omitidos,
         "omitidos_descartados": omitidos_descartados,
         "errores": errores,
         "rechazados_cuota": rechazados_cuota,
         "rechazados_calidad": rechazados_calidad,
         "rechazados_prohibido": rechazados_prohibido,
+        "rechazados_sin_verificar": rechazados_sin_verificar,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    return stats_out
 
 
 # ============================================================
@@ -2086,7 +2155,7 @@ def resumen_dashboard(username: str) -> dict:
 
     - pronosticos_del_dia: SOLO los pendientes de hoy (los acertados se van
       moviendo a la seccion de acertados; los fallados nunca se muestran).
-      Nunca se muestran picks con cuota <= ODDS_MINIMA (1.20).
+      Nunca se muestran picks fuera del rango GOLDEN 1.35-1.40.
     - acertados: picks de HOY y de AYER con resultado ACIERTO (los de ayer solo
       hasta las 23:00 Nicaragua). Cada pick trae fechaLabel ('Hoy HH:MM' /
       'Ayer HH:MM') en hora Nicaragua.

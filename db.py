@@ -271,7 +271,8 @@ def init_db():
         run_query(statement)
 
     # Migracion ligera: columnas para instalaciones previas.
-    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league", "closing_odds"):
+    for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league", "closing_odds",
+                   "tier", "verificado"):
         exists = run_query(
             """
             select count(*) as cnt from information_schema.columns
@@ -281,7 +282,8 @@ def init_db():
             fetchone=True,
         )
         if exists and not exists.get("cnt"):
-            run_query(f"alter table ai_picks add column {column} varchar(400) null")
+            tipo = "int not null default 0" if column == "verificado" else "varchar(400) null" if column != "tier" else "varchar(20) null"
+            run_query(f"alter table ai_picks add column {column} {tipo}")
 
     stats_col = run_query(
         """
@@ -1059,6 +1061,11 @@ def public_ai_pick(row):
             stats = []
     except (ValueError, TypeError):
         stats = []
+    odds_val = float(row["odds"]) if row.get("odds") is not None else None
+    tier = row.get("tier")
+    # Compat: picks viejos en rango golden sin tier se marcan al vuelo
+    if not tier and odds_val is not None and 1.35 <= odds_val <= 1.40:
+        tier = "GOLDEN PICK"
     return {
         "id": row["id"],
         "sport": row["sport"],
@@ -1076,10 +1083,12 @@ def public_ai_pick(row):
         "selection": row.get("selection"),
         "porque": row.get("porque"),
         "stats": stats,
-        "odds": float(row["odds"]) if row.get("odds") is not None else None,
+        "odds": odds_val,
         "confidence": row.get("confidence"),
         "rationale": row.get("rationale"),
         "model": row.get("model"),
+        "tier": tier or ("GOLDEN PICK" if odds_val is not None and 1.35 <= odds_val <= 1.40 else "STANDARD"),
+        "verificado": int(row.get("verificado") or 0) if row.get("verificado") is not None else 0,
         "pickDate": row["pick_date"].isoformat() if row.get("pick_date") else None,
         "result": row.get("result") or "PENDIENTE",
         "closingOdds": row.get("closing_odds"),
@@ -1117,15 +1126,23 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    market, selection, odds=None, confidence=None,
                    rationale=None, model=None,
                    home_name=None, away_name=None, home_logo=None, away_logo=None,
-                   titulo=None, league=None, stats=None, porque=None):
+                   titulo=None, league=None, stats=None, porque=None,
+                   tier=None, verificado=0):
     pick_id = secrets.token_urlsafe(8)
+    # GOLDEN PICK: cuota 1.35-1.40 + doble verificacion antes de publicar
+    try:
+        _o = float(odds) if odds is not None else None
+    except (TypeError, ValueError):
+        _o = None
+    if tier is None:
+        tier = "GOLDEN PICK" if (_o is not None and 1.35 <= _o <= 1.40 and int(verificado or 0) >= 2) else "STANDARD"
     ok = run_query(
         """
         insert into ai_picks
         (id, sport, sport_label, event_id, event_name, home_name, away_name,
          home_logo, away_logo, event_date, market, titulo, league,
-         selection, porque, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s)
+         selection, porque, odds, confidence, rationale, stats_ultimos5, model, pick_date, result, created_at, tier, verificado)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDIENTE', %s, %s, %s)
         """,
         tuple(
             _param_seguro(v)
@@ -1133,7 +1150,7 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                 pick_id, sport, sport_label, event_id, event_name, home_name, away_name,
                 home_logo, away_logo, event_date, market, titulo, league,
                 selection, porque, odds, confidence, rationale, stats, model,
-                now_utc().date(), now_utc(),
+                now_utc().date(), now_utc(), tier, int(verificado or 0),
             )
         ),
     )
@@ -1187,7 +1204,7 @@ def list_picks_hoy():
 
 def list_picks_pendientes():
     rows = run_query(
-        "select * from ai_picks where result = 'PENDIENTE' order by created_at asc limit 40"
+        "select * from ai_picks where result = 'PENDIENTE' order by created_at asc limit 60"
     )
     return [public_ai_pick(r) for r in (rows or [])]
 
