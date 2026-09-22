@@ -1,6 +1,8 @@
+import copy
 import os
 import re
 import time
+import traceback
 from datetime import timedelta
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
@@ -866,6 +868,13 @@ def _init_database():
             except Exception as exc:
                 print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
 
+            # Dashboard: cache caliente desde el arranque (asi el primer
+            # usuario que entra no espera los ~30s del armado del payload).
+            try:
+                _refrescar_dashboard_async()
+            except Exception as exc:
+                print(f"[startup] Cache del dashboard no precalentado: {exc}", flush=True)
+
             # Partidos del dia: refrescador automatico (agenda la18hd.su).
             # Cada 30 min re-scrapea la agenda y actualiza la TV; si la fuente
             # falla, conserva la lista anterior.
@@ -1012,6 +1021,85 @@ def redeem_key(request: Request, data: RedeemIn, user=Depends(get_current_user))
 # DASHBOARD (pronosticos IA)
 # ==============================
 
+# ==============================
+# CACHE DEL DASHBOARD (respuesta instantanea)
+# ==============================
+# Armar el payload del dashboard cuesta decenas de segundos: varias consultas a
+# Aiven (cada conexion nueva paga handshake TLS) + el backfill de equipos/logos
+# que consulta ESPN. Antes cada carga del dashboard pagaba ese costo y el
+# frontend se quedaba en el skeleton ("Analizando partidos..."). Ahora:
+#   1. La respuesta se sirve SIEMPRE desde cache (nunca bloquea).
+#   2. El recálculo corre en segundo plano (stale-while-revalidate).
+#   3. El backfill de metadata (ESPN) tambien corre en segundo plano.
+_DASHBOARD_TTL_S = 60
+_dashboard_cache: dict = {"ts": 0.0, "data": None}
+_dashboard_lock = threading.Lock()
+_dashboard_refrescando = threading.Event()
+_BACKFILL_MIN_S = 300  # el backfill (ESPN) como maximo cada 5 min
+_backfill_ts = 0.0
+
+
+def refrescar_dashboard_cache():
+    """Recalcula el payload base del dashboard (llamada bloqueante)."""
+    try:
+        data = dashboard.resumen_dashboard("Invitado")
+    except Exception:
+        print("[Dashboard] Error refrescando cache del dashboard:\n" + traceback.format_exc(), flush=True)
+        return
+    _dashboard_cache["data"] = data
+    _dashboard_cache["ts"] = time.time()
+
+
+def _refrescar_dashboard_async():
+    """Lanza el recalculo en segundo plano (una sola vez a la vez)."""
+    if _dashboard_refrescando.is_set():
+        return
+    _dashboard_refrescando.set()
+
+    def _trabajo():
+        try:
+            refrescar_dashboard_cache()
+        finally:
+            _dashboard_refrescando.clear()
+
+    threading.Thread(target=_trabajo, daemon=True, name="dashboard-refresh").start()
+
+
+def _backfill_async():
+    """Repara equipos/logos de picks viejos sin bloquear la peticion."""
+    global _backfill_ts
+    if time.time() - _backfill_ts < _BACKFILL_MIN_S:
+        return
+    _backfill_ts = time.time()
+
+    def _trabajo():
+        try:
+            reparados = dashboard.backfill_picks_metadata()
+            if reparados:
+                print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
+        except Exception:
+            print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
+
+    threading.Thread(target=_trabajo, daemon=True, name="dashboard-backfill").start()
+
+
+def _dashboard_base():
+    """Payload base del dashboard (comun a todos los usuarios), desde cache.
+
+    Si aun no hay cache (arranque en frio) se calcula una vez; despues todas
+    las peticiones responden al instante mientras un hilo refresca los datos.
+    """
+    data = _dashboard_cache["data"]
+    if data is None:
+        with _dashboard_lock:
+            if _dashboard_cache["data"] is None:
+                refrescar_dashboard_cache()
+        return _dashboard_cache["data"] or {}
+    if time.time() - _dashboard_cache["ts"] >= _DASHBOARD_TTL_S:
+        _refrescar_dashboard_async()
+    return data
+
+
 @app.get("/dashboard")
 def dashboard_home(user=Depends(get_current_user_optional)):
     """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra).
@@ -1020,13 +1108,14 @@ def dashboard_home(user=Depends(get_current_user_optional)):
     freemium aplicado (2 picks gratis, el resto bloqueado). El chat/TV/stats
     siguen requiriendo cuenta.
     """
-    # Reparar picks viejos sin equipos/logos al vuelo (barato: 1 query si no hay nada)
-    try:
-        dashboard.backfill_picks_metadata()
-    except Exception:
-        pass
+    # Backfill de equipos/logos: en segundo plano (ESPN tarda y no debe
+    # bloquear la carga del dashboard).
+    _backfill_async()
+
     username = user["username"] if user else "Invitado"
-    data = dashboard.resumen_dashboard(username)
+    # Copia por peticion: el freemium modifica los picks (no contaminar cache).
+    data = copy.deepcopy(_dashboard_base())
+    data["welcome"] = f"Bienvenido, {username}"
 
     # FREEMIUM (incluye invitados): solo los primeros picks son completos;
     # el resto llega sin datos sensibles (el frontend pinta el candado y el

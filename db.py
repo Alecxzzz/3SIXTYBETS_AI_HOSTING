@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs
@@ -76,14 +77,78 @@ def get_connection(autocommit=True):
     return pymysql.connect(**connect_kwargs)
 
 
+# --------------------------------------------------------------------------
+# POOL DE CONEXIONES
+# --------------------------------------------------------------------------
+# Abrir una conexion a Aiven cuesta handshake TLS + autenticacion (~2s con
+# latencia inter-region). Antes se abria UNA POR QUERY: el dashboard hace
+# ~10 consultas seguidas y tardaba 20-30s (el frontend se quedaba cargando).
+# Reutilizamos las conexiones vivas; `ping(reconnect=True)` descarta las que
+# el servidor cerro por inactividad (wait_timeout).
+_POOL_MAX = max(2, int(os.getenv("MYSQL_POOL_MAX", "12")))
+_pool: list = []
+_pool_lock = threading.Lock()
+
+
+def _conexion_viva(conn):
+    try:
+        conn.ping(reconnect=True)
+        return True
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def _tomar_conexion():
+    """Conexion lista para usar (del pool si hay alguna viva)."""
+    while True:
+        with _pool_lock:
+            conn = _pool.pop() if _pool else None
+        if conn is None:
+            return get_connection(autocommit=True)
+        if _conexion_viva(conn):
+            return conn
+
+
+def _devolver_conexion(conn):
+    """Devuelve la conexion al pool (o la cierra si el pool esta lleno)."""
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    with _pool_lock:
+        if len(_pool) < _POOL_MAX:
+            _pool.append(conn)
+            return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
 def run_query(query, params=None, fetchone=False):
     for _ in range(5):
         conn = None
         cur = None
         try:
-            conn = get_connection(autocommit=True)
+            conn = _tomar_conexion()
             cur = conn.cursor()
-            cur.execute(query, params or ())
+            # Solo formateamos cuando hay parametros: asi las queries con un
+            # '%' literal (ej. "not like 'http%'") no rompen con
+            # "not enough arguments for format string".
+            if params:
+                cur.execute(query, params)
+            else:
+                cur.execute(query)
 
             stripped = query.strip().upper()
             if stripped.startswith("SELECT") or stripped.startswith("SHOW") or stripped.startswith("WITH"):
@@ -93,12 +158,20 @@ def run_query(query, params=None, fetchone=False):
             return True
         except pymysql.MySQLError as error:
             print("MySQL error:", error)
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
+            conn = None  # ya cerrada: no vuelve al pool
             time.sleep(3)
         finally:
-            if cur:
-                cur.close()
-            if conn:
-                conn.close()
+            try:
+                if cur:
+                    cur.close()
+            except Exception:
+                pass
+            _devolver_conexion(conn)
 
     return None
 
@@ -1275,9 +1348,26 @@ def count_user_messages(user_id: str) -> int:
     return int(row["c"]) if row else 0
 
 
+_archivo_asegurado = False
+
+
+def _asegurar_tabla_archivo():
+    """Crea ai_picks_archive UNA vez por proceso.
+
+    Antes el DDL corria en CADA llamada a count_aciertos_historico (o sea, en
+    cada carga del dashboard): un round trip extra y un bloqueo de metadata
+    innecesario en MySQL.
+    """
+    global _archivo_asegurado
+    if _archivo_asegurado:
+        return
+    run_query("create table if not exists ai_picks_archive like ai_picks")
+    _archivo_asegurado = True
+
+
 def count_aciertos_historico():
     # El archivo (idea 19) tambien cuenta: el historico nunca baja al archivar.
-    run_query("create table if not exists ai_picks_archive like ai_picks")
+    _asegurar_tabla_archivo()
     row = run_query(
         """
         select
