@@ -1070,7 +1070,7 @@ def dashboard_salud(user=Depends(get_current_user)):
 
 
 @app.post("/dashboard/generate")
-def dashboard_generate(max_partidos: int = 80, forzar: bool = False,
+def dashboard_generate(max_partidos: int = 120, forzar: bool = False,
                        user=Depends(get_admin)):
     """Fuerza la generacion de picks ahora (admin).
 

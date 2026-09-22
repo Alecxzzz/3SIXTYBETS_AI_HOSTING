@@ -22,10 +22,17 @@ from datetime import datetime, timedelta, timezone
 import db
 
 
-# Cuota GOLDEN PICK: rango publicable (todo debe estar entre 1.35 y 1.40)
-ODDS_MINIMA = 1.35
-ODDS_MAXIMA = 1.40
+# Rango GOLDEN PICK (elite: 1-2 por dia, doble verificados)
+ODDS_GOLDEN_MIN = 1.35
+ODDS_GOLDEN_MAX = 1.40
+# Rango GENERAL publicable (todos los demas picks del dia)
+ODDS_MINIMA = 1.20
+ODDS_MAXIMA = 2.50
+# Compat con codigo que usa el rango golden
+ODDS_MINIMA_GOLDEN = ODDS_GOLDEN_MIN
+ODDS_MAXIMA_GOLDEN = ODDS_GOLDEN_MAX
 TIER_GOLDEN = "GOLDEN PICK"
+TIER_STANDARD = "STANDARD"
 # Minimo de partidos a cubrir manana (la IA analiza hasta lograrlo)
 MIN_JUEGOS_MANANA = 15
 # Doble verificacion antes de publicar: 2 pasadas independientes de la IA
@@ -33,8 +40,9 @@ MIN_JUEGOS_MANANA = 15
 VERIFICACIONES_PUBLICAR = 2
 # Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
 HORA_CORTE_ACERTADOS = 20
-# La IA solo empieza a analizar/generar picks desde las 21:00 (9 PM) Nicaragua
-HORA_INICIO_ANALISIS = 21
+# La IA analiza/genera picks a cualquier hora (antes solo desde las 21:00).
+# Se mantiene la constante por compatibilidad pero ya no bloquea.
+HORA_INICIO_ANALISIS = 0
 # Las 5 mejores ligas de Europa: se analizan PRIMERO (prioridad del dashboard).
 LIGAS_TOP_EUROPA = ("eng.1", "esp.1", "ita.1", "ger.1", "fra.1")
 # Ventana de analisis: partidos que arrancan dentro de las proximas N horas
@@ -65,11 +73,23 @@ def _hora_nicaragua():
     return datetime.now(timezone.utc).astimezone(TZ_NICARAGUA)
 
 
+def _es_golden(odds) -> bool:
+    """True si la cuota cae en el rango elite GOLDEN (1.35-1.40)."""
+    try:
+        return ODDS_GOLDEN_MIN <= float(odds) <= ODDS_GOLDEN_MAX
+    except (TypeError, ValueError):
+        return False
+
+
 def _cuota_valida(pick):
-    """True si la cuota esta en el rango GOLDEN (1.35 - 1.40)."""
+    """True si la cuota esta en el rango GENERAL publicable (1.20-2.50).
+
+    Los GOLDEN (1.35-1.40) son solo 1-2 destacados; el resto de picks del
+    dia se publica en el rango general.
+    """
     odds = pick.get("odds")
     if odds is None:
-        return False  # GOLDEN exige cuota real en rango
+        return False
     try:
         return ODDS_MINIMA <= float(odds) <= ODDS_MAXIMA
     except (TypeError, ValueError):
@@ -650,9 +670,10 @@ REGLAS OBLIGATORIAS:
 3. NUNCA repitas el mismo mercado en los diferentes o mismos partidos.
 4. SIEMPRE ve variando las opciones: no te centres solo en 1X2 o goles.
 5. Busca SIEMPRE la apuesta mas FACIL de acertar CON VALOR (cuota justa vs probabilidad real).
-6. CUOTA OBLIGATORIA: el campo "odds" DEBE ser un numero entre 1.35 y 1.40
-   (GOLDEN PICK). Si el mercado no tiene cuota en ese rango, ELIGE OTRO
-   mercado/linea que si la tenga. PROHIBIDO devolver null o fuera de rango.
+6. CUOTA OBLIGATORIA: el campo "odds" DEBE ser un numero entre 1.20 y 2.50.
+   El rango ELITE 1.35-1.40 es GOLDEN PICK (lo marca el sistema, no tu).
+   Si el mercado no tiene cuota en 1.20-2.50, ELIGE OTRO mercado/linea que
+   si la tenga. PROHIBIDO devolver null o fuera de rango.
 7. Respeta los minimos indicados (handicap minimo, under mas bajo en NBA/tenis).
 7. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
 {
@@ -916,26 +937,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     Idempotente: salta partidos que ya tienen pick guardado hoy.
     FUTBOL: se genera pick para CADA partido disponible (mas volumen), el
     resto de deportes sigue la regla de no repetir mercado en la jornada.
-    Solo analiza desde las HORA_INICIO_ANALISIS (21:00/9PM) Nicaragua en
-    adelante, salvo que se pida forzar=True.
+    Analiza a cualquier hora (incluye partidos de hoy y de manana).
     """
-    ahora_local = _hora_nicaragua()
-    if ahora_local.hour < HORA_INICIO_ANALISIS and not forzar:
-        return {
-            "partidos": 0,
-            "generados": 0,
-            "omitidos_ya_con_pick": 0,
-            "omitidos_descartados": 0,
-            "errores": 0,
-            "rechazados_cuota": 0,
-            "rechazados_calidad": 0,
-            "rechazados_prohibido": 0,
-            "mensaje": (
-                f"El analisis inicia a las {HORA_INICIO_ANALISIS}:00 Nicaragua; "
-                f"ahora son las {ahora_local.strftime('%H:%M')}."
-            ),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
     partidos = _partidos_hoy()
     generados = 0
     omitidos = 0
@@ -1062,7 +1065,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             errores += 1
             continue
 
-        # GOLDEN PICK: la cuota debe estar en 1.35-1.40 (rechazo fuera de rango)
+        # RANGO GENERAL: la cuota IA debe estar en 1.20-2.50 (los GOLDEN
+        # 1.35-1.40 son 1-2 destacados, no todos).
         try:
             odds_pick = float(pick.get("odds") or 0)
         except (TypeError, ValueError):
@@ -1086,8 +1090,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             continue
 
         # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
-        # GOLDEN: si hay cuota real debe caer en 1.35-1.40; si no hay cuota
-        # real se usa la estimada (que ya paso el filtro de rango).
+        # Debe caer en el rango general 1.20-2.50; si no hay cuota real se
+        # usa la estimada (que ya paso el filtro de rango).
         cuota_real = _cuota_real_pick(
             p["sport"], p["home_name"], p["away_name"], market,
             str(pick.get("selection", "")), str(pick.get("titulo") or ""),
@@ -1116,14 +1120,17 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 except (TypeError, ValueError):
                     pass
 
-        # DOBLE VERIFICACION antes de publicar: 2 pasadas independientes de
-        # la IA contra fuentes externas; AMBAS deben coincidir en
-        # mercado+seleccion. Sin doble OK no se publica (no es GOLDEN).
-        verificado = _doble_verificar_pick(p, market, str(pick.get("selection", "")), label)
-        if verificado < VERIFICACIONES_PUBLICAR:
-            rechazados_sin_verificar += 1
-            db.registrar_descarte(p["event_id"], "sin_verificar")
-            continue
+        # DOBLE VERIFICACION solo para candidatos GOLDEN (cuota 1.35-1.40):
+        # 2 pasadas independientes de la IA; AMBAS deben coincidir. Los
+        # STANDARD se publican con la verificacion del analisis principal.
+        es_golden = _es_golden(odds_final)
+        verificado = 0
+        if es_golden:
+            verificado = _doble_verificar_pick(p, market, str(pick.get("selection", "")), label)
+            if verificado < VERIFICACIONES_PUBLICAR:
+                rechazados_sin_verificar += 1
+                db.registrar_descarte(p["event_id"], "sin_verificar")
+                continue
 
         creado = db.create_ai_pick(
             sport=p["sport"],
@@ -1147,7 +1154,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 [str(s) for s in (pick.get("stats") or [])[:5]],
                 ensure_ascii=False,
             ) if isinstance(pick.get("stats"), list) and pick.get("stats") else None,
-            tier=TIER_GOLDEN,
+            tier=TIER_GOLDEN if es_golden else TIER_STANDARD,
             verificado=verificado,
         )
         if creado:
@@ -2155,7 +2162,8 @@ def resumen_dashboard(username: str) -> dict:
 
     - pronosticos_del_dia: SOLO los pendientes de hoy (los acertados se van
       moviendo a la seccion de acertados; los fallados nunca se muestran).
-      Nunca se muestran picks fuera del rango GOLDEN 1.35-1.40.
+      Rango publicable 1.20-2.50; GOLDEN PICK (1.35-1.40, doble verificados)
+      son 1-2 destacados, no todos.
     - acertados: picks de HOY y de AYER con resultado ACIERTO (los de ayer solo
       hasta las 23:00 Nicaragua). Cada pick trae fechaLabel ('Hoy HH:MM' /
       'Ayer HH:MM') en hora Nicaragua.

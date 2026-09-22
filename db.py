@@ -1063,9 +1063,12 @@ def public_ai_pick(row):
         stats = []
     odds_val = float(row["odds"]) if row.get("odds") is not None else None
     tier = row.get("tier")
-    # Compat: picks viejos en rango golden sin tier se marcan al vuelo
-    if not tier and odds_val is not None and 1.35 <= odds_val <= 1.40:
-        tier = "GOLDEN PICK"
+    # Compat: tier segun cuota (GOLDEN 1.35-1.40, resto STANDARD)
+    if not tier and odds_val is not None:
+        if 1.35 <= odds_val <= 1.40:
+            tier = "GOLDEN PICK"
+        elif 1.20 <= odds_val <= 2.50:
+            tier = "STANDARD"
     return {
         "id": row["id"],
         "sport": row["sport"],
@@ -1129,13 +1132,19 @@ def create_ai_pick(sport, sport_label, event_id, event_name, event_date,
                    titulo=None, league=None, stats=None, porque=None,
                    tier=None, verificado=0):
     pick_id = secrets.token_urlsafe(8)
-    # GOLDEN PICK: cuota 1.35-1.40 + doble verificacion antes de publicar
+    # GOLDEN PICK: cuota 1.35-1.40 + doble verificacion antes de publicar.
+    # STANDARD: resto del rango publicable 1.20-2.50.
     try:
         _o = float(odds) if odds is not None else None
     except (TypeError, ValueError):
         _o = None
     if tier is None:
-        tier = "GOLDEN PICK" if (_o is not None and 1.35 <= _o <= 1.40 and int(verificado or 0) >= 2) else "STANDARD"
+        if _o is not None and 1.35 <= _o <= 1.40 and int(verificado or 0) >= 2:
+            tier = "GOLDEN PICK"
+        elif _o is not None and 1.20 <= _o <= 2.50:
+            tier = "STANDARD"
+        else:
+            tier = "STANDARD"
     ok = run_query(
         """
         insert into ai_picks
