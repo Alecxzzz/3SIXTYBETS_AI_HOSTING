@@ -71,7 +71,7 @@ CANAL_NOMBRES = {
     "fanatiz6": "Fanatiz 6",
     "fanatiz10": "Fanatiz 10",
     "beinsportes": "beIN Sports",
-    "hypermotion1": "Hypermotion",
+    "hypermotion1": "Laliga Hypermotion",
 }
 
 
