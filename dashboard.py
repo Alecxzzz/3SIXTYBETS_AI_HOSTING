@@ -2184,6 +2184,13 @@ def resumen_dashboard(username: str) -> dict:
         and _evento_vigente(p)
     ]
 
+    # GOLDEN PICK primero (el frontend tambien reordena). El flag "golden"
+    # se calcula ANTES del freemium: sobrevive al enmascarado, asi el orden
+    # tambien es correcto para invitados (que reciben el tier en null).
+    for p in pendientes:
+        p["golden"] = (p.get("tier") or "") == TIER_GOLDEN
+    pendientes.sort(key=lambda p: 0 if p.get("golden") else 1)
+
     # Aciertos visibles: hoy + ayer (hasta 23:00 Nicaragua), sin cuotas bajas
     aciertos_visibles_lista = aciertos_visibles()
     ids_hoy = {p["id"] for p in aciertos_hoy}
