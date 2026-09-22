@@ -1117,12 +1117,18 @@ def dashboard_home(user=Depends(get_current_user_optional)):
     data = copy.deepcopy(_dashboard_base())
     data["welcome"] = f"Bienvenido, {username}"
 
-    # FREEMIUM (incluye invitados): solo los primeros picks son completos;
-    # el resto llega sin datos sensibles (el frontend pinta el candado y el
-    # boton de desbloqueo).
+    # FREEMIUM (incluye invitados): los GOLDEN PICK son SIEMPRE premium y las
+    # 2 gratis son picks NORMALES (antes los 2 gratis eran los golden, porque
+    # el orden los pone primero). El resto llega sin datos sensibles: el
+    # frontend pinta el candado y el boton de desbloqueo.
     if not user or not db.es_premium_row(user):
-        for i, pick in enumerate(data.get("pronosticos_del_dia") or []):
-            if i < PICKS_GRATIS:
+        gratis_restantes = PICKS_GRATIS
+        for pick in data.get("pronosticos_del_dia") or []:
+            gratis = False
+            if not pick.get("golden") and gratis_restantes > 0:
+                gratis = True
+                gratis_restantes -= 1
+            if gratis:
                 continue
             for campo in (
                 "titulo", "selection", "odds", "porque", "rationale",
