@@ -95,8 +95,12 @@ def get(path: str, ttl: int = 900, api_key: str | None = None):
 
 
 def soccer_schedule(fecha: str):
-    """Calendario de futbol del dia (fecha 'YYYY-MM-DD')."""
-    return get(f"soccer/trial/v4/en/schedules/{fecha}/schedule.json")
+    """Calendario de futbol del dia (fecha 'YYYY-MM-DD').
+
+    OJO: el archivo final es schedules.json (PLURAL); con schedule.json el
+    gateway responde 404 'Invalid route.' (verificado 2026-09-22).
+    """
+    return get(f"soccer/trial/v4/en/schedules/{fecha}/schedules.json")
 
 
 def soccer_summary(event_id: str):

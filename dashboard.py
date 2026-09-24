@@ -778,8 +778,10 @@ def _partidos_hoy():
 
 
 def _preguntar_ia(mensaje: str):
-    """Pregunta a las DOS IAs. Primero 365AI (Groq); si falla, Demian (You.com).
+    """Pregunta a 365AI (Groq) para el dashboard.
 
+    Demian (You.com) queda reservado para el chat principal. El dashboard
+    permite seleccionar su propio modelo sin alterar el de estadísticas.
     Devuelve (texto_respuesta, modelo_usado) o (None, None).
     """
     # IA 1: 365AI (Groq)
@@ -787,13 +789,14 @@ def _preguntar_ia(mensaje: str):
         from ai.ia36 import llamar_modelo, GROQ_API_KEY
 
         if GROQ_API_KEY:
-            data, _ = llamar_modelo(
+            data, modelo = llamar_modelo(
                 [
                     {"role": "system", "content": PROMPT_PICKS},
                     {"role": "user", "content": mensaje},
                 ],
                 usar_tools=False,
                 max_tokens=700,
+                modelo_actual=os.getenv("AI36_DASHBOARD_GROQ_MODEL", "openai/gpt-oss-120b"),
             )
             content = ""
             choices = data.get("choices") or [{}]
@@ -801,20 +804,12 @@ def _preguntar_ia(mensaje: str):
             content = message.get("content") or ""
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
             if content:
-                return content, "365AI"
+                return content, modelo or "365AI"
     except Exception as exc:
         print(f"[Dashboard] 365AI fallo: {exc}")
 
-    # IA 2: Demian (You.com)
-    try:
-        from engine.search_engine import SearchEngine
-
-        respuesta = SearchEngine().ask_you(mensaje, system_prompt=PROMPT_PICKS)
-        if respuesta:
-            return respuesta, "Demian"
-    except Exception as exc:
-        print(f"[Dashboard] Demian fallo: {exc}")
-
+    # El dashboard usa exclusivamente 365AI/Groq.
+    # Demian (You.com) queda reservado para el chat principal.
     return None, None
 
 

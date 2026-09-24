@@ -1975,18 +1975,29 @@ DATOS DEL PARTIDO:
 
 Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
 
+    # El análisis IA de estadísticas usa un modelo Groq dedicado.
+    # Demian/You queda reservado exclusivamente para el chat principal.
     try:
-        from engine.search_engine import SearchEngine
-        respuesta = SearchEngine().ask_you(prompt)
-        # Sanitizar: sin markdown, sin encabezados duplicados y sin
-        # terminologia de casa de apuestas, pase lo que pase con el modelo.
+        from ai.ia36 import llamar_modelo, GROQ_API_KEY
+        if not GROQ_API_KEY:
+            return {"analysis": "El análisis estadístico no está disponible: falta AI36_GROQ_API_KEY.", "context": contexto}
+        data, _ = llamar_modelo(
+            [
+                {"role": "system", "content": prompt.split("DATOS DEL PARTIDO:")[0]},
+                {"role": "user", "content": prompt},
+            ],
+            usar_tools=False,
+            max_tokens=500,
+            modelo_actual=os.getenv("AI36_STATS_GROQ_MODEL", "openai/gpt-oss-120b"),
+        )
+        choices = data.get("choices") or [{}]
+        respuesta = ((choices[0].get("message") or {}).get("content") or "").strip()
         if respuesta:
-            respuesta = _limpiar_analisis_ia(respuesta)
-        return {"analysis": respuesta, "context": contexto}
+            return {"analysis": _limpiar_analisis_ia(respuesta), "context": contexto}
+        return {"analysis": "No se pudo generar el análisis en este momento. Intenta de nuevo.", "context": contexto}
     except Exception as exc:
-        print(f"[stats/ai-analysis] generacion fallo: {exc}", flush=True)
-        return {"analysis": "No se pudo generar el analisis en este momento. "
-                            "Intenta de nuevo en unos segundos.", "context": contexto}
+        print(f"[stats/ai-analysis] Groq fallo: {exc}", flush=True)
+        return {"analysis": "No se pudo generar el analisis en este momento. Intenta de nuevo.", "context": contexto}
 
 @app.get("/admin/keys")
 def admin_list_keys(user=Depends(get_admin)):

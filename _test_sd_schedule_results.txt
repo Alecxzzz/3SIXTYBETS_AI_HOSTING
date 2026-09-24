@@ -1,0 +1,38 @@
+{
+  "mlb_schedule_simple": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "mlb_by_date_dash": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "mlb_by_date_no_dash": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "mlb_scoreboard": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "mlb_season_games": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "nba_schedule_simple": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "nba_by_date": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "nfl_schedule_simple": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ],
+  "nhl_schedule_simple": [
+    "404",
+    "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+  ]
+}
