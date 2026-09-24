@@ -27,6 +27,7 @@ SOCCER_LEAGUES = {
     "uefa.champions": "Champions League",
     "uefa.europa": "Europa League",
     "uefa.europa.conf": "Conference League",
+    "uefa.nations": "UEFA Nations League",
     # Americas
     "mex.1": "Liga MX (Mexico)",
     "usa.1": "MLS (USA)",
