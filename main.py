@@ -505,8 +505,15 @@ def chat(request: Request, data: Chat,
         respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
         if respuesta_36:
             return respuesta_36
-        # 365AI saturada o sin respuesta -> fallback automatico a Demian (abajo)
+        # 365AI saturada o sin respuesta: no hay fallback automatico a Demian.
+        # Demian/You queda reservado para cuando el usuario selecciona el chat
+        # You, nunca para rescues silenciosos de 365AI.
         fallo_365 = True
+        if fallo_365:
+            return (
+                "365AI esta saturada o no respondio en este momento. "
+                "No se uso Demian automaticamente; intenta de nuevo en unos segundos."
+            )
 
     if not YOU_API_KEY:
         if fallo_365:
