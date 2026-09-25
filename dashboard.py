@@ -292,13 +292,13 @@ def _evento_oddsapi_con_mercados(sport: str, home_name: str, away_name: str):
 def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
     """Devuelve cuotas reales, priorizando el detalle completo de Doradobet."""
     try:
-        from cuotas_doradobet import get_events_deporte, _encontrar_evento, detalle_mercado_para_ia
+        from cuotas_doradobet import get_events_deporte, event_id_doradobet, detalle_mercado_para_ia
 
         data = get_events_deporte(sport)
         if data:
-            evento = _encontrar_evento(data, home_name, away_name, None)
+            evento = event_id_doradobet(sport, home_name, away_name)
             if evento:
-                detalle = detalle_mercado_para_ia(evento.get("id"))
+                detalle = detalle_mercado_para_ia(evento)
                 if detalle:
                     return detalle
     except Exception as exc:

@@ -433,8 +433,14 @@ def event_id_doradobet(sport, home_name, away_name):
 
 
 
-def detalle_mercado_para_ia(event_id, limite_odds=1000):
-    """Normaliza GetEventDetails (incluidos childMarkets) para el prompt de la IA."""
+def detalle_mercado_para_ia(event_id):
+    """Lee TODOS los mercados, líneas, selecciones y cuotas del evento.
+
+    No se trunca el payload: incluye mercados generales y childMarkets de
+    props (jugadores, asistencias, remates, tarjetas, etc.). El límite de
+    contexto del modelo se aplica después, si fuera necesario, de forma
+    explícita y visible.
+    """
     data = _detalle_completo(event_id) or {}
     odds = {o.get("id"): o for o in data.get("odds") or []}
     children = {c.get("id"): c for c in data.get("childMarkets") or []}
@@ -457,14 +463,6 @@ def detalle_mercado_para_ia(event_id, limite_odds=1000):
                         continue
                     sel = (odd.get("name") or odd.get("sv") or "").strip()
                     filas.append((nombre, etiqueta, sel, precio, odd.get("sv")))
-                    if len(filas) >= limite_odds:
-                        break
-                if len(filas) >= limite_odds:
-                    break
-            if len(filas) >= limite_odds:
-                break
-        if len(filas) >= limite_odds:
-            break
     if not filas:
         return ""
     lineas = ["MERCADOS Y CUOTAS DORADOBET (incluye props de jugadores):"]
