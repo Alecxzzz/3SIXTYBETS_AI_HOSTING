@@ -39,11 +39,9 @@ except ImportError:  # pragma: no cover - depende del entorno
 # Si el entorno no define la key, se usa la key proporcionada por el usuario
 # para que la IA funcione out-of-the-box. En producción sobreescribir con AI36_GROQ_API_KEY.
 GROQ_API_KEY = os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY") or ""
-ODDS_API_KEY = os.getenv("AI36_ODDS_API_KEY") or ""
 
 GROQ_URL = os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
 GROQ_MODELS_URL = os.getenv("AI36_GROQ_MODELS_URL", "https://api.groq.com/openai/v1/models")
-ODDS_URL = os.getenv("AI36_ODDS_URL", "https://odds-api.io/api/v1/odds")
 
 MODELO_DEFAULT = os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b")
 # Cadena de fallback con modelos REALES disponibles en la cuenta de Groq
@@ -93,22 +91,6 @@ tools = [
                     "query": {"type": "string", "description": "Consulta de búsqueda específica."}
                 },
                 "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_cuotas",
-            "description": "Busca cuotas decimales reales de un partido específico entre dos equipos.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "equipo_local": {"type": "string"},
-                    "equipo_visitante": {"type": "string"},
-                    "deporte": {"type": "string", "description": "ej: soccer, baseball, basketball"}
-                },
-                "required": ["equipo_local", "equipo_visitante"]
             }
         }
     }
@@ -223,35 +205,6 @@ def buscar_web(query, max_resultados=3):
         return truncar_texto(texto)
     except Exception as e:
         return f"Error en la búsqueda: {e}"
-
-
-def buscar_cuotas(equipo_local, equipo_visitante, deporte=None):
-    """Cuotas decimales reales vía odds-api.io."""
-    if not ODDS_API_KEY:
-        return "Consulta de cuotas no configurada (falta AI36_ODDS_API_KEY)."
-    try:
-        params = {"apiKey": ODDS_API_KEY}
-        if deporte:
-            params["sport"] = deporte
-        r = requests.get(ODDS_URL, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        eventos = data if isinstance(data, list) else data.get("data", [])
-        texto = ""
-        for evento in eventos:
-            home = str(evento.get("home_team", "")).lower()
-            away = str(evento.get("away_team", "")).lower()
-            if equipo_local.lower() in home or equipo_local.lower() in away or \
-               equipo_visitante.lower() in home or equipo_visitante.lower() in away:
-                texto += f"Partido: {evento.get('home_team')} vs {evento.get('away_team')}\n"
-                for book in evento.get("bookmakers", []):
-                    texto += f"  Casa: {book.get('title')}\n"
-                    for market in book.get("markets", []):
-                        for outcome in market.get("outcomes", []):
-                            texto += f"    {outcome.get('name')}: {outcome.get('price')}\n"
-        return truncar_texto(texto) if texto else "No se encontraron cuotas para este partido."
-    except Exception as e:
-        return f"Error consultando cuotas: {e}"
 
 
 def compactar_messages(messages, max_chars=MAX_CHARS_MENSAJES):

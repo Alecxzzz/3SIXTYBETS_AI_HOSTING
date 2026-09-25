@@ -290,11 +290,21 @@ def _evento_oddsapi_con_mercados(sport: str, home_name: str, away_name: str):
 
 
 def _cuotas_reales(sport: str, home_name: str, away_name: str) -> str:
-    """Devuelve un texto con las cuotas reales (odds-api.io) del partido.
+    """Devuelve cuotas reales, priorizando el detalle completo de Doradobet."""
+    try:
+        from cuotas_doradobet import get_events_deporte, _encontrar_evento, detalle_mercado_para_ia
 
-    Matching difuso por nombre de equipos contra los eventos del deporte.
-    Devuelve "" si no hay coincidencia o no hay cuotas.
-    """
+        data = get_events_deporte(sport)
+        if data:
+            evento = _encontrar_evento(data, home_name, away_name, None)
+            if evento:
+                detalle = detalle_mercado_para_ia(evento.get("id"))
+                if detalle:
+                    return detalle
+    except Exception as exc:
+        print(f"[Dashboard] Error leyendo detalle Doradobet: {exc}", flush=True)
+
+    # Fallback existente: odds-api.io.
     evento, mercados, _local = _evento_oddsapi_con_mercados(sport, home_name, away_name)
     if not evento or not mercados:
         return ""
@@ -778,38 +788,19 @@ def _partidos_hoy():
 
 
 def _preguntar_ia(mensaje: str):
-    """Pregunta a 365AI (Groq) para el dashboard.
+    """Consulta temporal a Demian para generar picks del Dashboard.
 
-    Demian (You.com) queda reservado para el chat principal. El dashboard
-    permite seleccionar su propio modelo sin alterar el de estadísticas.
-    Devuelve (texto_respuesta, modelo_usado) o (None, None).
+    Demian se usa aquí de forma explícita mientras no exista una fuente de
+    cuotas体育 verificada para todas las competiciones. No modifica el chat.
     """
-    # IA 1: 365AI (Groq)
     try:
-        from ai.ia36 import llamar_modelo, GROQ_API_KEY
+        from ai.model import generar_respuesta_you
 
-        if GROQ_API_KEY:
-            data, modelo = llamar_modelo(
-                [
-                    {"role": "system", "content": PROMPT_PICKS},
-                    {"role": "user", "content": mensaje},
-                ],
-                usar_tools=False,
-                max_tokens=700,
-                modelo_actual=os.getenv("AI36_DASHBOARD_GROQ_MODEL", "openai/gpt-oss-120b"),
-            )
-            content = ""
-            choices = data.get("choices") or [{}]
-            message = choices[0].get("message") or {}
-            content = message.get("content") or ""
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            if content:
-                return content, modelo or "365AI"
+        contenido = generar_respuesta_you(PROMPT_PICKS, mensaje)
+        if contenido and not str(contenido).startswith(("ERROR:", "Error leyendo")):
+            return contenido, "Demian tipster"
     except Exception as exc:
-        print(f"[Dashboard] 365AI fallo: {exc}")
-
-    # El dashboard usa exclusivamente 365AI/Groq.
-    # Demian (You.com) queda reservado para el chat principal.
+        print(f"[Dashboard] Demian fallo: {exc}")
     return None, None
 
 
@@ -1054,8 +1045,15 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # (el no-repetir solo bloquea en deportes que NO son futbol: en futbol
         # se genera pick para cada partido con mas volumen)
         if _market_norm(market) not in {_market_norm(m) for m in disponibles}:
-            errores += 1
-            continue
+            # Los mercados de props adicionales (Goleador, Asistencias,
+            # Remates a Puerta, Tarjetas, etc.) pueden existir solo en
+            # GetEventDetails; se aceptan únicamente si Doradobet los publicó.
+            from cuotas_doradobet import event_id_doradobet, detalle_mercado_para_ia
+            evento_dorado = event_id_doradobet(p["sport"], p["home_name"], p["away_name"])
+            detalle = detalle_mercado_para_ia(evento_dorado) if evento_dorado else ""
+            if not detalle or _market_norm(market) not in _market_norm(detalle):
+                errores += 1
+                continue
         if p["sport"] != "soccer" and _market_norm(market) in mercados_usados:
             errores += 1
             continue
@@ -2179,6 +2177,27 @@ def resumen_dashboard(username: str) -> dict:
         and _evento_vigente(p)
     ]
 
+    # Separar por jornada local de Nicaragua. El scheduler genera en una
+    # ventana de 32 horas, por lo que un pick creado hoy puede ser de manana;
+    # no debe aparecer mezclado con los partidos de hoy.
+    ahora_nic = _hora_nicaragua()
+    manana = ahora_nic.date() + timedelta(days=1)
+
+    def _es_manana(pick):
+        fecha = pick.get("eventDate")
+        if not fecha:
+            return False
+        try:
+            inicio = datetime.fromisoformat(str(fecha).replace("Z", "+00:00"))
+            if inicio.tzinfo is None:
+                inicio = inicio.replace(tzinfo=timezone.utc)
+            return inicio.astimezone(TZ_NICARAGUA).date() == manana
+        except (ValueError, TypeError):
+            return False
+
+    pronosticos_hoy = [p for p in pendientes if not _es_manana(p)]
+    pronosticos_manana = [p for p in pendientes if _es_manana(p)]
+
     # GOLDEN PICK primero (el frontend tambien reordena). El flag "golden"
     # se calcula ANTES del freemium: sobrevive al enmascarado, asi el orden
     # tambien es correcto para invitados (que reciben el tier en null).
@@ -2206,7 +2225,8 @@ def resumen_dashboard(username: str) -> dict:
     return {
         "welcome": f"Bienvenido, {username}",
         "stats": {
-            "pronosticos_del_dia": len(pendientes),
+            "pronosticos_del_dia": len(pronosticos_hoy),
+            "pronosticos_manana": len(pronosticos_manana),
             "pronosticos_acertados_por_la_ia": len(aciertos_visibles_lista),
             "aciertos_ayer": len(aciertos_de_ayer),
             "fallados_hoy": len(fallados),
@@ -2216,7 +2236,8 @@ def resumen_dashboard(username: str) -> dict:
             "historico_aciertos": historial.get("aciertos", 0),
             "historico_resueltos": historial.get("resueltos", 0),
         },
-        "pronosticos_del_dia": pendientes,
+        "pronosticos_del_dia": pronosticos_hoy,
+        "pronosticos_manana": pronosticos_manana,
         "pronosticos_acertados": aciertos_visibles_lista,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }

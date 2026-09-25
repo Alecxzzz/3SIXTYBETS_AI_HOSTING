@@ -36,9 +36,11 @@ _DORADO_BACKOFF = 300
 
 
 def _norm(s: str) -> str:
-    s = (s or "").lower()
+    s = (s or "").lower().replace("b�lgica", "belgica").replace("b�lgium", "belgium")
+    s = s.encode("ascii", "ignore").decode("ascii")
     reemplazos = {
         "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n",
+        "�": "", "b�lgica": "belgica", "b�lgium": "belgium", "italia": "italia",
     }
     for a, b in reemplazos.items():
         s = s.replace(a, b)
@@ -407,3 +409,66 @@ def cuota_doradobet(sport: str, home_name: str, away_name: str,
         return None
 
     return None
+
+
+
+def event_id_doradobet(sport, home_name, away_name):
+    """Resuelve el eventId de Doradobet por nombres de equipos."""
+    data = get_events_deporte(sport)
+    if not data:
+        return None
+    ev = _encontrar_evento(data, home_name, away_name, None)
+    if ev:
+        return str(ev.get("id"))
+    # Fallback tolerante a la codificación dañada que devuelve el widget.
+    def simple(value):
+        return re.sub(r"[^a-z]", "", str(value or "").encode("ascii", "ignore").decode().lower())
+    h, a = simple(home_name), simple(away_name)
+    comps = {c.get("id"): c.get("name") for c in data.get("competitors") or []}
+    for event in data.get("events") or []:
+        names = [simple(comps.get(i)) for i in event.get("competitorIds") or []]
+        if {h, a} == set(names) and (h and a):
+            return str(event.get("id"))
+    return None
+
+
+
+def detalle_mercado_para_ia(event_id, limite_odds=1000):
+    """Normaliza GetEventDetails (incluidos childMarkets) para el prompt de la IA."""
+    data = _detalle_completo(event_id) or {}
+    odds = {o.get("id"): o for o in data.get("odds") or []}
+    children = {c.get("id"): c for c in data.get("childMarkets") or []}
+    filas = []
+    for mercado in data.get("markets") or []:
+        nombre = (mercado.get("name") or "").strip()
+        if not nombre:
+            continue
+        objetivos = [children.get(mid) for mid in mercado.get("childMarketIds") or []]
+        objetivos = [c for c in objetivos if c]
+        if not objetivos:
+            objetivos = [{"desktopOddIds": mercado.get("desktopOddIds") or []}]
+        for hijo in objetivos:
+            etiqueta = (hijo.get("name") or hijo.get("shortName") or nombre).strip()
+            for grupo in hijo.get("desktopOddIds") or []:
+                for oid in (grupo if isinstance(grupo, list) else [grupo]):
+                    odd = odds.get(oid) or {}
+                    precio = _precio(odd)
+                    if not precio:
+                        continue
+                    sel = (odd.get("name") or odd.get("sv") or "").strip()
+                    filas.append((nombre, etiqueta, sel, precio, odd.get("sv")))
+                    if len(filas) >= limite_odds:
+                        break
+                if len(filas) >= limite_odds:
+                    break
+            if len(filas) >= limite_odds:
+                break
+        if len(filas) >= limite_odds:
+            break
+    if not filas:
+        return ""
+    lineas = ["MERCADOS Y CUOTAS DORADOBET (incluye props de jugadores):"]
+    for mercado, hijo, seleccion, precio, linea in filas:
+        sufijo = f" linea={linea}" if linea and linea != "0.5" else ""
+        lineas.append(f"- {mercado} | {hijo} | {seleccion}{sufijo} | cuota={precio:g}")
+    return "\n".join(lineas)

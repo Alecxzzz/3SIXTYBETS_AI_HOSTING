@@ -1130,19 +1130,23 @@ def dashboard_home(user=Depends(get_current_user_optional)):
     # frontend pinta el candado y el boton de desbloqueo.
     if not user or not db.es_premium_row(user):
         gratis_restantes = PICKS_GRATIS
-        for pick in data.get("pronosticos_del_dia") or []:
-            gratis = False
-            if not pick.get("golden") and gratis_restantes > 0:
-                gratis = True
-                gratis_restantes -= 1
-            if gratis:
-                continue
-            for campo in (
-                "titulo", "selection", "odds", "porque", "rationale",
-                "stats", "market", "confidence", "tier", "verificado",
-            ):
-                pick[campo] = None
-            pick["bloqueado"] = True
+        for lista in (
+            data.get("pronosticos_del_dia") or [],
+            data.get("pronosticos_manana") or [],
+        ):
+            for pick in lista:
+                gratis = False
+                if not pick.get("golden") and gratis_restantes > 0:
+                    gratis = True
+                    gratis_restantes -= 1
+                if gratis:
+                    continue
+                for campo in (
+                    "titulo", "selection", "odds", "porque", "rationale",
+                    "stats", "market", "confidence", "tier", "verificado",
+                ):
+                    pick[campo] = None
+                pick["bloqueado"] = True
     return data
 
 

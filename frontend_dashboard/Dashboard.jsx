@@ -27,6 +27,20 @@ async function apiGet(path) {
   return res.json();
 }
 
+async function analizarPartido(pick) {
+  const token = localStorage.getItem("access_token");
+  const params = new URLSearchParams({
+    sport: pick.sport,
+    event_id: pick.eventId || pick.event_id,
+  });
+  const res = await fetch(`${API_URL}/stats/ai-analysis?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload.detail || `Error ${res.status}`);
+  return payload;
+}
+
 /* ---------- CARTA GOLDEN -> FOTO PNG (canvas, sin dependencias) ---------- */
 
 function wrapText(ctx, text, maxWidth) {
@@ -163,9 +177,25 @@ async function compartirCarta(p) {
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  const [vista, setVista] = useState("dia"); // "dia" | "acertados"
+  const [vista, setVista] = useState("dia"); // "dia" | "manana" | "acertados"
   const [error, setError] = useState(null);
   const [compartiendo, setCompartiendo] = useState(null);
+  const [analizando, setAnalizando] = useState(null);
+  const [analisis, setAnalisis] = useState({});
+  const [errorAnalisis, setErrorAnalisis] = useState({});
+
+  const ejecutarAnalisis = async (p) => {
+    setAnalizando(p.id);
+    setErrorAnalisis((actual) => ({ ...actual, [p.id]: null }));
+    try {
+      const resultado = await analizarPartido(p);
+      setAnalisis((actual) => ({ ...actual, [p.id]: resultado.analysis || resultado }));
+    } catch (e) {
+      setErrorAnalisis((actual) => ({ ...actual, [p.id]: e.message || "No se pudo completar el análisis." }));
+    } finally {
+      setAnalizando(null);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -187,7 +217,9 @@ export default function Dashboard() {
   const picks =
     vista === "dia"
       ? data.pronosticos_del_dia || []
-      : data.pronosticos_acertados || [];
+      : vista === "manana"
+        ? data.pronosticos_manana || []
+        : data.pronosticos_acertados || [];
 
   const esGolden = (p) =>
     (p.tier || "") === "GOLDEN PICK" ||
@@ -207,6 +239,13 @@ export default function Dashboard() {
           <span className="dash-stat-label">Pronósticos del día</span>
         </button>
         <button
+          className={`dash-stat ${vista === "manana" ? "activa" : ""}`}
+          onClick={() => setVista("manana")}
+        >
+          <span className="dash-stat-num">{data.stats.pronosticos_manana || 0}</span>
+          <span className="dash-stat-label">Partidos de mañana analizados</span>
+        </button>
+        <button
           className={`dash-stat ${vista === "acertados" ? "activa" : ""}`}
           onClick={() => setVista("acertados")}
         >
@@ -222,8 +261,10 @@ export default function Dashboard() {
         {picks.length === 0 && (
           <p className="dash-vacio">
             {vista === "dia"
-              ? "La IA aún no generó pronósticos hoy. Vuelve en unos minutos."
-              : "Aún no hay pronósticos acertados hoy."}
+              ? "La IA aún no generó pronósticos para hoy. Vuelve en unos minutos."
+              : vista === "manana"
+                ? "La IA está analizando los partidos de mañana. El resultado aparecerá aquí automáticamente."
+                : "Aún no hay pronósticos acertados hoy."}
           </p>
         )}
         {picks.map((p) => (
@@ -246,6 +287,15 @@ export default function Dashboard() {
               {p.confidence ? <span>Confianza {p.confidence}</span> : null}
               {p.verificado >= 2 ? <span className="dash-verif">x2 verificado</span> : null}
               {p.rationale ? <p className="dash-pick-edge">{p.rationale}</p> : null}
+            {errorAnalisis[p.id] ? <p className="dash-analysis-error">{errorAnalisis[p.id]}</p> : null}
+            {analisis[p.id] ? <div className="dash-analysis">{analisis[p.id]}</div> : null}
+            <button
+              className="dash-analyze"
+              disabled={analizando === p.id || !p.eventId}
+              onClick={() => ejecutarAnalisis(p)}
+            >
+              {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
+            </button>
             </div>
             <button
               className="dash-share"
