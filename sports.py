@@ -638,19 +638,33 @@ def _parse_tennis(events: list) -> list:
         return None
 
     def _player(competitor: dict) -> dict:
+        # ESPN usa `athlete` en individuales y `roster` en dobles.
+        # Antes solo se leia athlete, por eso los dobles aparecian como "?".
         ath = competitor.get("athlete") or {}
-        name = ath.get("displayName") or ath.get("fullName") or "?"
-        # Foto de la jugadora primero; si no hay, bandera del pais.
-        imagen = (
-            _extraer_url(ath.get("headshot"))
-            or _extraer_url(ath.get("flag"))
-            or _extraer_url(ath.get("logo"))
+        roster = competitor.get("roster") or {}
+        athletes = roster.get("athletes") or ([ath] if ath else [])
+        name = (
+            roster.get("displayName")
+            or ath.get("displayName")
+            or ath.get("fullName")
+            or (roster.get("athletes") or [{}])[0].get("displayName")
+            or "?"
         )
+        imagen = None
+        for player in athletes:
+            imagen = (
+                _extraer_url(player.get("headshot"))
+                or _extraer_url(player.get("flag"))
+                or _extraer_url(player.get("logo"))
+            )
+            if imagen:
+                break
+        first = athletes[0] if athletes else {}
         return {
-            "id": ath.get("id"),
+            "id": roster.get("id") or ath.get("id") or first.get("id"),
             "name": name,
-            "short_name": ath.get("shortName") or name,
-            "abbr": ath.get("shortName") or "",
+            "short_name": roster.get("shortDisplayName") or ath.get("shortName") or name,
+            "abbr": roster.get("shortDisplayName") or ath.get("shortName") or "",
             "logo": imagen,
             "color": None,
             "alt_color": None,
@@ -1170,15 +1184,20 @@ def get_game_detail(sport: str, event_id: str) -> dict:
 
         def _tplayer(competitor: dict) -> dict:
             ath = competitor.get("athlete") or {}
-            name = ath.get("displayName") or "?"
-            flag = ath.get("flag") or ath.get("logo")
-            if isinstance(flag, list):
-                flag = flag[0] if flag else None
+            roster = competitor.get("roster") or {}
+            athletes = roster.get("athletes") or ([ath] if ath else [])
+            name = roster.get("displayName") or ath.get("displayName") or ath.get("fullName") or "?"
+            flag = None
+            for player in athletes:
+                flag = player.get("headshot") or player.get("flag") or player.get("logo")
+                if isinstance(flag, dict): flag = flag.get("href")
+                if isinstance(flag, list): flag = flag[0] if flag else None
+                if flag: break
             return {
-                "id": ath.get("id"),
+                "id": roster.get("id") or ath.get("id"),
                 "name": name,
-                "short_name": ath.get("shortName") or name,
-                "abbr": ath.get("shortName") or "",
+                "short_name": roster.get("shortDisplayName") or ath.get("shortName") or name,
+                "abbr": roster.get("shortDisplayName") or ath.get("shortName") or "",
                 "logo": flag,
                 "color": None,
                 "alt_color": None,
