@@ -367,7 +367,15 @@ def soporte_chat(user: dict, mensaje: str) -> dict:
     )
     # Modelo APARTE de soporte (ai/soporte.py): no comparte codigo ni
     # modelos con 36AI ni Demian. Si no responde, cae al aviso de WhatsApp.
-    texto = ia_soporte(prompt)
+    # El proveedor externo no debe tumbar el endpoint de soporte. Groq puede
+    # devolver un error inesperado (por ejemplo, un cambio en el formato de
+    # la respuesta o una limite temporal) que antes terminaba en un 500.
+    try:
+        texto = ia_soporte(prompt)
+    except Exception as exc:
+        print(f"[Soporte] Error inesperado del modelo: {exc}")
+        texto = None
+
     respuesta = (texto or "").strip()
     if not respuesta:
         respuesta = (

@@ -52,8 +52,10 @@ MODELO = os.getenv("SUPPORT_AI_MODEL", "qwen/qwen3.8-27b")
 MODELO_RESPALDO = os.getenv("SUPPORT_AI_MODEL_FALLBACK", "qwen/qwen3.8-27b")
 # 512 alcanza de sobra: SIN razonamiento, la respuesta de soporte es corta.
 MAX_TOKENS = int(os.getenv("SUPPORT_AI_MAX_TOKENS", "512"))
-TIMEOUT = int(os.getenv("SUPPORT_AI_TIMEOUT", "45"))
-MAX_REINTENTOS = int(os.getenv("SUPPORT_AI_MAX_REINTENTOS", "3"))
+TIMEOUT = int(os.getenv("SUPPORT_AI_TIMEOUT", "20"))
+# Dos intentos como maximo: el chat debe responder en segundos. Antes, tres
+# reintentos de 45 s hacian que la interfaz pareciera colgada.
+MAX_REINTENTOS = int(os.getenv("SUPPORT_AI_MAX_REINTENTOS", "2"))
 
 # Etiquetas de razonamiento que qwen3 mete DENTRO del content (a diferencia
 # de gpt-oss, que las manda en un campo aparte). Concatenadas para evitar
