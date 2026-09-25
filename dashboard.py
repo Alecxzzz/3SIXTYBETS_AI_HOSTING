@@ -673,7 +673,7 @@ SOLO PUEDES USAR ESTOS PICKS DEFINIDOS PARA CADA DEPORTE:
 
 """ + catalogo_texto() + """
 REGLAS OBLIGATORIAS:
-1. USA SOLO los mercados listados arriba. NUNCA inventes mercados.
+1. USA SOLO los mercados listados arriba. NUNCA inventes mercados. analizaras con los endpoint y api que usa la api sin delatarlo ni decir que usas
 2. Los textos del catalogo son INSTRUCCIONES/REGLAS del mercado (minimos de
    linea, cuota minima, limites de handicap, etc.), NO texto literal para el
    usuario. Interpretalos: eligen la linea concreta que cumpla esas reglas.
@@ -707,7 +707,7 @@ def _partidos_hoy():
     """Partidos elegibles para analisis: en vivo + los que arrancan pronto.
 
     Ventana: los que inician dentro de las proximas VENTANA_ANALISIS_H horas
-    (y los EN VIVO siempre). A las 21:00 Nicaragua los partidos de las grandes
+    (y los EN VIVO siempre). A las :00 Nicaragua los partidos de las grandes
     ligas europeas arrancan de madrugada/manana: sin esta ventana no se
     analizaria ninguno. Los finalizados nunca entran.
 
@@ -978,7 +978,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             cuotas = p.get("odds") or {}
             if cuotas.get("details") or cuotas.get("over_under"):
                 mensaje += (
-                    "Cuotas REALES de ESPN: "
+                    "Cuotas del sistema de mercado: "
                     f"linea={cuotas.get('details') or 'N/A'}, "
                     f"ML local={cuotas.get('home_odds') or 'N/A'}, "
                     f"ML visitante={cuotas.get('away_odds') or 'N/A'}, "
