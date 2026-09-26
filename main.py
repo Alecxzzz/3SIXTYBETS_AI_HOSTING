@@ -366,53 +366,102 @@ def get_current_user_optional(authorization: str = Header(None)):
 # de la IA es dinero real) sin afectar el flujo normal del frontend.
 
 import secrets as _secrets
+import hmac as _hmac
+import hashlib as _hashlib
+import base64 as _b64
 
 CHAT_CONV_TTL_S = 30 * 60   # 30 min de inactividad
-_chat_conv: dict = {}        # token -> {"user_id": str|None, "last": float}
-_chat_conv_lock = threading.Lock()
+
+# El token de conversacion se firma con HMAC en vez de guardarse en memoria.
+# Motivo: Northflank corre VARIAS instancias del backend. Con un dict en
+# memoria, /chat/iniciar podia caer en la instancia A y /chat en la B, donde el
+# token no existe -> 403 "Conversacion expirada o invalida" aunque acabase de
+# emitirse. Un token autocontenido se valida igual en cualquier instancia.
+_CHAT_SECRET = (
+    os.getenv("CHAT_CONV_SECRET")
+    or os.getenv("JWT_SECRET")
+    or os.getenv("SECRET_KEY")
+    or _secrets.token_hex(32)   # fallback: valido mientras el proceso no reinicie
+)
+# Si el proceso se reinicia y no hay secret fijo, los tokens firmados con el
+# secret aleatorio dejan de validar. Por eso avisamos en los logs.
+if not any(
+    os.getenv(k) for k in ("CHAT_CONV_SECRET", "JWT_SECRET", "SECRET_KEY")
+):
+    print(
+        "[WARN] CHAT_CONV_SECRET no configurado: se genera uno aleatorio. "
+        "Si Northflank corre mas de una instancia o reinicia seguido, "
+        "define CHAT_CONV_SECRET en el panel para que los tokens sobrevivan.",
+        flush=True,
+    )
 
 
-def _chat_conv_limpiar() -> None:
-    """Elimina tokens vencidos y recorta el dict (llamar con lock tomado)."""
-    ahora = time.time()
-    vivos = {
-        t: v for t, v in _chat_conv.items()
-        if ahora - v["last"] < CHAT_CONV_TTL_S
-    }
-    _chat_conv.clear()
-    _chat_conv.update(vivos)
+def _chat_conv_firmar(user_id: str | None) -> str:
+    """Token firmado y autocontenido: <usuario>.<emitido>.<firma> en base64url.
+
+    La firma va en base64url (no en crudo) porque un digest HMAC puede contener
+    el byte 0x2E ('.') y romperia el split al verificar.
+    """
+    usuario = (user_id or "anon").encode("utf-8")
+    emitido = str(int(time.time())).encode("ascii")
+    firma = _hmac.new(
+        _CHAT_SECRET.encode("utf-8"),
+        usuario + b"." + emitido,
+        _hashlib.sha256,
+    ).digest()
+    firma_b64 = _b64.urlsafe_b64encode(firma).decode("ascii").rstrip("=")
+    crudo = usuario + b"." + emitido + b"." + firma_b64.encode("ascii")
+    return _b64.urlsafe_b64encode(crudo).decode("ascii").rstrip("=")
+
+
+def _chat_conv_verificar(token: str, user_id: str | None) -> bool:
+    """Valida firma y vigencia. No toca memoria: funciona en cualquier instancia."""
+    if not token:
+        return False
+
+    try:
+        padding = "=" * (-len(token) % 4)
+        crudo = _b64.urlsafe_b64decode(token + padding)
+        usuario, emitido, firma_b64 = crudo.split(b".")
+        # firma_b64 son bytes: el padding debe ser bytes o el concat falla.
+        firma = _b64.urlsafe_b64decode(firma_b64 + b"=" * (-len(firma_b64) % 4))
+    except Exception:
+        return False
+
+    esperado = _hmac.new(
+        _CHAT_SECRET.encode("utf-8"),
+        usuario + b"." + emitido,
+        _hashlib.sha256,
+    ).digest()
+    if not _hmac.compare_digest(firma, esperado):
+        return False
+
+    try:
+        edad = time.time() - int(emitido)
+    except (TypeError, ValueError):
+        return False
+    if edad < 0 or edad >= CHAT_CONV_TTL_S:
+        return False
+
+    # El token queda amarrado al usuario que lo inicio (si lo hubo).
+    if usuario != b"anon" and user_id and usuario.decode("utf-8") != user_id:
+        return False
+
+    return True
 
 
 def _chat_conv_crear(user_id: str | None) -> str:
-    token = _secrets.token_urlsafe(32)
-    with _chat_conv_lock:
-        _chat_conv[token] = {"user_id": user_id, "last": time.time()}
-        # Tope duro: si algo raro infla el dict, fuera los mas viejos.
-        while len(_chat_conv) > 2000:
-            _chat_conv_limpiar()
-            if len(_chat_conv) <= 2000:
-                break
-            mas_viejo = min(_chat_conv, key=lambda t: _chat_conv[t]["last"])
-            _chat_conv.pop(mas_viejo, None)
-    return token
+    """Emite un token firmado (sin estado)."""
+    return _chat_conv_firmar(user_id)
 
 
 def _chat_conv_validar(token: str | None, user_id: str | None) -> bool:
-    """True si el token existe y sigue vigente; lo renueva (sliding TTL)."""
-    if not token:
-        return False
-    with _chat_conv_lock:
-        reg = _chat_conv.get(token)
-        if not reg:
-            return False
-        if time.time() - reg["last"] >= CHAT_CONV_TTL_S:
-            _chat_conv.pop(token, None)
-            return False
-        # El token queda amarrado al usuario que lo inicio (si lo hubo).
-        if reg["user_id"] and user_id and reg["user_id"] != user_id:
-            return False
-        reg["last"] = time.time()  # renovar: sigue usandolo
-        return True
+    """True si el token firmado es valido y sigue vigente.
+
+    El TTL deslizante ya no necesita memoria: cada mensaje valido reemite su
+    token al frontend, que lo renueva. Aqui solo se comprueba firma y edad.
+    """
+    return _chat_conv_verificar(token or "", user_id)
 
 
 @app.post("/chat/iniciar")

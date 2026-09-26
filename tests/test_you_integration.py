@@ -7,6 +7,68 @@ from engine.search_engine import SearchEngine, normalizar_research_effort
 from ai import gemini as gemini_mod
 
 
+class ChatConvTokenTests(unittest.TestCase):
+    """El token de /chat debe ser stateless (varias instancias en Northflank)."""
+
+    def test_token_firmado_se_valida(self):
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        token = _chat_conv_crear("usuario-1")
+        self.assertTrue(_chat_conv_validar(token, "usuario-1"))
+
+    def test_token_anonimo_sin_usuario(self):
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        token = _chat_conv_crear(None)
+        self.assertTrue(_chat_conv_validar(token, None))
+        self.assertTrue(_chat_conv_validar(token, "otro-usuario"))
+
+    def test_token_de_otro_usuario_se_rechaza(self):
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        token = _chat_conv_crear("usuario-1")
+        self.assertFalse(_chat_conv_validar(token, "usuario-2"))
+
+    def test_token_sobre_un_topo(self):
+        """Debe validar aunque la firma HMAC contenga el byte '.'.
+
+        Un digest crudo puede contener 0x2E y romper el split; por eso la firma
+        va en base64url. Este test usa la funcion real, sin stubs.
+        """
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        for i in range(60):
+            token = _chat_conv_crear(f"user-{i}")
+            self.assertTrue(
+                _chat_conv_validar(token, f"user-{i}"), f"token {i} no valido"
+            )
+
+    def test_token_manipulado_se_rechaza(self):
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        token = _chat_conv_crear("usuario-1")
+        adulterado = token[:-4] + ("aaaa" if not token.endswith("aaaa") else "bbbb")
+        self.assertFalse(_chat_conv_validar(adulterado, "usuario-1"))
+
+    def test_token_invalido_se_rechaza(self):
+        from main import _chat_conv_validar
+
+        self.assertFalse(_chat_conv_validar("", None))
+        self.assertFalse(_chat_conv_validar(None, None))
+        self.assertFalse(_chat_conv_validar("no-es-un-token", None))
+
+    def test_token_expirado_se_rechaza(self):
+        import main
+        from main import _chat_conv_crear, _chat_conv_validar
+
+        original = main.CHAT_CONV_TTL_S
+        try:
+            main.CHAT_CONV_TTL_S = -1  # cualquier token queda "viejo"
+            self.assertFalse(_chat_conv_validar(_chat_conv_crear("u"), "u"))
+        finally:
+            main.CHAT_CONV_TTL_S = original
+
+
 class GeminiTests(unittest.TestCase):
     @patch("ai.gemini.requests.post")
     def test_llamar_gemini_extrae_texto(self, mock_post):
