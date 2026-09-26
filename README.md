@@ -53,6 +53,9 @@ Abre `/docs` y usa `POST /chat`. El campo `modelo` selecciona la IA:
 
 - `you` (por defecto): Demian tipster (You.com).
 - `36ai`: 365AI (Groq + function-calling, busca forma/lesiones/H2H con DDGS). En el frontend aparece como "365AI" (id `groq`).
+- `gemini`: Gemini 2.5 Flash (Google AI Studio). **Free tier, sin creditos prepago.** Además es el fallback automatico: si You.com responde 402 (saldo agotado), el chat responde con Gemini sin mostrar error.
+
+> Cuando Gemini esta activo y You.com falla por 402/429, el usuario no ve el error tecnico: `ai/model.py` detecta el fallo de creditos y reintenta con Gemini automaticamente.
 
 `GET /models` lista las IAs disponibles y si están configuradas.
 

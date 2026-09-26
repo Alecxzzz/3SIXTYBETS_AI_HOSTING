@@ -3,6 +3,7 @@ import os
 import requests
 
 from engine.search_engine import SearchEngine, normalizar_research_effort
+from ai.gemini import gemini_configurado, generar_respuesta_gemini
 import youkeys
 
 try:
@@ -26,14 +27,26 @@ MODEL_CONFIGS = {
         "base_url": os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
         "model": os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
     },
+    "gemini": {
+        "name": "Gemini",
+        # La key de Gemini se lee en tiempo de ejecucion (puede rotarse).
+        "api_key": "1" if gemini_configurado() else "",
+        "base_url": os.getenv(
+            "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+        ),
+        "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+    },
 }
 
 YOU_CONTEXT_MAX_CHARS = int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1200"))
 
 
 def normalizar_modelo(modelo: str) -> str:
-    if modelo and str(modelo).strip().lower() in ("36ai", "36", "ia36"):
+    modelo_id = str(modelo or "").strip().lower()
+    if modelo_id in ("36ai", "36", "ia36"):
         return "36ai"
+    if modelo_id in ("gemini", "google", "googleai"):
+        return "gemini"
     return "you"
 
 
@@ -57,6 +70,8 @@ def env_diagnostics():
         "you_search_configured": bool(you_search_key),
         "you_search_key_prefix": you_search_key[:7] if you_search_key else "",
         "you_use_research": os.getenv("YOU_USE_RESEARCH", "false"),
+        "gemini_configured": gemini_configurado(),
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
     }
 
 
@@ -85,6 +100,27 @@ def buscar_contexto_you(question):
         return trim_text(texto, int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1800")))
     except Exception:
         return "No se pudo obtener contexto externo."
+
+
+def _you_fallo_de_creditos(respuesta: str) -> bool:
+    """True si la respuesta de You.com indica saldo agotado o cuota.
+
+    You.com responde 402 'payment_required' cuando se acaba el prepaid y
+    429 cuando se excede el rate limit. En ambos casos conviene caer a Gemini.
+    """
+    if not respuesta:
+        return False
+    texto = str(respuesta).lower()
+    marcas = (
+        "payment_required",
+        "prepaid credit balance",
+        "add credits",
+        "depleted",
+        "error de you.com (402",
+        "error de you.com (429",
+        "no se pudo completar la busqueda en vivo",
+    )
+    return any(marca in texto for marca in marcas)
 
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
@@ -167,7 +203,20 @@ Solicitud del usuario:
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "you") -> str:
     modelo = normalizar_modelo(modelo)
+
     if modelo == "36ai":
         from ai.ia36 import generar_respuesta_36ai
         return generar_respuesta_36ai(prompt_sistema, prompt_usuario)
-    return generar_respuesta_you(prompt_sistema, prompt_usuario)
+
+    if modelo == "gemini":
+        return generar_respuesta_gemini(prompt_sistema, prompt_usuario)
+
+    # Modelo por defecto (Demian / You.com) con salvavidas a Gemini.
+    respuesta = generar_respuesta_you(prompt_sistema, prompt_usuario)
+
+    if _you_fallo_de_creditos(respuesta) and gemini_configurado():
+        alternativa = generar_respuesta_gemini(prompt_sistema, prompt_usuario)
+        if alternativa and not alternativa.startswith("ERROR:"):
+            return alternativa
+
+    return respuesta
