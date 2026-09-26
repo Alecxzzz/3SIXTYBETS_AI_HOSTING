@@ -515,6 +515,33 @@ def chat(request: Request, data: Chat,
                 "No se uso Demian automaticamente; intenta de nuevo en unos segundos."
             )
 
+    # Gemini (Google AI Studio, free tier). Si el usuario lo elige en el chat se
+    # responde con Gemini SIEMPRE y sin tocar You.com (aunque You tenga saldo).
+    if modelo_id in ("gemini", "google", "googleai"):
+        from ai.gemini import gemini_configurado, generar_respuesta_gemini
+        from engine.prompt_builder import construir_prompt_conversacional
+
+        if not gemini_configurado():
+            return (
+                "ERROR: Falta GEMINI_API_KEY en el backend.\n"
+                "En Northflank agrega la variable GEMINI_API_KEY "
+                "(gratis en https://aistudio.google.com/apikey) y reinicia el servicio."
+            )
+
+        try:
+            respuesta_gemini = generar_respuesta_gemini(
+                construir_prompt_conversacional("Gemini"),
+                bloque_memoria + data.mensaje,
+            )
+        except Exception as exc:
+            print(f"[chat/gemini] fallo: {exc}", flush=True)
+            return "Gemini no respondio en este momento. Intenta de nuevo en unos segundos."
+
+        if respuesta_gemini and not str(respuesta_gemini).startswith("ERROR:"):
+            return respuesta_gemini.replace("*", "").replace("#", "")
+
+        return "Gemini no genero una respuesta valida. Intenta de nuevo en unos segundos."
+
     if not YOU_API_KEY:
         if fallo_365:
             return (
