@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import requests
 
@@ -34,7 +34,7 @@ MODEL_CONFIGS = {
         "base_url": os.getenv(
             "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
         ),
-        "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
     },
 }
 
@@ -71,7 +71,7 @@ def env_diagnostics():
         "you_search_key_prefix": you_search_key[:7] if you_search_key else "",
         "you_use_research": os.getenv("YOU_USE_RESEARCH", "false"),
         "gemini_configured": gemini_configurado(),
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
     }
 
 

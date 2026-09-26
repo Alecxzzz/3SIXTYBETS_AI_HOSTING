@@ -55,6 +55,14 @@ class GeminiTests(unittest.TestCase):
         finally:
             gemini_mod.GEMINI_API_KEY = original
 
+    def test_construir_payload_acepta_dos_argumentos(self):
+        """_construir_payload debe funcionar con la firma de 2 argumentos."""
+        from ai.gemini import _construir_payload
+
+        payload = _construir_payload("Sistema", "Hola")
+        self.assertEqual(payload["contents"][0]["parts"][0]["text"], "Hola")
+        self.assertIn("systemInstruction", payload)
+
     def test_normalizar_modelo_gemini(self):
         self.assertEqual(normalizar_modelo("gemini"), "gemini")
         self.assertEqual(normalizar_modelo("Gemini"), "gemini")

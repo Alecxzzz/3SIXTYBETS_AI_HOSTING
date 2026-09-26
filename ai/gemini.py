@@ -11,7 +11,7 @@ Se implementa con `requests` (ya en requirements.txt) en vez del SDK oficial
 
 Configuracion por entorno:
   GEMINI_API_KEY / GOOGLE_API_KEY  (obligatoria; se toma de AI Studio, gratuita)
-  GEMINI_MODEL                    (default: gemini-2.5-flash)
+  GEMINI_MODEL                    (default: gemini-3.8-flash)
   GEMINI_BASE_URL                 (default: endpoint generativelanguage v1beta)
   GEMINI_TIMEOUT                  (default: 90s, el free tier puede encolar)
   GEMINI_MAX_TOKENS               (default: 2500)
@@ -48,15 +48,18 @@ GEMINI_BASE_URL = os.getenv(
     "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
 )
 
-# "gemini-2.5-flash" es el flagship del free tier. Si da 404, el cliente
-# prueba solo con "gemini-flash-latest" / "gemini-2.0-flash".
-MODELO_DEFAULT = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Modelos validados contra la API (2026). Google retira los flagships antiguos
+# para cuentas nuevas: gemini-2.5-flash y gemini-2.0-flash devuelven 404
+# "no longer available to new users", por eso la cadena empieza en 3.8-flash.
+# La cadena se recorre sola: si un modelo da 404 se prueba el siguiente.
+MODELO_DEFAULT = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 CADENA_MODELOS = [
     MODELO_DEFAULT,
     os.getenv("GEMINI_FALLBACK", "gemini-flash-latest"),
     "gemini-flash-latest",
-    "gemini-2.0-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
 ]
 
 TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "90"))
@@ -109,7 +112,11 @@ def _endpoint(modelo: str) -> str:
     return f"{GEMINI_BASE_URL}/models/{modelo}:generateContent"
 
 
-def _construir_payload(prompt_sistema: str, prompt_usuario: str, temperatura: float) -> dict:
+def _construir_payload(
+    prompt_sistema: str,
+    prompt_usuario: str,
+    temperatura: float = 0.7,
+) -> dict:
     """Arma el body de generateContent (la system instruction va aparte)."""
     system = trim_text(prompt_sistema, MAX_INPUT_CHARS // 2) if prompt_sistema else ""
     usuario = trim_text(prompt_usuario, MAX_INPUT_CHARS)
