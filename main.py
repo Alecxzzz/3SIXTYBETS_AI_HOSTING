@@ -498,8 +498,14 @@ def _respuesta_you_agotada(respuesta) -> bool:
     return any(marca in texto for marca in marcas)
 
 
-def _responder_con_gemini(mensaje: str):
-    """Responde con Gemini usando la identidad conversacional. None si no puede."""
+def _responder_con_gemini(mensaje: str, contexto: str = "", es_partido: bool = False):
+    """Responde con Gemini usando la identidad conversacional. None si no puede.
+
+    `contexto` son las estadisticas REALES ya reunidas por el caller
+    (ESPN, cuotas, etc). Se inyectan en el prompt para que el modelo no invente
+    datos ni le pida datos al usuario. Cuando es_partido, se le ordena dar un
+    pick claro en vez de hacer preguntas de vuelta.
+    """
     try:
         from ai.gemini import gemini_configurado, generar_respuesta_gemini
         from engine.prompt_builder import construir_prompt_conversacional
@@ -507,10 +513,35 @@ def _responder_con_gemini(mensaje: str):
         if not gemini_configurado():
             return None
 
-        respuesta = generar_respuesta_gemini(
-            construir_prompt_conversacional("Gemini"),
-            mensaje,
-        )
+        sistema = construir_prompt_conversacional("Gemini")
+
+        if es_partido:
+            # Modo analisis: el modelo debe trabajar con los datos entregados y
+            # terminar con un pick. NUNCA pedirle datos al usuario.
+            sistema += (
+                "\n\nMODO ANALISIS DE PARTIDO (OBLIGATORIO):\n"
+                "- Tienes arriba datos REALES del partido. Usalos como base.\n"
+                "- NO le pidas pitchers, cuotas, lesiones ni ningun dato al "
+                "usuario: tu trabajo es buscarlos y decidir tu.\n"
+                "- Si algun dato especifico no viene, NO lo inventes: analizalo "
+                "con lo que tienes y dilo asi de forma natural.\n"
+                "- Termina SIEMPRE con un PICK concreto (equipo/mercado y "
+                "confianza) y una justificacion breve de 3-4 lineas.\n"
+            )
+            if not contexto:
+                sistema += (
+                    "- No hay datos ESPN disponibles para este partido, asi que "
+                    "razonalo con criterio general y deja claro el nivel de "
+                    "confianza.\n"
+                )
+
+        if contexto:
+            sistema += (
+                "\n\nDATOS REALES DEL PARTIDO (son la fuente de verdad; no los "
+                "contradigas ni inventes otros):\n" + contexto
+            )
+
+        respuesta = generar_respuesta_gemini(sistema, mensaje)
         if respuesta and not str(respuesta).startswith("ERROR:"):
             return respuesta.replace("*", "").replace("#", "")
     except Exception as exc:
@@ -616,7 +647,11 @@ def chat(request: Request, data: Chat,
                 "(gratis en https://aistudio.google.com/apikey) y reinicia el servicio."
             )
 
-        alternativa = _responder_con_gemini(bloque_memoria + data.mensaje)
+        alternativa = _responder_con_gemini(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=parece_partido,
+        )
         if alternativa:
             return alternativa
         return "Gemini no respondio en este momento. Intenta de nuevo en unos segundos."
@@ -655,7 +690,11 @@ def chat(request: Request, data: Chat,
         # usuario no lea el error tecnico. /chat llama a ask_you() directamente,
         # asi que el fallback de ai/model.py no aplica en esta ruta.
         if _respuesta_you_agotada(respuesta):
-            alternativa = _responder_con_gemini(bloque_memoria + data.mensaje)
+            alternativa = _responder_con_gemini(
+                bloque_memoria + data.mensaje,
+                contexto=ctx_espn,
+                es_partido=parece_partido,
+            )
             if alternativa:
                 return alternativa
         if respuesta:

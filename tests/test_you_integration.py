@@ -136,6 +136,33 @@ class GeminiTests(unittest.TestCase):
         self.assertFalse(_respuesta_you_agotada("Respuesta normal de la IA"))
         self.assertFalse(_respuesta_you_agotada(""))
 
+    def test_responder_con_gemini_inyecta_contexto_real(self):
+        """El contexto (stats ESPN) debe llegar al prompt de Gemini."""
+        from unittest.mock import patch as p
+        import main
+
+        capturado = {}
+
+        def fake(sistema, usuario, **kw):
+            capturado["sistema"] = sistema
+            capturado["usuario"] = usuario
+            return "Pick: Dodgers"
+
+        with p("ai.gemini.generar_respuesta_gemini", side_effect=fake), p(
+            "ai.gemini.gemini_configurado", return_value=True
+        ):
+            r = main._responder_con_gemini(
+                "analiza el partido",
+                contexto="Dodgers 3 - Giants 1",
+                es_partido=True,
+            )
+
+        self.assertEqual(r, "Pick: Dodgers")
+        self.assertIn("Dodgers 3 - Giants 1", capturado["sistema"])
+        self.assertIn("PICK concreto", capturado["sistema"])
+        # Debe prohibir expresamente pedir datos al usuario.
+        self.assertIn("NO le pidas", capturado["sistema"])
+
     def test_normalizar_modelo_gemini(self):
         self.assertEqual(normalizar_modelo("gemini"), "gemini")
         self.assertEqual(normalizar_modelo("Gemini"), "gemini")
