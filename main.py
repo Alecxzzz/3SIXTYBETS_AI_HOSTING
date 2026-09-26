@@ -429,6 +429,46 @@ def chat_iniciar(request: Request, user=Depends(get_current_user_optional)):
         "ttl_s": CHAT_CONV_TTL_S,
     }
 
+def _respuesta_you_agotada(respuesta) -> bool:
+    """True si You.com respondio con falta de creditos (402) o cuota (429).
+
+    El texto del error lo arma engine/search_engine.py, asi que se detectan las
+    marcas reales que devuelve esa API.
+    """
+    if not respuesta:
+        return False
+    texto = str(respuesta).lower()
+    marcas = (
+        "payment_required",
+        "prepaid credit balance",
+        "add credits",
+        "depleted",
+        "error de you.com (402",
+        "error de you.com (429",
+    )
+    return any(marca in texto for marca in marcas)
+
+
+def _responder_con_gemini(mensaje: str):
+    """Responde con Gemini usando la identidad conversacional. None si no puede."""
+    try:
+        from ai.gemini import gemini_configurado, generar_respuesta_gemini
+        from engine.prompt_builder import construir_prompt_conversacional
+
+        if not gemini_configurado():
+            return None
+
+        respuesta = generar_respuesta_gemini(
+            construir_prompt_conversacional("Gemini"),
+            mensaje,
+        )
+        if respuesta and not str(respuesta).startswith("ERROR:"):
+            return respuesta.replace("*", "").replace("#", "")
+    except Exception as exc:
+        print(f"[chat/gemini-fallback] fallo: {exc}", flush=True)
+    return None
+
+
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(request: Request, data: Chat,
          x_chat_token: str | None = Header(None, alias="X-Chat-Token"),
@@ -518,8 +558,7 @@ def chat(request: Request, data: Chat,
     # Gemini (Google AI Studio, free tier). Si el usuario lo elige en el chat se
     # responde con Gemini SIEMPRE y sin tocar You.com (aunque You tenga saldo).
     if modelo_id in ("gemini", "google", "googleai"):
-        from ai.gemini import gemini_configurado, generar_respuesta_gemini
-        from engine.prompt_builder import construir_prompt_conversacional
+        from ai.gemini import gemini_configurado
 
         if not gemini_configurado():
             return (
@@ -528,19 +567,10 @@ def chat(request: Request, data: Chat,
                 "(gratis en https://aistudio.google.com/apikey) y reinicia el servicio."
             )
 
-        try:
-            respuesta_gemini = generar_respuesta_gemini(
-                construir_prompt_conversacional("Gemini"),
-                bloque_memoria + data.mensaje,
-            )
-        except Exception as exc:
-            print(f"[chat/gemini] fallo: {exc}", flush=True)
-            return "Gemini no respondio en este momento. Intenta de nuevo en unos segundos."
-
-        if respuesta_gemini and not str(respuesta_gemini).startswith("ERROR:"):
-            return respuesta_gemini.replace("*", "").replace("#", "")
-
-        return "Gemini no genero una respuesta valida. Intenta de nuevo en unos segundos."
+        alternativa = _responder_con_gemini(bloque_memoria + data.mensaje)
+        if alternativa:
+            return alternativa
+        return "Gemini no respondio en este momento. Intenta de nuevo en unos segundos."
 
     if not YOU_API_KEY:
         if fallo_365:
@@ -572,6 +602,13 @@ def chat(request: Request, data: Chat,
         respuesta = SearchEngine().ask_you(
             bloque_memoria + data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
         )
+        # You.com sin creditos (402) o saturado (429): caer a Gemini para que el
+        # usuario no lea el error tecnico. /chat llama a ask_you() directamente,
+        # asi que el fallback de ai/model.py no aplica en esta ruta.
+        if _respuesta_you_agotada(respuesta):
+            alternativa = _responder_con_gemini(bloque_memoria + data.mensaje)
+            if alternativa:
+                return alternativa
         if respuesta:
             respuesta = respuesta.replace("*", "").replace("#", "")
         return respuesta or "No pude generar una respuesta. Intenta de nuevo."

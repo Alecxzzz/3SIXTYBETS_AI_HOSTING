@@ -63,6 +63,17 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(payload["contents"][0]["parts"][0]["text"], "Hola")
         self.assertIn("systemInstruction", payload)
 
+    def test_deteccion_de_you_agotado_en_main(self):
+        from main import _respuesta_you_agotada
+
+        self.assertTrue(_respuesta_you_agotada(
+            "Error de You.com (402): {'error': 'payment_required', "
+            "'message': 'Your prepaid credit balance has been depleted.'}"
+        ))
+        self.assertTrue(_respuesta_you_agotada("Error de You.com (429): rate limit"))
+        self.assertFalse(_respuesta_you_agotada("Respuesta normal de la IA"))
+        self.assertFalse(_respuesta_you_agotada(""))
+
     def test_normalizar_modelo_gemini(self):
         self.assertEqual(normalizar_modelo("gemini"), "gemini")
         self.assertEqual(normalizar_modelo("Gemini"), "gemini")
