@@ -3,7 +3,6 @@
 import requests
 
 from engine.search_engine import SearchEngine, normalizar_research_effort
-from ai.gemini import gemini_configurado, generar_respuesta_gemini
 import youkeys
 
 try:
@@ -27,15 +26,6 @@ MODEL_CONFIGS = {
         "base_url": os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
         "model": os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
     },
-    "gemini": {
-        "name": "Gemini",
-        # La key de Gemini se lee en tiempo de ejecucion (puede rotarse).
-        "api_key": "1" if gemini_configurado() else "",
-        "base_url": os.getenv(
-            "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
-        ),
-        "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-    },
 }
 
 YOU_CONTEXT_MAX_CHARS = int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1200"))
@@ -43,10 +33,8 @@ YOU_CONTEXT_MAX_CHARS = int(os.getenv("YOU_CONTEXT_MAX_CHARS", "1200"))
 
 def normalizar_modelo(modelo: str) -> str:
     modelo_id = str(modelo or "").strip().lower()
-    if modelo_id in ("36ai", "36", "ia36"):
+    if modelo_id in ("36ai", "36", "ia36", "groq"):
         return "36ai"
-    if modelo_id in ("gemini", "google", "googleai"):
-        return "gemini"
     return "you"
 
 
@@ -70,8 +58,9 @@ def env_diagnostics():
         "you_search_configured": bool(you_search_key),
         "you_search_key_prefix": you_search_key[:7] if you_search_key else "",
         "you_use_research": os.getenv("YOU_USE_RESEARCH", "false"),
-        "gemini_configured": gemini_configurado(),
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+        "groq_configured": bool(
+            os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+        ),
     }
 
 
@@ -208,15 +197,7 @@ def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "y
         from ai.ia36 import generar_respuesta_36ai
         return generar_respuesta_36ai(prompt_sistema, prompt_usuario)
 
-    if modelo == "gemini":
-        return generar_respuesta_gemini(prompt_sistema, prompt_usuario)
-
-    # Modelo por defecto (Demian / You.com) con salvavidas a Gemini.
-    respuesta = generar_respuesta_you(prompt_sistema, prompt_usuario)
-
-    if _you_fallo_de_creditos(respuesta) and gemini_configurado():
-        alternativa = generar_respuesta_gemini(prompt_sistema, prompt_usuario)
-        if alternativa and not alternativa.startswith("ERROR:"):
-            return alternativa
-
-    return respuesta
+    # Modelo por defecto (Demian / You.com). Gemini se elimino del proyecto:
+    # aqui ya no hay motor de relevo, el error de creditos se propaga al
+    # caller (/chat), que es quien decide la respuesta final.
+    return generar_respuesta_you(prompt_sistema, prompt_usuario)

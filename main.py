@@ -498,132 +498,50 @@ def _respuesta_you_agotada(respuesta) -> bool:
     return any(marca in texto for marca in marcas)
 
 
-def _responder_con_gemini(mensaje: str, contexto: str = "", es_partido: bool = False):
-    """Responde con Gemini usando la identidad conversacional. None si no puede.
-
-    `contexto` son las estadisticas REALES ya reunidas por el caller
-    (ESPN, cuotas, etc). Se inyectan en el prompt para que el modelo no invente
-    datos ni le pida datos al usuario. Cuando es_partido, se le ordena dar un
-    pick claro en vez de hacer preguntas de vuelta.
-    """
-    try:
-        from ai.gemini import gemini_configurado, generar_respuesta_gemini
-        from engine.prompt_builder import construir_prompt_conversacional
-
-        if not gemini_configurado():
-            return None
-
-        sistema = construir_prompt_conversacional("Gemini")
-
-        if es_partido:
-            # Modo analisis: el modelo debe trabajar con los datos entregados y
-            # terminar con un pick. NUNCA pedirle datos al usuario.
-            sistema += (
-                "\n\nMODO ANALISIS DE PARTIDO (OBLIGATORIO):\n"
-                "- Tienes arriba datos REALES del partido. Usalos como base.\n"
-                "- NO le pidas pitchers, cuotas, lesiones ni ningun dato al "
-                "usuario: tu trabajo es buscarlos y decidir tu.\n"
-                "- Si algun dato especifico no viene, NO lo inventes: analizalo "
-                "con lo que tienes y dilo asi de forma natural.\n"
-                "- Termina SIEMPRE con un PICK concreto (equipo/mercado y "
-                "confianza) y una justificacion breve de 3-4 lineas.\n"
-            )
-            if not contexto:
-                sistema += (
-                    "- No hay datos ESPN disponibles para este partido, asi que "
-                    "razonalo con criterio general y deja claro el nivel de "
-                    "confianza.\n"
-                )
-
-        if contexto:
-            sistema += (
-                "\n\nDATOS REALES DEL PARTIDO (son la fuente de verdad; no los "
-                "contradigas ni inventes otros):\n" + contexto
-            )
-
-        respuesta = generar_respuesta_gemini(sistema, mensaje)
-        if respuesta and not str(respuesta).startswith("ERROR:"):
-            return respuesta.replace("*", "").replace("#", "")
-        # Log del motivo real: sin esto Northflank solo muestra el aviso generico
-        # y no hay forma de saber si fue 429 (cuota), 404 (modelo) o timeout.
-        print(f"[chat/gemini] sin respuesta valida: {respuesta}", flush=True)
-    except Exception as exc:
-        print(f"[chat/gemini-fallback] fallo: {exc}", flush=True)
-    return None
-
-
 @app.get("/debug/gemini")
 def debug_gemini():
-    """Diagnostico de Gemini: ejecuta una llamada minima y devuelve el error real.
+    """Endpoint obsoleto. Se conserva para que los clientes viejos no den 404."""
+    return {"ok": False, "motivo": "Gemini fue eliminado del proyecto"}
 
-    Pensado para cuando el chat muestra el aviso generico: aqui se ve si es
-    cuota (429), modelo (404), key invalida (400) o timeout.
+
+def _responder_groq(mensaje: str, contexto: str = "", es_partido: bool = False):
+    """Responde con Groq (365AI). None si no hay key o no contesta.
+
+    Unico motor tras eliminar Gemini: por eso recorre TODOS los modelos
+    disponibles de la cuenta en vez de quedarse con el primero.
     """
-    import time as _t
+    try:
+        from ai.ia36 import (
+            GROQ_API_KEY,
+            obtener_modelos_disponibles,
+            procesar_36ai,
+            responder_conversacion_36ai,
+        )
+        from engine.prompt_builder import construir_prompt_conversacional
 
-    import requests as http_requests
-    from ai.gemini import get_gemini_key, _construir_payload, CADENA_MODELOS, GEMINI_BASE_URL
+        if not GROQ_API_KEY:
+            return None
 
-    inicio = _t.time()
-    key = get_gemini_key()
-    if not key:
-        return {"ok": False, "motivo": "sin GEMINI_API_KEY"}
-
-    payload = _construir_payload("", "di ok", 0.1)
-    intentos = []
-    for modelo in CADENA_MODELOS[:3]:
-        try:
-            r = http_requests.post(
-                f"{GEMINI_BASE_URL}/models/{modelo}:generateContent",
-                headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                json=payload,
-                timeout=20,
+        if es_partido:
+            respuesta = procesar_36ai(
+                mensaje + (f"\n\nDATOS REALES DEL PARTIDO:\n{contexto}" if contexto else "")
             )
-            intentos.append({
-                "modelo": modelo,
-                "status": r.status_code,
-                "detalle": r.text[:300] if r.status_code != 200 else "OK",
-            })
-            if r.ok:
-                return {"ok": True, "modelo": modelo, "segundos": round(_t.time() - inicio, 1), "intentos": intentos}
-        except Exception as exc:
-            intentos.append({"modelo": modelo, "status": "excepcion", "detalle": str(exc)[:200]})
+        else:
+            respuesta = responder_conversacion_36ai(
+                mensaje, construir_prompt_conversacional("365AI")
+            )
 
-    return {"ok": False, "segundos": round(_t.time() - inicio, 1), "intentos": intentos}
+        if respuesta and str(respuesta).strip():
+            return respuesta.replace("*", "").replace("#", "")
 
-
-def _responder_cascada(mensaje: str, contexto: str = "", es_partido: bool = False):
-    """Cadena de respaldo: Groq -> Gemini. Devuelve la primera que responda.
-
-    Ningun proveedor gratuito aguanta solo: Groq se satura por rate limits y
-    Gemini agota la cuota diaria. Encadenarlos da margen real sin pagar.
-    """
-    from ai.ia36 import (
-        GROQ_API_KEY,
-        procesar_36ai,
-        responder_conversacion_36ai,
-    )
-    from engine.prompt_builder import construir_prompt_conversacional
-
-    # 1) Groq: limites altos por minuto, es el que mejor aguanta el trafico.
-    if GROQ_API_KEY:
-        try:
-            if es_partido:
-                respuesta = procesar_36ai(mensaje + (f"\n\nDATOS REALES:\n{contexto}" if contexto else ""))
-            else:
-                respuesta = responder_conversacion_36ai(
-                    mensaje, construir_prompt_conversacional("365AI")
-                )
-            if respuesta and str(respuesta).strip():
-                return respuesta.replace("*", "").replace("#", "")
-        except Exception as exc:
-            print(f"[chat/cascada] groq fallo: {exc}", flush=True)
-
-    # 2) Gemini: gratis, pero con cuota diaria limitada.
-    alternativa = _responder_con_gemini(mensaje, contexto=contexto, es_partido=es_partido)
-    if alternativa:
-        return alternativa
-
+        # Sin respuesta: se informa el motivo real para poder diagnosticarlo.
+        modelos = obtener_modelos_disponibles() or ["(ninguno)"]
+        print(
+            f"[chat/groq] sin respuesta. Modelos en la cuenta: {modelos}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[chat/groq] fallo: {exc}", flush=True)
     return None
 
 
@@ -703,45 +621,22 @@ def chat(request: Request, data: Chat,
         respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
         if respuesta_36 and str(respuesta_36).strip():
             return respuesta_36
-        # 365AI (Groq) sin respuesta: caemos a Gemini antes de rendiros, para
-        # que el usuario nunca se quede sin respuesta por un rate limit.
-        alternativa = _responder_con_gemini(
-            bloque_memoria + data.mensaje,
-            contexto=ctx_espn,
-            es_partido=parece_partido,
-        )
-        if alternativa:
-            return alternativa
+        # 365AI (Groq) se queda sin respuesta tras agotar sus reintentos y
+        # modelos. Sin Gemini ya no hay segundo motor: se avisa con honestidad
+        # en vez de inventar una respuesta o colgar la peticion.
         fallo_365 = True
         if fallo_365:
             return (
-                "365AI esta saturada y Gemini no tiene cuota disponible en este "
-                "momento. Intenta de nuevo en unos segundos."
+                "365AI esta saturada en este momento (limite de peticiones de "
+                "Groq). Espera unos segundos e intenta de nuevo."
             )
 
-    # Gemini (Google AI Studio, free tier). Si el usuario lo elige en el chat se
-    # responde con Gemini SIEMPRE y sin tocar You.com (aunque You tenga saldo).
     if modelo_id in ("gemini", "google", "googleai"):
-        from ai.gemini import gemini_configurado
-
-        if not gemini_configurado():
-            return (
-                "ERROR: Falta GEMINI_API_KEY en el backend.\n"
-                "En Northflank agrega la variable GEMINI_API_KEY "
-                "(gratis en https://aistudio.google.com/apikey) y reinicia el servicio."
-            )
-
-        alternativa = _responder_con_gemini(
-            bloque_memoria + data.mensaje,
-            contexto=ctx_espn,
-            es_partido=parece_partido,
-        )
-        if alternativa:
-            return alternativa
+        # Gemini se elimino del proyecto. Si un cliente guardado lo pide, se
+        # cae a 365AI en vez de devolver un error seco.
         return (
-            "Gemini no genero respuesta. Suele ser la cuota gratuita del free "
-            "tier agotada o un reinicio del backend: intenta de nuevo en unos "
-            "segundos."
+            "El modelo Gemini ya no esta disponible. Usa '365AI Tipster' o "
+            "'Demian tipster' en el selector de modelo."
         )
 
     if not YOU_API_KEY:
@@ -774,14 +669,12 @@ def chat(request: Request, data: Chat,
         respuesta = SearchEngine().ask_you(
             bloque_memoria + data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
         )
-        # You.com sin creditos (402) o saturado (429): caer a Gemini para que el
-        # usuario no lea el error tecnico. /chat llama a ask_you() directamente,
-        # asi que el fallback de ai/model.py no aplica en esta ruta.
+        # You.com sin creditos (402) o saturado (429): Groq es el motor de relevo.
+        # /chat llama a ask_you() directamente, asi que el dispatch de
+        # ai/model.py no aplica en esta ruta.
         if _respuesta_you_agotada(respuesta):
-            # Cadena de rescate: Groq y luego Gemini. El usuario elige el motor
-            # pero, si ese motor esta caido, preferimos responderle con otro
-            # antes que mostrarle un error tecnico.
-            alternativa = _responder_cascada(
+            # You.com sin creditos: Groq es el motor de relevo.
+            alternativa = _responder_groq(
                 bloque_memoria + data.mensaje,
                 contexto=ctx_espn,
                 es_partido=parece_partido,
@@ -1043,10 +936,9 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         )
 
     respuesta = SearchEngine().ask_you(bloque_memoria + data.mensaje, system_prompt=reglas)
-    # You.com sin creditos en el análisis EDGE: caemos a la cadena Groq -> Gemini
-    # para no dejar al usuario con el error 402 crudo.
+    # You.com sin creditos en el analisis EDGE: Groq es el motor de relevo.
     if _respuesta_you_agotada(respuesta):
-        alternativa = _responder_cascada(
+        alternativa = _responder_groq(
             bloque_memoria + data.mensaje,
             contexto=ctx_espn,
             es_partido=True,

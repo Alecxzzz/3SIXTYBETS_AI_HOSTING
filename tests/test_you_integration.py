@@ -1,10 +1,9 @@
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ai.model import generar_respuesta_you, normalizar_modelo
 from engine.search_engine import SearchEngine, normalizar_research_effort
-from ai import gemini as gemini_mod
 
 
 class ChatConvTokenTests(unittest.TestCase):
@@ -111,62 +110,34 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
-class GeminiTests(unittest.TestCase):
-    @patch("ai.gemini.requests.post")
-    def test_llamar_gemini_extrae_texto(self, mock_post):
-        os.environ["GEMINI_API_KEY"] = "test-key"
-        gemini_mod.GEMINI_API_KEY = "test-key"
-        mock_post.return_value.ok = True
-        mock_post.return_value.json.return_value = {
-            "candidates": [
-                {"content": {"parts": [{"text": "Hola desde Gemini"}]}}
-            ]
-        }
+class ModelDispatchTests(unittest.TestCase):
+    """Gemini fue eliminado: el dispatch debe devolver solo You.com o 365AI."""
 
-        texto = gemini_mod.llamar_gemini("Sistema", "Hola")
+    def test_normalizar_modelo_ya_no_devuelve_gemini(self):
+        self.assertEqual(normalizar_modelo("gemini"), "you")
+        self.assertEqual(normalizar_modelo("google"), "you")
 
-        self.assertEqual(texto, "Hola desde Gemini")
-        self.assertIn("generateContent", mock_post.call_args.args[0])
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["systemInstruction"]["parts"][0]["text"], "Sistema")
-        self.assertEqual(payload["contents"][0]["parts"][0]["text"], "Hola")
+    def test_normalizar_modelo_groq_es_365ai(self):
+        self.assertEqual(normalizar_modelo("groq"), "36ai")
+        self.assertEqual(normalizar_modelo("36ai"), "36ai")
 
-    @patch("ai.gemini.requests.post")
-    def test_llamar_gemini_cambia_de_modelo_en_404(self, mock_post):
-        os.environ["GEMINI_API_KEY"] = "test-key"
-        gemini_mod.GEMINI_API_KEY = "test-key"
-        mock_post.side_effect = [
-            MagicMock(ok=False, status_code=404, text="model not found"),
-            MagicMock(
-                ok=True,
-                json=lambda: {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
-            ),
-        ]
+    def test_modelos_disponibles_no_expone_gemini(self):
+        from ai.model import modelos_disponibles
 
-        texto = gemini_mod.llamar_gemini("S", "H", max_reintentos=1)
+        ids = [m["id"] for m in modelos_disponibles()]
+        self.assertNotIn("gemini", ids)
+        self.assertIn("36ai", ids)
 
-        self.assertEqual(texto, "ok")
-        self.assertEqual(mock_post.call_count, 2)
+    def test_no_existe_el_modulo_ai_gemini(self):
+        import importlib.util
 
-    def test_llamar_gemini_sin_key(self):
-        original = gemini_mod.GEMINI_API_KEY
-        gemini_mod.GEMINI_API_KEY = ""
-        try:
-            with patch.dict(os.environ, {}, clear=True):
-                self.assertTrue(
-                    gemini_mod.llamar_gemini("S", "H").startswith("ERROR:")
-                )
-        finally:
-            gemini_mod.GEMINI_API_KEY = original
+        self.assertIsNone(
+            importlib.util.find_spec("ai.gemini"),
+            "ai/gemini.py deberia haberse eliminado del proyecto",
+        )
 
-    def test_construir_payload_acepta_dos_argumentos(self):
-        """_construir_payload debe funcionar con la firma de 2 argumentos."""
-        from ai.gemini import _construir_payload
 
-        payload = _construir_payload("Sistema", "Hola")
-        self.assertEqual(payload["contents"][0]["parts"][0]["text"], "Hola")
-        self.assertIn("systemInstruction", payload)
-
+class YouFallbackDetectionTests(unittest.TestCase):
     def test_deteccion_de_you_agotado_en_main(self):
         from main import _respuesta_you_agotada
 
@@ -178,38 +149,6 @@ class GeminiTests(unittest.TestCase):
         self.assertFalse(_respuesta_you_agotada("Respuesta normal de la IA"))
         self.assertFalse(_respuesta_you_agotada(""))
 
-    def test_responder_con_gemini_inyecta_contexto_real(self):
-        """El contexto (stats ESPN) debe llegar al prompt de Gemini."""
-        from unittest.mock import patch as p
-        import main
-
-        capturado = {}
-
-        def fake(sistema, usuario, **kw):
-            capturado["sistema"] = sistema
-            capturado["usuario"] = usuario
-            return "Pick: Dodgers"
-
-        with p("ai.gemini.generar_respuesta_gemini", side_effect=fake), p(
-            "ai.gemini.gemini_configurado", return_value=True
-        ):
-            r = main._responder_con_gemini(
-                "analiza el partido",
-                contexto="Dodgers 3 - Giants 1",
-                es_partido=True,
-            )
-
-        self.assertEqual(r, "Pick: Dodgers")
-        self.assertIn("Dodgers 3 - Giants 1", capturado["sistema"])
-        self.assertIn("PICK concreto", capturado["sistema"])
-        # Debe prohibir expresamente pedir datos al usuario.
-        self.assertIn("NO le pidas", capturado["sistema"])
-
-    def test_normalizar_modelo_gemini(self):
-        self.assertEqual(normalizar_modelo("gemini"), "gemini")
-        self.assertEqual(normalizar_modelo("Gemini"), "gemini")
-        self.assertEqual(normalizar_modelo("google"), "gemini")
-
     def test_fallo_de_creditos_detecta_402(self):
         from ai.model import _you_fallo_de_creditos
 
@@ -220,35 +159,14 @@ class GeminiTests(unittest.TestCase):
         )
         self.assertFalse(_you_fallo_de_creditos("respuesta normal del modelo"))
 
-    @patch("ai.model.generar_respuesta_gemini")
     @patch("ai.model.generar_respuesta_you")
-    @patch("ai.model.gemini_configurado")
-    def test_fallback_a_gemini_si_you_agota_creditos(
-        self, mock_config, mock_you, mock_gemini
-    ):
-        mock_config.return_value = True
+    def test_you_sin_creditos_propaga_el_error(self, mock_you):
+        """Sin Gemini no hay relevo: el error sube al caller (/chat)."""
         mock_you.return_value = "Error de You.com (402): payment_required depleted"
-        mock_gemini.return_value = "Respuesta de Gemini"
 
         from ai.model import generar_respuesta
 
-        self.assertEqual(generar_respuesta("S", "H", "you"), "Respuesta de Gemini")
-
-    @patch("ai.model.generar_respuesta_gemini")
-    @patch("ai.model.generar_respuesta_you")
-    @patch("ai.model.gemini_configurado")
-    def test_sin_fallback_si_you_responde_bien(
-        self, mock_config, mock_you, mock_gemini
-    ):
-        mock_config.return_value = True
-        mock_you.return_value = "Respuesta de You.com"
-
-        from ai.model import generar_respuesta
-
-        self.assertEqual(
-            generar_respuesta("S", "H", "you"), "Respuesta de You.com"
-        )
-        mock_gemini.assert_not_called()
+        self.assertIn("402", generar_respuesta("S", "H", "you"))
 
 
 class YouIntegrationTests(unittest.TestCase):
@@ -293,9 +211,10 @@ class YouIntegrationTests(unittest.TestCase):
             research_effort="deep",
         )
 
-    def test_normalizar_modelo_groq_uses_you(self):
-        self.assertEqual(normalizar_modelo("groq"), "you")
-        self.assertEqual(normalizar_modelo("GROQ"), "you")
+    def test_normalizar_modelo_groq_usa_365ai(self):
+        # "groq" es el id que manda el frontend; debe mapear a 365AI, no a You.
+        self.assertEqual(normalizar_modelo("groq"), "36ai")
+        self.assertEqual(normalizar_modelo("GROQ"), "36ai")
 
     def test_normalizar_research_effort_uses_valid_enum(self):
         self.assertEqual(normalizar_research_effort("medium"), "standard")
