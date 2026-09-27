@@ -2131,28 +2131,25 @@ DATOS DEL PARTIDO:
 
 Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
 
-    # El análisis IA de estadísticas usa un modelo Groq dedicado.
+    # El análisis IA de estadísticas usa un modelo Groq DEDICADO (ai/stats_ia.py).
+    # Antes compartía modelo con 365AI y usaba max_tokens=500, insuficiente para
+    # los gpt-oss: el razonamiento se comia el presupuesto y llegaba content=""
+    # (el endpoint devolvia "No se pudo generar el analisis").
     # Demian/You queda reservado exclusivamente para el chat principal.
     try:
-        from ai.ia36 import llamar_modelo, GROQ_API_KEY
-        if not GROQ_API_KEY:
-            return {"analysis": "El análisis estadístico no está disponible: falta AI36_GROQ_API_KEY.", "context": contexto}
-        data, _ = llamar_modelo(
-            [
-                {"role": "system", "content": prompt.split("DATOS DEL PARTIDO:")[0]},
-                {"role": "user", "content": prompt},
-            ],
-            usar_tools=False,
-            max_tokens=500,
-            modelo_actual=os.getenv("AI36_STATS_GROQ_MODEL", "openai/gpt-oss-120b"),
+        from ai.stats_ia import analizar_partido, stats_configurado
+        if not stats_configurado():
+            return {"analysis": "El análisis estadístico no está disponible: falta STATS_AI_API_KEY.", "context": contexto}
+
+        respuesta = analizar_partido(
+            prompt.split("DATOS DEL PARTIDO:")[0],
+            prompt,
         )
-        choices = data.get("choices") or [{}]
-        respuesta = ((choices[0].get("message") or {}).get("content") or "").strip()
         if respuesta:
             return {"analysis": _limpiar_analisis_ia(respuesta), "context": contexto}
         return {"analysis": "No se pudo generar el análisis en este momento. Intenta de nuevo.", "context": contexto}
     except Exception as exc:
-        print(f"[stats/ai-analysis] Groq fallo: {exc}", flush=True)
+        print(f"[stats/ai-analysis] fallo: {exc}", flush=True)
         return {"analysis": "No se pudo generar el analisis en este momento. Intenta de nuevo.", "context": contexto}
 
 @app.get("/admin/keys")

@@ -110,6 +110,93 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class MotoresDedicadosTests(unittest.TestCase):
+    """Cada superficie debe tener su propio motor, no compartirlo con el chat.
+
+    Groq aplica los limites POR MODELO, asi que separar los motores sube el
+    margen real: el chat puede saturarse sin tumbar el dashboard ni las stats.
+    """
+
+    def test_cada_superficie_tiene_modulo_propio(self):
+        import importlib.util
+
+        for mod in ("ai.soporte", "ai.dashboard_ia", "ai.stats_ia", "ai.ia36"):
+            self.assertIsNotNone(
+                importlib.util.find_spec(mod), f"falta el modulo {mod}"
+            )
+
+    def test_modelos_de_apartado_no_comparten_el_de_365ai(self):
+        import ai.dashboard_ia as dash
+        import ai.stats_ia as stats
+        import ai.soporte as soporte
+        import ai.ia36 as ia36
+
+        # Ninguno debe apuntar al modelo principal de 365AI.
+        for nombre, modelo in [
+            ("dashboard", dash.MODELO),
+            ("stats", stats.MODELO),
+            ("soporte", soporte.MODELO),
+        ]:
+            self.assertNotEqual(
+                modelo, ia36.MODELO_DEFAULT,
+                f"{nombre} comparte el modelo principal de 365AI",
+            )
+
+    def test_dashboard_y_stats_son_autonomos(self):
+        """Cada motor dedicado define su propio modelo y fallback."""
+        import ai.dashboard_ia as dash
+        import ai.stats_ia as stats
+
+        self.assertTrue(dash.MODELO and dash.MODELO_FALLBACK)
+        self.assertTrue(stats.MODELO and stats.MODELO_FALLBACK)
+        self.assertNotEqual(dash.MODELO, dash.MODELO_FALLBACK)
+        self.assertNotEqual(stats.MODELO, stats.MODELO_FALLBACK)
+
+    def test_stats_tiene_max_tokens_suficiente(self):
+        """500 tokens dejaba el content vacio en los gpt-oss (razonamiento)."""
+        import ai.stats_ia as stats
+
+        self.assertGreaterEqual(stats.MAX_TOKENS, 1000)
+
+    def test_content_vacio_sube_max_tokens(self):
+        from unittest.mock import MagicMock, patch
+        import ai.stats_ia as m
+
+        vacio = MagicMock(status_code=200)
+        vacio.json.return_value = {"choices": [{"message": {"content": ""}}]}
+        bueno = MagicMock(status_code=200)
+        bueno.json.return_value = {"choices": [{"message": {"content": "1) hola"}}]}
+
+        original = m.API_KEY
+        m.API_KEY = "test"
+        try:
+            with patch("ai.stats_ia.requests.post", side_effect=[vacio, bueno]) as mp:
+                r = m.analizar_partido("s", "u")
+        finally:
+            m.API_KEY = original
+
+        self.assertEqual(r, "1) hola")
+        self.assertEqual(mp.call_count, 2)
+
+    def test_dashboard_devuelve_texto_y_modelo(self):
+        from unittest.mock import MagicMock, patch
+        import ai.dashboard_ia as m
+
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"choices": [{"message": {"content": '{"equipo":"x"}'}}]}
+
+        original = m.API_KEY
+        m.API_KEY = "test"
+        try:
+            with patch("ai.dashboard_ia.requests.post", return_value=ok):
+                texto, modelo = m.generar_picks("s", "u")
+        finally:
+            m.API_KEY = original
+
+        self.assertEqual(texto, '{"equipo":"x"}')
+        self.assertTrue(modelo)
+
+
 class ModelDispatchTests(unittest.TestCase):
     """Gemini fue eliminado: el dispatch debe devolver solo You.com o 365AI."""
 

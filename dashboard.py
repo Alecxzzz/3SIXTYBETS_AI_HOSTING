@@ -788,11 +788,24 @@ def _partidos_hoy():
 
 
 def _preguntar_ia(mensaje: str):
-    """Consulta temporal a Demian para generar picks del Dashboard.
+    """Genera los picks del Dashboard con su motor DEDICADO (ai/dashboard_ia.py).
 
-    Demian se usa aquí de forma explícita mientras no exista una fuente de
-    cuotas体育 verificada para todas las competiciones. No modifica el chat.
+    Antes usaba Demian (You.com) directamente. Ahora el dashboard tiene modelo
+    propio: si el chat satura un modelo, el dashboard sigue respondiendo, porque
+    Groq aplica los limites POR MODELO. You.com queda solo como ultimo recurso
+    cuando ya no queda saldo.
     """
+    # 1) Motor dedicado del dashboard.
+    try:
+        from ai.dashboard_ia import generar_picks
+
+        contenido, modelo = generar_picks(PROMPT_PICKS, mensaje)
+        if contenido and not str(contenido).startswith(("ERROR:", "Error leyendo")):
+            return contenido, f"365AI Dashboard ({modelo})"
+    except Exception as exc:
+        print(f"[Dashboard] motor dedicado fallo: {exc}", flush=True)
+
+    # 2) Relevo: Demian (You.com), util solo si quedo saldo.
     try:
         from ai.model import generar_respuesta_you
 
@@ -801,6 +814,7 @@ def _preguntar_ia(mensaje: str):
             return contenido, "Demian tipster"
     except Exception as exc:
         print(f"[Dashboard] Demian fallo: {exc}")
+
     return None, None
 
 
