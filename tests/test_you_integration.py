@@ -110,6 +110,43 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class PromptMercadosPorDeporteTests(unittest.TestCase):
+    """Regresion real: a un partido de MLB se le ofrecio 'Doble oportunidad 1X',
+    que es un mercado de futbol. El beisbol no tiene empate.
+    """
+
+    def test_prompt_exige_identificar_el_deporte(self):
+        from engine.prompt_builder import construir_prompt_sistema_36ai
+
+        prompt = construir_prompt_sistema_36ai()
+        self.assertIn("IDENTIFICA EL DEPORTE", prompt)
+        self.assertIn("EXCLUSIVAMENTE la lista de ese deporte", prompt)
+
+    def test_prompt_prohibe_mercados_de_otro_deporte(self):
+        from engine.prompt_builder import construir_prompt_sistema_36ai
+
+        prompt = construir_prompt_sistema_36ai()
+        # La advertencia debe nombrar los errores tipicos.
+        self.assertIn("NO tiene empate", prompt)
+        self.assertIn("doble oportunidad", prompt)
+        # Y debe existir la seccion de MLB con mercados validos.
+        self.assertIn("MLB:", prompt)
+        for valido in ("Ganador", "totales", "handicap", "hits", "strikeouts"):
+            self.assertIn(valido, prompt)
+
+    def test_instruccion_de_rebusqueda_no_ofrece_ajenos(self):
+        """La instruccion de re-busqueda no debe sugerir solo mercados de futbol."""
+        import inspect
+        import ai.ia36 as m
+
+        fuente = inspect.getsource(m.analizar_36ai)
+        # Si aparece "doble oportunidad" debe ser para PROHIBIRLO, no para
+        # ofrecerlo como alternativa.
+        if "doble oportunidad" in fuente:
+            self.assertIn("NO hay doble oportunidad", fuente)
+        self.assertIn("ganador, handicap, totales, hits", fuente)
+
+
 class SoportePromptTests(unittest.TestCase):
     """El bot de soporte no debe filtrar datos internos ni botar a WhatsApp
     ante cualquier duda. Regresion real: respondia 'plan ILIMITADO' y mandaba

@@ -458,7 +458,19 @@ Tu respuesta SIEMPRE debe estar en ESPAÑOL, sin importar el idioma de las fuent
 📊 APUESTAS RECOMENDADAS (varía entre estas opciones, NO uses siempre lo mismo)
 ═══════════════════════════════════════════════════════════════════════════════
 
-Fútbol:
+🚨 PRIMERO: IDENTIFICA EL DEPORTE Y USA SOLO SU SECCIÓN
+Primero identifica el deporte del partido por los nombres de los equipos y los
+datos que recibes. Despues usa EXCLUSIVAMENTE la lista de ese deporte.
+Es un error grave proponer un mercado de otro deporte. Ejemplos de errores
+PROHIBIDOS:
+- Beisbol (MLB) NO tiene empate, asi que NUNCA ofrezcas "doble oportunidad",
+  "1X", "X2", "12" ni "ambos ganan". Son mercados de futbol.
+- Beisbol NO tiene corners, tarjetas ni goles: son de futbol.
+- Futbol NO tiene innings, hits, strikeouts ni "puck line": son de otros deportes.
+- Tenis NO tiene over/under de goles ni handicaps de puntos: no existen ahi.
+Si dudas del deporte, usa el mercado mas basico y universal: "Ganador".
+
+Futbol:
 - 1x2
 - over/under de goles (mínimo 1.25 dependiendo la cuota)
 - doble oportunidad (1X, X2, 12)
@@ -585,17 +597,17 @@ Devuelve exactamente ese formato y en ese orden.
 - Usa SOLO cifras reales de los datos entregados (ESPN/web). Si un dato
   no aparece, NO lo inventes ni lo cites con numeros.
 - NUNCA respondas "SIN PICK" ni digas que no hay pick: SIEMPRE entrega un pick.
+- RECUERDA: el mercado debe existir en el deporte del partido. Beisbol no
+  tiene doble oportunidad ni corners; tenis no tiene over/under de goles.
 - Si faltan datos, NO te rindas: VUELVE A BUSCAR con buscar_web y buscar_cuotas
-  usando consultas distintas (alineaciones, forma, cuotas, corners, H2H) y
-  CAMBIA a un mercado para el que SI tengas datos reales (doble oportunidad,
-  under bajo, handicap amplio, over pequeño), baja la confianza y anota lo
-  que falta en consideraciones.
+  usando consultas distintas (alineaciones, forma, cuotas, H2H) y
+  CAMBIA a un mercado de TU deporte para el que SI tengas datos reales, baja
+  la confianza y anota lo que falta en consideraciones.
 - Si tras re-buscar sigue sin haber datos, entrega igualmente el pick con el
   mercado más seguro y cuota estimada marcada como estimada, confianza baja.
 - PERO jamás inventes cifras que no estén en los datos.
 - Si SÍ hay datos pero la confianza es baja (<50%), elige el mercado MÁS
-  SEGURO disponible (doble oportunidad, under bajo, handicap amplio, over
-  pequeño) y baja la confianza, pero entrega el pick.
+  SEGURO disponible dentro de TU deporte y baja la confianza, pero entrega el pick.
 - El campo 'titulo' debe coincidir SIEMPRE con la selección: si selection
   es doble oportunidad 2X, el titulo NO puede decir "no pierde" del local.
 - Si no hay cuota verificada, estima una cuota razonable basada en ESPN e

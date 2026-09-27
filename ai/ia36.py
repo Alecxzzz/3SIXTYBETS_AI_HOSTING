@@ -531,10 +531,13 @@ def analizar_36ai(mensaje_usuario, system_prompt):
                         "buscar_cuotas disponibles: USALAS AHORA MISMA con consultas distintas "
                         "(ej: '<equipos> alineaciones confirmadas hoy', '<equipos> forma ultimos "
                         "5 partidos', '<equipos> cuota 1x2', '<equipos> corners promedio'). "
+                        "IMPORTANTE: elige un mercado que EXISTA en el deporte del partido. "
+                        "En beisbol NO hay doble oportunidad ni corners (son de futbol): usa "
+                        "ganador, handicap, totales, hits o strikeouts. "
                         "Despues de la re-busqueda, CAMBIA a un mercado para el que si tengas "
-                        "datos reales (doble oportunidad, over/under bajo, handicap, corners) "
-                        "y entrega el pick final en el formato solicitado, con confianza "
-                        "ajustada y cuota estimada si hace falta. JAMAS devuelvas 'SIN PICK'."
+                        "datos reales y entrega el pick final en el formato solicitado, con "
+                        "confianza ajustada y cuota estimada si hace falta. "
+                        "JAMAS devuelvas 'SIN PICK'."
                     )
                 })
                 continue
