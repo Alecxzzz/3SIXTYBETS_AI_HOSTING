@@ -110,6 +110,50 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class SoportePromptTests(unittest.TestCase):
+    """El bot de soporte no debe filtrar datos internos ni botar a WhatsApp
+    ante cualquier duda. Regresion real: respondia 'plan ILIMITADO' y mandaba
+    a WhatsApp un admin que solo preguntaba por el dashboard.
+    """
+
+    PROMPT_PARTES = (
+        "COMO HABLAR DE ESOS DATOS",
+        "CUANDO SI DERIVAR A WHATSAPP",
+        "respondela SIEMPRE",
+        "no lo mandes a WhatsApp por una consulta",
+    )
+
+    def _prompt(self):
+        import inspect
+        import extras
+
+        return inspect.getsource(extras.soporte_chat)
+
+    def test_prompt_prohibe_filtrar_el_formato_interno(self):
+        fuente = self._prompt()
+        self.assertIn("NUNCA copies el formato del bloque", fuente)
+        self.assertIn("efectividad_historica_ia", fuente)
+
+    def test_prompt_prohibe_tecnicismos(self):
+        fuente = self._prompt()
+        self.assertIn("ciclo del scheduler", fuente)
+        self.assertIn("automaticamente", fuente)
+
+    def test_prompt_acota_la_escalacion_a_whatsapp(self):
+        """Debe decir que SOLO deriva por dinero/pagos/fallos, no por consultas."""
+        fuente = self._prompt()
+        self.assertIn("SOLO si hay dinero sin acreditar", fuente)
+        self.assertIn("No derives nunca", fuente)
+
+    def test_prompt_sigue_informando_el_whatsapp_real(self):
+        """La regla de escalacion debe conservar el numero de contacto."""
+        import extras
+
+        self.assertTrue(extras.WHATSAPP)
+        fuente = self._prompt()
+        self.assertIn("wa.me/", fuente)
+
+
 class MotoresDedicadosTests(unittest.TestCase):
     """Cada superficie debe tener su propio motor, no compartirlo con el chat.
 
