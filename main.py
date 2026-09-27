@@ -561,6 +561,7 @@ def debug_gemini():
     """
     import time as _t
 
+    import requests as http_requests
     from ai.gemini import get_gemini_key, _construir_payload, CADENA_MODELOS, GEMINI_BASE_URL
 
     inicio = _t.time()
@@ -572,7 +573,7 @@ def debug_gemini():
     intentos = []
     for modelo in CADENA_MODELOS[:3]:
         try:
-            r = requests.post(
+            r = http_requests.post(
                 f"{GEMINI_BASE_URL}/models/{modelo}:generateContent",
                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
                 json=payload,
