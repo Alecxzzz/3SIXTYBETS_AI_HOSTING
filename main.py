@@ -2612,15 +2612,29 @@ def cdnlivetv_resolve(name: str, code: str):
 
 
 def cdnlivetv_fresh(name: str, code: str):
-    """Devuelve un m3u8 vivo; cachea 45 min y reintenta (su API tiene rate-limit)."""
+    """Devuelve un m3u8 vivo; cachea 45 min y reintenta (su API tiene rate-limit).
+
+    cdnlivetv.tv limita las reproducciones por pais: un canal puede estar
+    saturado en 'ca' y funcionar en 'us'. Por eso se prueban varios codigos
+    antes de rendirse. El 503 'provider-cap' significa que el canal no se
+    puede servir AHORA (limite del proveedor), no que este roto el codigo.
+    """
     with _cdn_lock:
         cached = _cdn_cache.get((name, code))
     if cached and _time.time() - cached["ts"] < _CDN_TTL:
         return cached["url"]
 
+    # El codigo pedido primero, despues alternativas (el mismo canal puede
+    # estar capado en un pais y libre en otro).
+    codigos = [code] + [c for c in ("us", "ca", "uk", "mx") if c != code]
+    ultimo_motivo = "sin stream"
+
     for attempt in range(3):
-        stream = cdnlivetv_resolve(name, code)
-        if stream:
+        for c in codigos:
+            stream = cdnlivetv_resolve(name, c)
+            if not stream:
+                ultimo_motivo = "no se encontro URL del canal"
+                continue
             try:
                 probe = http_requests.get(
                     stream,
@@ -2629,27 +2643,43 @@ def cdnlivetv_fresh(name: str, code: str):
                     timeout=(5, 15),
                 )
                 ok = probe.status_code == 200
+                cuerpo = "" if ok else probe.text[:80]
                 probe.close()
                 if ok:
                     with _cdn_lock:
-                        _cdn_cache[(name, code)] = {"url": stream, "ts": _time.time()}
+                        _cdn_cache[(name, c)] = {"url": stream, "ts": _time.time()}
                     return stream
-            except http_requests.RequestException:
-                pass
+                # 'provider-cap' = limite de reproducciones del proveedor.
+                if "provider-cap" in str(cuerpo):
+                    ultimo_motivo = "provider-cap (limite de reproducciones)"
+                else:
+                    ultimo_motivo = f"HTTP {probe.status_code}"
+            except http_requests.RequestException as exc:
+                ultimo_motivo = f"conexion: {exc}"
         _time.sleep(2 * (attempt + 1))
 
     # Ultimo recurso: devolver el viejo aunque pueda estar por expirar
-    with _cdn_lock:
-        cached = _cdn_cache.get((name, code))
-    return cached["url"] if cached else None
+    for c in codigos:
+        with _cdn_lock:
+            cached = _cdn_cache.get((name, c))
+        if cached:
+            return cached["url"]
+    return None, ultimo_motivo
 
 
 @app.get("/tv/cdnlivetv/{name}/{code}")
 def tv_cdnlivetv(request: Request, name: str, code: str):
     """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy."""
-    stream = cdnlivetv_fresh(name, code)
+    resultado = cdnlivetv_fresh(name, code)
+    # cdnlivetv_fresh devuelve solo la URL, o (None, motivo) si no pudo.
+    stream, motivo = resultado if isinstance(resultado, tuple) else (resultado, None)
     if not stream:
-        raise HTTPException(503, f"No se pudo resolver el canal {name} ({code})")
+        raise HTTPException(
+            503,
+            f"El canal {name} no esta disponible ahora mismo "
+            f"({motivo or 'proveedor saturado'}). cdnlivetv.tv limita las "
+            f"reproducciones simultaneas; prueba en unos minutos o usa otro canal.",
+        )
     from fastapi.responses import RedirectResponse
 
     return RedirectResponse(_wrap(stream, _proxy_base(request)), status_code=302)

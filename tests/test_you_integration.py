@@ -110,6 +110,48 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class CanalesCdnTests(unittest.TestCase):
+    """Los canales cdnlivetv.devolvian 503 sin explicar el motivo real.
+
+    cdnlivetv.tv limita reproducciones por pais ('provider-cap'): un canal
+    puede estar saturado en 'ca' y servir en 'us'. El codigo solo probaba 'ca'
+    y devolvia un 503 seco, sin explicar nada al usuario.
+    """
+
+    def test_prueba_varios_paises(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.cdnlivetv_fresh)
+        # Debe recorrer codigos alternativos, no solo el pedido.
+        self.assertIn("codigos", fuente)
+        for codigo in ("us", "ca", "uk"):
+            self.assertIn(f'"{codigo}"', fuente)
+
+    def test_reconoce_provider_cap(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.cdnlivetv_fresh)
+        self.assertIn("provider-cap", fuente)
+
+    def test_503_explica_el_motivo(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.tv_cdnlivetv)
+        self.assertIn("no esta disponible ahora mismo", fuente)
+        self.assertIn("limita", fuente)
+
+    def test_devuelve_url_o_motivo(self):
+        """El endpoint debe manejar la tupla (url, motivo) sin romperse."""
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.tv_cdnlivetv)
+        self.assertIn("isinstance(resultado, tuple)", fuente)
+
+
 class EstadoPartidoTests(unittest.TestCase):
     """Nunca recomendar un partido ya empezado o terminado.
 
