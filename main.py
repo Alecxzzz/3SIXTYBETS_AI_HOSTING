@@ -320,6 +320,22 @@ def contexto_espn(mensaje: str) -> str:
         if not mejor or mejor_score < 1:
             return ""
 
+        # REGLA CRITICA 2: NUNCA dar un pick de un partido ya empezado o
+        # terminado. Antes se aceptaba cualquiera y se recommenia apostar sobre
+        # un juego que ya se habia jugado (ESPN lo marcaba "post"/"Final").
+        # Si el usuario lo pide explicitamente, se informa el resultado en vez
+        # de inventar una apuesta.
+        estado = (mejor.get("state") or "").strip().lower()
+        if estado and estado != "pre":
+            return (
+                "AVISO: ESE PARTIDO YA NO ESTA POR JUGARSE.\n"
+                f"Partido: {mejor.get('name')}\n"
+                f"Estado: {mejor.get('status') or estado}\n"
+                "No se genera pick porque apostar sobre un partido ya "
+                "iniciado o terminado no tiene sentido. Si quieres, pregunta "
+                "por otro partido de la agenda de hoy."
+            )
+
         # REGLA CRITICA: el partido debe implicar a LOS DOS equipos que pidio
         # el usuario. Antes solo se exigia 1 coincidencia, asi que al pedir
         # "dodgers vs orioles" se aceptaba el juego Orioles-Yankees (coincidia

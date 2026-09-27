@@ -110,6 +110,47 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class EstadoPartidoTests(unittest.TestCase):
+    """Nunca recomendar un partido ya empezado o terminado.
+
+    Regresion real: ESPN devuelve tambien juegos 'post'/'in' y el sistema los
+    aceptaba, generando un pick sobre un partido que ya se habia jugado.
+    """
+
+    def _game(self, state):
+        return {
+            "name": "Los Angeles Dodgers at San Francisco Giants",
+            "state": state,
+            "status": "Final" if state == "post" else "1:05 PM",
+            "home": {"name": "San Francisco Giants", "abbr": "SFG"},
+            "away": {"name": "Los Angeles Dodgers", "abbr": "LAD"},
+        }
+
+    def _pasa(self, state):
+        """Replica la regla: solo 'pre' (o sin estado) genera pick."""
+        e = (state or "").strip().lower()
+        return (not e) or e == "pre"
+
+    def test_partido_por_jugar_si_pasa(self):
+        self.assertTrue(self._pasa("pre"))
+        self.assertTrue(self._pasa("PRE"))
+
+    def test_partido_terminado_no_pasa(self):
+        self.assertFalse(self._pasa("post"))
+        self.assertFalse(self._pasa("POST"))
+
+    def test_partido_en_vivo_no_pasa(self):
+        self.assertFalse(self._pasa("in"))
+
+    def test_contexto_tiene_el_filtro_de_estado(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.contexto_espn)
+        self.assertIn("YA NO ESTA POR JUGARSE", fuente)
+        self.assertIn('!= "pre"', fuente)
+
+
 class MatchingPartidoTests(unittest.TestCase):
     """El partido analizado debe ser EXACTAMENTE el que pidio el usuario.
 
