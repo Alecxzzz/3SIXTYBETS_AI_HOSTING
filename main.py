@@ -544,9 +544,51 @@ def _responder_con_gemini(mensaje: str, contexto: str = "", es_partido: bool = F
         respuesta = generar_respuesta_gemini(sistema, mensaje)
         if respuesta and not str(respuesta).startswith("ERROR:"):
             return respuesta.replace("*", "").replace("#", "")
+        # Log del motivo real: sin esto Northflank solo muestra el aviso generico
+        # y no hay forma de saber si fue 429 (cuota), 404 (modelo) o timeout.
+        print(f"[chat/gemini] sin respuesta valida: {respuesta}", flush=True)
     except Exception as exc:
         print(f"[chat/gemini-fallback] fallo: {exc}", flush=True)
     return None
+
+
+@app.get("/debug/gemini")
+def debug_gemini():
+    """Diagnostico de Gemini: ejecuta una llamada minima y devuelve el error real.
+
+    Pensado para cuando el chat muestra el aviso generico: aqui se ve si es
+    cuota (429), modelo (404), key invalida (400) o timeout.
+    """
+    import time as _t
+
+    from ai.gemini import get_gemini_key, _construir_payload, CADENA_MODELOS, GEMINI_BASE_URL
+
+    inicio = _t.time()
+    key = get_gemini_key()
+    if not key:
+        return {"ok": False, "motivo": "sin GEMINI_API_KEY"}
+
+    payload = _construir_payload("", "di ok", 0.1)
+    intentos = []
+    for modelo in CADENA_MODELOS[:3]:
+        try:
+            r = requests.post(
+                f"{GEMINI_BASE_URL}/models/{modelo}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                json=payload,
+                timeout=20,
+            )
+            intentos.append({
+                "modelo": modelo,
+                "status": r.status_code,
+                "detalle": r.text[:300] if r.status_code != 200 else "OK",
+            })
+            if r.ok:
+                return {"ok": True, "modelo": modelo, "segundos": round(_t.time() - inicio, 1), "intentos": intentos}
+        except Exception as exc:
+            intentos.append({"modelo": modelo, "status": "excepcion", "detalle": str(exc)[:200]})
+
+    return {"ok": False, "segundos": round(_t.time() - inicio, 1), "intentos": intentos}
 
 
 @app.post("/chat", response_class=PlainTextResponse)
@@ -654,7 +696,11 @@ def chat(request: Request, data: Chat,
         )
         if alternativa:
             return alternativa
-        return "Gemini no respondio en este momento. Intenta de nuevo en unos segundos."
+        return (
+            "Gemini no genero respuesta. Suele ser la cuota gratuita del free "
+            "tier agotada o un reinicio del backend: intenta de nuevo en unos "
+            "segundos."
+        )
 
     if not YOU_API_KEY:
         if fallo_365:
