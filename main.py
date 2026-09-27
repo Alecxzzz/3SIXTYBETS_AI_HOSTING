@@ -2563,6 +2563,9 @@ import base64 as _b64
 _CDN_TTL = 45 * 60  # el token dura ~4 h; refrescamos antes por seguridad
 _cdn_cache = {}  # (name, code) -> {"url": str, "ts": float}
 _cdn_lock = threading.Lock()
+# Cache del catalogo de canales: 10 min es suficiente para el estado online/offline.
+_CDN_CAT_TTL = 10 * 60
+_cdn_cat_cache = {}  # "catalogo" -> {"data": list, "ts": float}
 
 
 def _cdn_b64d(s: str) -> str:
@@ -2665,6 +2668,90 @@ def cdnlivetv_fresh(name: str, code: str):
         if cached:
             return cached["url"]
     return None, ultimo_motivo
+
+
+def cdnlivetv_catalogo():
+    """Canales desde la API publica de cdnlivetv.tv, con estado en vivo.
+
+    La API (https://api.cdnlivetv.tv/api/v1/channels/?user=cdnlivetv&plan=free)
+    devuelve ~414 canales con 'status' online/offline. Usarla evita mantener una
+    lista fija a mano que se queda obsoleta: el cap por canal es dinamico.
+    Se cachea porque es una llamada por carga de la pagina de TV.
+    """
+    url = "https://api.cdnlivetv.tv/api/v1/channels/?user=cdnlivetv&plan=free"
+    with _cdn_lock:
+        cached = _cdn_cat_cache.get("catalogo")
+    if cached and _time.time() - cached["ts"] < _CDN_CAT_TTL:
+        return cached["data"]
+
+    try:
+        r = http_requests.get(url, headers={"User-Agent": HLS_USER_AGENT}, timeout=15)
+        if not r.ok:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        canales = (r.json() or {}).get("channels") or []
+        data = [
+            {
+                "name": c.get("name"),
+                "code": c.get("code"),
+                "status": c.get("status"),
+                "viewers": c.get("viewers"),
+            }
+            for c in canales
+            if c.get("name") and c.get("code")
+        ]
+    except Exception as exc:
+        print(f"[cdnlivetv] catalogo no disponible: {exc}", flush=True)
+        with _cdn_lock:
+            cached = _cdn_cat_cache.get("catalogo")
+        return cached["data"] if cached else []
+
+    with _cdn_lock:
+        _cdn_cat_cache["catalogo"] = {"data": data, "ts": _time.time()}
+    return data
+
+
+@app.get("/tv/canales-cdn")
+def tv_canales_cdn():
+    """Catalogo de canales cdnlivetv con su estado en vivo.
+
+    Publico (como /hls-proxy) para que la UI pueda pintar solo los que estan
+    online y no ofrezca canales que el proveedor tiene capeados.
+    """
+    cat = cdnlivetv_catalogo()
+    if not cat:
+        raise HTTPException(503, "Catalogo de canales no disponible ahora mismo.")
+
+    Deportivo = (
+        "espn", "tsn", "sportsnet", "mlb", "nfl", "nba", "nhl", "cbs", "fox",
+        "nbc", "abc", "dazn", "ufc", "btn", "bein", "tnt", "sky sport",
+        "premier sport", "laliga", "serie a", "bundesliga", "canal+",
+        "pga", "golf", "f1", "formula", "racing", "tennis", "cricket",
+    )
+
+    def _es_deportivo(nombre):
+        n = (nombre or "").lower()
+        return any(k in n for k in Deportivo)
+
+    todos = sorted(
+        (
+            {
+                "name": c["name"],
+                "code": c["code"],
+                "online": c.get("status") == "online",
+            }
+            for c in cat
+        ),
+        key=lambda c: (c["code"], c["name"].lower()),
+    )
+    deps = [c for c in todos if _es_deportivo(c["name"])]
+
+    return {
+        "total": len(todos),
+        "online": sum(1 for c in todos if c["online"]),
+        "deportivos": deps,
+        "deportivos_online": sum(1 for c in deps if c["online"]),
+        "todos": todos,
+    }
 
 
 @app.get("/tv/cdnlivetv/{name}/{code}")

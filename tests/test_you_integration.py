@@ -135,6 +135,33 @@ class CanalesCdnTests(unittest.TestCase):
         fuente = inspect.getsource(main.cdnlivetv_fresh)
         self.assertIn("provider-cap", fuente)
 
+    def test_existe_catalogo_y_endpoint(self):
+        """Debe existir el catalogo dinamico y el endpoint que lo expone."""
+        import main
+
+        self.assertTrue(hasattr(main, "cdnlivetv_catalogo"))
+        rutas = {getattr(r, "path", "") for r in main.app.routes}
+        self.assertIn("/tv/canales-cdn", rutas)
+
+    def test_catalogo_usa_la_api_de_cdnlivetv(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.cdnlivetv_catalogo)
+        self.assertIn("api.cdnlivetv.tv/api/v1/channels", fuente)
+        # Debe cachear: es una llamada por carga de pagina.
+        self.assertIn("_cdn_cat_cache", fuente)
+
+    def test_endpoint_filtra_deportivos(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.tv_canales_cdn)
+        # Debe filtrar por palabras clave de deportes y exponer el estado online.
+        self.assertIn("deportivos", fuente)
+        self.assertIn("espn", fuente)
+        self.assertIn("online", fuente)
+
     def test_503_explica_el_motivo(self):
         import inspect
         import main
