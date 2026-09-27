@@ -592,6 +592,41 @@ def debug_gemini():
     return {"ok": False, "segundos": round(_t.time() - inicio, 1), "intentos": intentos}
 
 
+def _responder_cascada(mensaje: str, contexto: str = "", es_partido: bool = False):
+    """Cadena de respaldo: Groq -> Gemini. Devuelve la primera que responda.
+
+    Ningun proveedor gratuito aguanta solo: Groq se satura por rate limits y
+    Gemini agota la cuota diaria. Encadenarlos da margen real sin pagar.
+    """
+    from ai.ia36 import (
+        GROQ_API_KEY,
+        procesar_36ai,
+        responder_conversacion_36ai,
+    )
+    from engine.prompt_builder import construir_prompt_conversacional
+
+    # 1) Groq: limites altos por minuto, es el que mejor aguanta el trafico.
+    if GROQ_API_KEY:
+        try:
+            if es_partido:
+                respuesta = procesar_36ai(mensaje + (f"\n\nDATOS REALES:\n{contexto}" if contexto else ""))
+            else:
+                respuesta = responder_conversacion_36ai(
+                    mensaje, construir_prompt_conversacional("365AI")
+                )
+            if respuesta and str(respuesta).strip():
+                return respuesta.replace("*", "").replace("#", "")
+        except Exception as exc:
+            print(f"[chat/cascada] groq fallo: {exc}", flush=True)
+
+    # 2) Gemini: gratis, pero con cuota diaria limitada.
+    alternativa = _responder_con_gemini(mensaje, contexto=contexto, es_partido=es_partido)
+    if alternativa:
+        return alternativa
+
+    return None
+
+
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(request: Request, data: Chat,
          x_chat_token: str | None = Header(None, alias="X-Chat-Token"),
@@ -666,16 +701,22 @@ def chat(request: Request, data: Chat,
         # partido -> análisis agéntico con formato EDGE.
         # Se inyectan las estadisticas reales de ESPN como base del análisis.
         respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
-        if respuesta_36:
+        if respuesta_36 and str(respuesta_36).strip():
             return respuesta_36
-        # 365AI saturada o sin respuesta: no hay fallback automatico a Demian.
-        # Demian/You queda reservado para cuando el usuario selecciona el chat
-        # You, nunca para rescues silenciosos de 365AI.
+        # 365AI (Groq) sin respuesta: caemos a Gemini antes de rendiros, para
+        # que el usuario nunca se quede sin respuesta por un rate limit.
+        alternativa = _responder_con_gemini(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=parece_partido,
+        )
+        if alternativa:
+            return alternativa
         fallo_365 = True
         if fallo_365:
             return (
-                "365AI esta saturada o no respondio en este momento. "
-                "No se uso Demian automaticamente; intenta de nuevo en unos segundos."
+                "365AI esta saturada y Gemini no tiene cuota disponible en este "
+                "momento. Intenta de nuevo en unos segundos."
             )
 
     # Gemini (Google AI Studio, free tier). Si el usuario lo elige en el chat se
@@ -737,7 +778,10 @@ def chat(request: Request, data: Chat,
         # usuario no lea el error tecnico. /chat llama a ask_you() directamente,
         # asi que el fallback de ai/model.py no aplica en esta ruta.
         if _respuesta_you_agotada(respuesta):
-            alternativa = _responder_con_gemini(
+            # Cadena de rescate: Groq y luego Gemini. El usuario elige el motor
+            # pero, si ese motor esta caido, preferimos responderle con otro
+            # antes que mostrarle un error tecnico.
+            alternativa = _responder_cascada(
                 bloque_memoria + data.mensaje,
                 contexto=ctx_espn,
                 es_partido=parece_partido,
@@ -999,6 +1043,16 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
         )
 
     respuesta = SearchEngine().ask_you(bloque_memoria + data.mensaje, system_prompt=reglas)
+    # You.com sin creditos en el análisis EDGE: caemos a la cadena Groq -> Gemini
+    # para no dejar al usuario con el error 402 crudo.
+    if _respuesta_you_agotada(respuesta):
+        alternativa = _responder_cascada(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=True,
+        )
+        if alternativa:
+            return alternativa
     # Limpiar asteriscos de formato markdown
     if respuesta:
         respuesta = respuesta.replace("*", "").replace("#", "")

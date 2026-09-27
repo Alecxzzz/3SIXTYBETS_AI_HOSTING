@@ -69,6 +69,48 @@ class ChatConvTokenTests(unittest.TestCase):
             main.CHAT_CONV_TTL_S = original
 
 
+class GroqRobustezTests(unittest.TestCase):
+    """Groq devuelve 200 con content vacio si max_tokens lo consume el
+    razonamiento del gpt-oss. Eso no puede devolverse como respuesta."""
+
+    def test_content_vacio_se_reintenta(self):
+        from unittest.mock import patch, MagicMock
+        import ai.ia36 as m
+
+        vacio = MagicMock(status_code=200)
+        vacio.json.return_value = {"choices": [{"message": {"content": ""}}]}
+        bueno = MagicMock(status_code=200)
+        bueno.json.return_value = {"choices": [{"message": {"content": "hola"}}]}
+
+        original_key = m.GROQ_API_KEY
+        m.GROQ_API_KEY = "test"
+        try:
+            with patch("ai.ia36.requests.post", side_effect=[vacio, bueno]) as mock_post:
+                data, modelo = m.llamar_modelo(
+                    [{"role": "user", "content": "hola"}],
+                    usar_tools=False,
+                    max_tokens=20,
+                    max_reintentos=3,
+                )
+        finally:
+            m.GROQ_API_KEY = original_key
+
+        self.assertEqual(
+            data["choices"][0]["message"]["content"], "hola"
+        )
+        # El segundo intento debe haber subido el presupuesto de tokens.
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertGreaterEqual(
+            mock_post.call_args_list[1].kwargs["data"].count("1024"), 1
+        )
+
+    def test_compound_mini_no_esta_en_la_cadena(self):
+        import ai.ia36 as m
+
+        self.assertNotIn("groq/compound-mini", m.MODELOS_FALLBACK_CADENA)
+        self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
+
+
 class GeminiTests(unittest.TestCase):
     @patch("ai.gemini.requests.post")
     def test_llamar_gemini_extrae_texto(self, mock_post):

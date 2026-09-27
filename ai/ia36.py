@@ -51,7 +51,8 @@ MODELOS_FALLBACK_CADENA = [
     os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b"),
     "openai/gpt-oss-20b",
     "qwen/qwen3.8-27b",
-    "groq/compound-mini",
+    # groq/compound-mini RETIRADO: la API responde 404 "model does not exist"
+    # (verificado contra /models). No volver a incluirlo o rompe la cadena.
 ]
 
 # Esfuerzo de razonamiento para modelos gpt-oss (low = respuestas ~40-50% mas rapidas).
@@ -339,6 +340,21 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                 time.sleep(3)
                 continue
             if "choices" in data:
+                # groq devuelve 200 con content="" cuando el presupuesto de
+                # max_tokens lo consume el razonamiento del gpt-oss. No es una
+                # respuesta valida: hay que reintentar con mas tokens.
+                try:
+                    contenido = (data["choices"][0]["message"].get("content") or "").strip()
+                except (KeyError, IndexError, TypeError):
+                    contenido = ""
+                if not contenido:
+                    ultimo_error = "Groq devolvio content vacio (max_tokens agotado por razonamiento)"
+                    if DEBUG:
+                        print(f"[36AI][DEBUG] content vacio en {modelo}; subiendo max_tokens", flush=True)
+                    if max_tokens is None or max_tokens < 512:
+                        payload["max_tokens"] = 1024
+                    time.sleep(1)
+                    continue
                 if DEBUG:
                     print(f"[36AI][DEBUG] Respuesta: {json.dumps(data['choices'][0]['message'], ensure_ascii=False)[:500]}")
                 return data, modelo
@@ -637,7 +653,10 @@ def clasificar_36ai(mensaje: str) -> str:
         {"role": "user", "content": f"Mensaje: {mensaje}\nEtiqueta:"},
     ]
 
-    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=20, max_reintentos=1)
+    # max_tokens holgado a proposito: los gpt-oss gastan tokens en razonamiento
+    # ANTES de emitir texto. Con 20 el content llegaba vacío y el clasificador
+    # caía siempre en CONVERSACION.
+    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=400, max_reintentos=1)
     if not data:
         return "CONVERSACION"
 
