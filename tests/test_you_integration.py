@@ -125,6 +125,38 @@ class MotoresDedicadosTests(unittest.TestCase):
                 importlib.util.find_spec(mod), f"falta el modulo {mod}"
             )
 
+    def test_dashboard_tiene_busqueda_web(self):
+        """El dashboard DEBE buscar en web: se perdio al darle motor Groq propio.
+
+        Antes lo hacia You.com (research con include_domains). Si alguien quita
+        la busqueda, los picks se apoyarian solo en la memoria del modelo.
+        """
+        import inspect
+        import ai.dashboard_ia as d
+
+        self.assertTrue(d.CONSULTAS_BUSQUEDA, "debe tener consultas de busqueda")
+        self.assertTrue(hasattr(d, "buscar_contexto_web"))
+        # La busqueda debe ejecutarse DENTRO de generar_picks, no solo existir.
+        fuente = inspect.getsource(d.generar_picks)
+        self.assertIn("buscar_contexto_web", fuente)
+        self.assertIn("CONTEXTO DE BUSQUEDA WEB", fuente)
+
+    def test_busqueda_web_se_puede_apagar(self):
+        """Debe existir un interruptor para no gastar tiempo en busquedas."""
+        import inspect
+        import ai.dashboard_ia as d
+
+        fuente = inspect.getsource(d.buscar_contexto_web)
+        self.assertIn("DASHBOARD_AI_WEB", fuente)
+
+    def test_365ai_tiene_busqueda_web(self):
+        """El chat (365AI) debe conservar su herramienta de busqueda."""
+        import ai.ia36 as ia36
+
+        self.assertTrue(hasattr(ia36, "buscar_web"))
+        nombres = [t["function"]["name"] for t in ia36.tools]
+        self.assertIn("buscar_web", nombres)
+
     def test_modelos_de_apartado_no_comparten_el_de_365ai(self):
         import ai.dashboard_ia as dash
         import ai.stats_ia as stats

@@ -15,15 +15,18 @@ Configuracion (variables de entorno):
   DASHBOARD_AI_BASE_URL  endpoint de chat completions (formato OpenAI).
   DASHBOARD_AI_MAX_TOKENS / _TIMEOUT / _MAX_REINTENTOS
 
-Salida: devuelve TEXTO con el JSON del pick. No usa function-calling a
-proposito: con tool-calling, el modelo puede emitir el JSON dentro del
-razonamiento y la respuesta llega vacia, que es justo el fallo que se quiere
-evitar aqui.
+CONFIGURACION DE BUSQUEDA WEB
+
+El dashboard genera picks, asi que necesita informacion FRESCA (lesiones,
+cuotas, forma reciente). Antes este motor era Demian/You.com, que hacia
+research web con include_domains. Al darle modelo Groq propio se perdio esa
+capacidad, asi que ahora el modulo busca en la web ANTES de generar el pick y
+le pasa los resultados al modelo como contexto.
+
+Busqueda: ai.ia36.buscar_web (DuckDuckGo, ya anade mes y anio a la consulta).
 """
 
-import json
 import os
-import re
 import time
 
 import requests
@@ -36,6 +39,16 @@ except ImportError:
 if load_dotenv:
     load_dotenv()
 
+
+# Consultas que se lanzan antes de pedir el pick. Se centran en lo que mas
+# cambia entre partidos y no se puede deducir de la tabla de posiciones.
+CONSULTAS_BUSQUEDA = [
+    "{partido} lesiones y bajas hoy",
+    "{partido} cuotas y pronosticos",
+    "{partido} forma reciente ultimos partidos",
+]
+RESULTADOS_POR_BUSQUEDA = 3
+MAX_CHARS_BUSQUEDA = int(os.getenv("DASHBOARD_AI_MAX_CHARS_BUSQUEDA", "2500"))
 
 API_KEY = (
     os.getenv("DASHBOARD_AI_API_KEY")
@@ -59,6 +72,48 @@ DEBUG = os.getenv("DASHBOARD_AI_DEBUG", "false").lower() == "true"
 
 def dashboard_configurado() -> bool:
     return bool(API_KEY)
+
+
+def buscar_contexto_web(mensaje: str) -> str:
+    """Busca en la web lo que un pick necesita y devuelve el contexto.
+
+    Reutiliza ai.ia36.buscar_web (DuckDuckGo) porque ya anade mes y anio a la
+    consulta, que es lo que evita que el modelo se apoye en datos de temporadas
+    pasadas. Se degrada a cadena vacia si la busqueda falla: es preferible
+    generar el pick con menos contexto que no generar nada.
+    """
+    if os.getenv("DASHBOARD_AI_WEB", "true").lower() != "true":
+        return ""
+
+    try:
+        from ai.ia36 import buscar_web
+    except Exception as exc:
+        print(f"[Dashboard-AI] busqueda web no disponible: {exc}", flush=True)
+        return ""
+
+    # El "mensaje" del dashboard suele traer el partido; se recorta para no
+    # lanzar consultas gigantes que devuelven nada util.
+    partido = (mensaje or "").strip()[:120]
+    if not partido:
+        return ""
+
+    bloques = []
+    for plantilla in CONSULTAS_BUSQUEDA:
+        consulta = plantilla.format(partido=partido)
+        try:
+            resultado = buscar_web(consulta, max_resultados=RESULTADOS_POR_BUSQUEDA)
+        except Exception as exc:
+            resultado = f"(error: {exc})"
+        if resultado and "Error" not in resultado[:20]:
+            bloques.append(f"=== {consulta} ===\n{resultado}")
+
+    if not bloques:
+        return ""
+
+    contexto = "\n\n".join(bloques)
+    if len(contexto) > MAX_CHARS_BUSQUEDA:
+        contexto = contexto[:MAX_CHARS_BUSQUEDA] + "\n[contexto recortado]"
+    return contexto
 
 
 def _extraer_texto(data) -> str:
@@ -89,6 +144,11 @@ def _construir_payload(modelo: str, system_prompt: str, mensaje: str) -> dict:
 def generar_picks(system_prompt: str, mensaje: str):
     """Genera el texto del pick con el modelo DEDICADO del dashboard.
 
+    Antes de preguntar al modelo se hace una busqueda web (lesiones, cuotas,
+    forma) y el resultado se inyecta como contexto, para que el pick se apoye
+    en datos frescos y no en memoria del modelo. Si la busqueda falla, se sigue
+    adelante sin ella: es preferible un pick con menos contexto que ninguno.
+
     Recorre modelo principal -> fallback, reintentando en 429/5xx. Devuelve
     (texto, nombre_modelo) o (None, None) si no se pudo.
     """
@@ -99,10 +159,24 @@ def generar_picks(system_prompt: str, mensaje: str):
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     ultimo_error = ""
 
+    # Contexto web (una sola vez, compartido por modelo principal y fallback).
+    contexto_web = buscar_contexto_web(mensaje)
+    if DEBUG:
+        print(f"[Dashboard-AI] contexto web: {len(contexto_web)} chars", flush=True)
+
+    system_con_contexto = system_prompt
+    if contexto_web:
+        system_con_contexto = (
+            system_prompt
+            + "\n\nCONTEXTO DE BUSQUEDA WEB (datos frescos, es la fuente de "
+            "verdad; no inventes datos que no aparezcan aqui):\n"
+            + contexto_web
+        )
+
     for modelo in (MODELO, MODELO_FALLBACK):
         if not modelo:
             continue
-        payload = _construir_payload(modelo, system_prompt, mensaje)
+        payload = _construir_payload(modelo, system_con_contexto, mensaje)
 
         for intento in range(max(1, MAX_REINTENTOS)):
             try:
