@@ -316,12 +316,44 @@ def contexto_espn(mensaje: str) -> str:
             for s in (t.get("statistics") or [])[:8]:
                 if s.get("displayValue"):
                     lineas.append(f"  - {s.get('name')}: {s.get('displayValue')}")
+
+            # Los partidos recientes se procesan aqui (no se pasan crudos) porque
+            # "Rays 6 @ Yankees 1" es ambiguo y el modelo lo interpretaba mal:
+            # tomaba el marcador del rival como propio y terminaba inventando
+            # promedios. Se entrega YA SEPARADO (anotados/recibidos/total) y con
+            # los promedios calculados, para que no tenga nada que deducir.
+            partidos = []
             for r in (t.get("recent_games") or [])[:5]:
                 a = r.get("away") or {}
                 h = r.get("home") or {}
-                a_s = a.get("score") if a.get("score") is not None else "?"
-                h_s = h.get("score") if h.get("score") is not None else "?"
-                lineas.append(f"  - reciente: {a.get('name','?')} {a_s} @ {h.get('name','?')} {h_s}")
+                a_nombre = a.get("name") or "?"
+                h_nombre = h.get("name") or "?"
+                a_s = a.get("score")
+                h_s = h.get("score")
+                if a_s is None or h_s is None:
+                    continue
+                try:
+                    a_s, h_s = int(a_s), int(h_s)
+                except (TypeError, ValueError):
+                    continue
+                es_local = h_nombre == nombre
+                propios = h_s if es_local else a_s
+                rival = a_nombre if es_local else h_nombre
+                condicion = "en casa" if es_local else "fuera de casa"
+                partidos.append((rival, propios, h_s + a_s, condicion))
+
+            if partidos:
+                for rival, propios, total, condicion in partidos:
+                    lineas.append(
+                        f"  - vs {rival} ({condicion}): {nombre} anoto "
+                        f"{propios}, total del partido {total}"
+                    )
+                prom_pro = round(sum(p[1] for p in partidos) / len(partidos), 1)
+                prom_tot = round(sum(p[2] for p in partidos) / len(partidos), 1)
+                lineas.append(
+                    f"  PROMEDIO {nombre} (ultimos {len(partidos)}): "
+                    f"anota {prom_pro}, partidos con {prom_tot} carreras en total"
+                )
 
         if detail.get("head_to_head"):
             try:

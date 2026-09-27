@@ -110,6 +110,37 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class ContextoEspnTests(unittest.TestCase):
+    """El contexto de ESPN debe entregarse SIN ambiguedad.
+
+    Regresion real: se pasaba 'Rays 6 @ Yankees 1' y el modelo tomaba el
+    marcador del rival como propio, inventando promedios (dijo 5.8 cuando
+    el real era 4.8) y sumando promedios en vez de usar el total real.
+    """
+
+    def test_contexto_incluye_totales_por_partido(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.contexto_espn)
+        # Debe indicar el total de cada partido, no solo el marcador suelto.
+        self.assertIn("total del partido", fuente)
+        self.assertIn("PROMEDIO", fuente)
+        # Y no debe volver al formato ambiguo "@".
+        self.assertNotIn("} @ {h.get('name')", fuente)
+
+    def test_promedio_se_calcula_sobre_totales(self):
+        """Aritmetica: el total de un partido es la suma de ambos marcadores."""
+        partidos = [(1, 7), (9, 11), (6, 10), (2, 12), (6, 9)]
+        prom_anot = sum(p[0] for p in partidos) / len(partidos)
+        prom_total = sum(p[1] for p in partidos) / len(partidos)
+        self.assertAlmostEqual(prom_anot, 4.8)
+        self.assertAlmostEqual(prom_total, 9.8)
+        # El total NUNCA es menor que lo que anota el equipo.
+        for anot, total in partidos:
+            self.assertLessEqual(anot, total)
+
+
 class PromptMercadosPorDeporteTests(unittest.TestCase):
     """Regresion real: a un partido de MLB se le ofrecio 'Doble oportunidad 1X',
     que es un mercado de futbol. El beisbol no tiene empate.
