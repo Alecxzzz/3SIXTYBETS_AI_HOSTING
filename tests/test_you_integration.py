@@ -110,6 +110,51 @@ class GroqRobustezTests(unittest.TestCase):
         self.assertNotIn("groq/compound-mini", m.MODELOS_PREFERIDOS)
 
 
+class MatchingPartidoTests(unittest.TestCase):
+    """El partido analizado debe ser EXACTAMENTE el que pidio el usuario.
+
+    Regresion grave: al pedir "dodgers vs orioles" se aceptaba el juego
+    Orioles-Yankees (coincidia un solo token, "orioles") y la IA entregaba un
+    pick de un partido inexistente, llega a justificarlo como "equivalente".
+    """
+
+    GAME = {
+        "home": {"name": "New York Yankees", "short_name": "Yankees", "abbr": "NYY"},
+        "away": {"name": "Baltimore Orioles", "short_name": "Orioles", "abbr": "BAL"},
+    }
+
+    def test_rechaza_si_solo_coincide_un_equipo(self):
+        from main import _coinciden_ambos_equipos
+
+        # "dodgers orioles": solo coincide Orioles -> NO debe pasar.
+        self.assertFalse(
+            _coinciden_ambos_equipos(self.GAME, {"dodgers", "orioles"})
+        )
+
+    def test_acepta_si_coinciden_los_dos(self):
+        from main import _coinciden_ambos_equipos
+
+        self.assertTrue(
+            _coinciden_ambos_equipos(self.GAME, {"yankees", "orioles"})
+        )
+
+    def test_acepta_por_nombre_corto_y_abbr(self):
+        from main import _coinciden_ambos_equipos
+
+        self.assertTrue(_coinciden_ambos_equipos(self.GAME, {"yankees", "bal"}))
+        self.assertTrue(_coinciden_ambos_equipos(self.GAME, {"nyy", "orioles"}))
+
+    def test_contexto_avisa_cuando_no_encuentra_el_partido(self):
+        import main
+
+        fuente_ctx = main.contexto_espn("dodgers vs orioles")
+        if fuente_ctx:
+            self.assertTrue(
+                fuente_ctx.startswith("NO SE ENCONTRO"),
+                "debe avisar que no son esos los equipos",
+            )
+
+
 class ContextoEspnTests(unittest.TestCase):
     """El contexto de ESPN debe entregarse SIN ambiguedad.
 

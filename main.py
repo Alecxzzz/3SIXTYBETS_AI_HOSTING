@@ -258,6 +258,36 @@ def _norm_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9 ]", " ", t.lower())
 
+def _variantes_equipo(equipo: dict) -> list:
+    """Nombres por los que puede aparecer un equipo: full, short y abbr."""
+    variantes = []
+    for clave in ("name", "short_name", "abbr", "displayName", "shortDisplayName"):
+        valor = (equipo or {}).get(clave)
+        if valor:
+            variantes.append(_norm_txt(valor))
+    return [v for v in variantes if v]
+
+
+def _coinciden_ambos_equipos(game: dict, tokens: set) -> bool:
+    """True si los DOS equipos pedidos aparecen en el partido.
+
+    Sin esto, "dodgers vs orioles" encontraba el juego Orioles-Yankees (por
+    "orioles") y la IA entregaba un pick de un partido inexistente.
+    """
+    local = _variantes_equipo(game.get("home"))
+    visita = _variantes_equipo(game.get("away"))
+    if not local or not visita:
+        return False
+
+    def _tiene(equipo_variantes):
+        return any(
+            any(t in variante for t in tokens) or variante in tokens
+            for variante in equipo_variantes
+        )
+
+    return _tiene(local) and _tiene(visita)
+
+
 def contexto_espn(mensaje: str) -> str:
     """Busca el partido del mensaje en ESPN y devuelve estadisticas reales.
 
@@ -289,6 +319,20 @@ def contexto_espn(mensaje: str) -> str:
 
         if not mejor or mejor_score < 1:
             return ""
+
+        # REGLA CRITICA: el partido debe implicar a LOS DOS equipos que pidio
+        # el usuario. Antes solo se exigia 1 coincidencia, asi que al pedir
+        # "dodgers vs orioles" se aceptaba el juego Orioles-Yankees (coincidia
+        # "orioles") y la IA analizaba un partido que no era el solicitado,
+        # inventando la equivalencia. Un pick sobre un partido inexistente es
+        # peor que no dar pick.
+        if not _coinciden_ambos_equipos(mejor, tokens):
+            return (
+                "NO SE ENCONTRO EL PARTIDO EXACTO QUE PIDISTE. Los datos "
+                "disponibles son de otro partido, asi que NO se usan para no "
+                "darte un analisis equivocado. Pregunta por un partido que "
+                "esté en la agenda de hoy."
+            )
 
         lineas = [
             f"Partido encontrado en ESPN: {mejor.get('name')}",
