@@ -2710,6 +2710,132 @@ def cdnlivetv_catalogo():
     return data
 
 
+def _canales_por_liga(equipo_local: str, equipo_visita: str, sport: str) -> list:
+    """Canales cdnlivetv que probablemente emiten este partido, de mayor a menor.
+
+    cdnlivetv.tv NO expone el API de sports (devuelve 401 sin plan Premium), asi
+    que no hay forma de saber el broadcaster exacto. Se infiere por el deporte y
+    se filtran los que estan ONLINE ahora mismo, para no ofrecer canales caidos.
+    """
+    cat = cdnlivetv_catalogo()
+    if not cat:
+        return []
+
+    # Solo canales online: el cap es dinamico y un canal saturado solo falla.
+    online = [c for c in cat if c.get("status") == "online"]
+
+    # Palabras clave del deporte, en orden de preferencia (mas especifico antes).
+    # El nombre del partido se usa como desempate: si el canal comparte palabras
+    # con el equipo (p.ej. "Dodgers" -> "Sportsnet Dodgers"), sube de prioridad.
+    reglas = {
+        "mlb": ["mlb network", "sportsnet", "fox sports", "espn"],
+        "nba": ["nba tv", "espn", "tnt", "sky sports", "sportsnet"],
+        "nfl": ["nfl network", "espn", "cbs", "fox sports", "sportsnet"],
+        "nhl": ["nhl network", "sportsnet", "tnt", "espn"],
+        "soccer": ["dazn", "bein", "fox sports", "tudn", "espn", "premier sports",
+                   "la liga", "sky sports", "canal+", "tnt sports"],
+        "tennis": ["tennis", "espn"],
+    }
+    claves = reglas.get(sport, ["espn", "fox sports", "sportsnet", "dazn"])
+
+    texto_partido = f"{equipo_local} {equipo_visita}".lower()
+
+    def _prioridad(canal):
+        n = (canal.get("name") or "").lower()
+        puntaje = 0
+        # 1) Coincidencia con una palabra clave del deporte.
+        for i, clave in enumerate(claves):
+            if clave in n:
+                puntaje += 100 - i * 5
+                break
+        # 2) Bonus si el canal menciona al equipo (emisor dedicado).
+        for palabra in re.findall(r"[a-z]{4,}", texto_partido):
+            if palabra in n:
+                puntaje += 40
+                break
+        return puntaje
+
+    candidatos = [
+        {"name": c["name"], "code": c["code"], "score": _prioridad(c)}
+        for c in online
+    ]
+    candidatos = [c for c in candidatos if c["score"] > 0]
+    candidatos.sort(key=lambda c: -c["score"])
+
+    return [
+        {
+            "name": c["name"],
+            "code": c["code"],
+        }
+        for c in candidatos[:3]
+    ]
+
+
+@app.get("/tv/agenda")
+def tv_agenda(
+    sport: str = None,
+    solo_pre: bool = True,
+):
+    """Agenda de HOY con el canal de cada partido.
+
+    Reemplaza a la lista de canales: el usuario ve que se juega, y al pulsar
+    abre el canal que lo emite. Los partidos ya terminados se omiten por
+    defecto (no tiene sentido ver un partido acabado).
+    """
+    try:
+        import sports
+    except Exception:
+        raise HTTPException(503, "Servicio de deportes no disponible.")
+
+    deportes = [sport] if sport else ["mlb", "nba", "nfl", "nhl", "soccer"]
+    agenda = []
+
+    for s in deportes:
+        try:
+            data = sports.get_sport_games(s)
+        except Exception as exc:
+            print(f"[agenda] {s} fallo: {exc}", flush=True)
+            continue
+
+        for g in (data.get("games") or []):
+            estado = (g.get("state") or "").lower()
+            if solo_pre and estado != "pre":
+                continue
+
+            local = ((g.get("home") or {}).get("name")) or ""
+            visita = ((g.get("away") or {}).get("name")) or ""
+            if not local or not visita:
+                continue
+
+            canales = _canales_por_liga(local, visita, s)
+            if not canales:
+                continue
+
+            odds = g.get("odds") or {}
+            agenda.append({
+                "sport": s,
+                "home": local,
+                "away": visita,
+                "name": g.get("name"),
+                "date": g.get("date"),
+                "state": estado,
+                "status": g.get("status") or "",
+                "league": g.get("league") or "",
+                "total": odds.get("over_under"),
+                "linea": odds.get("details"),
+                "canales": canales,
+            })
+
+    # Ordenar por hora de inicio.
+    agenda.sort(key=lambda a: (a.get("date") or ""))
+
+    return {
+        "total": len(agenda),
+        "partidos": agenda,
+        "generado": int(_time.time()),
+    }
+
+
 @app.get("/tv/canales-cdn")
 def tv_canales_cdn():
     """Catalogo de canales cdnlivetv con su estado en vivo.

@@ -135,6 +135,34 @@ class CanalesCdnTests(unittest.TestCase):
         fuente = inspect.getsource(main.cdnlivetv_fresh)
         self.assertIn("provider-cap", fuente)
 
+    def test_agenda_existe_y_filtra_terminados(self):
+        import inspect
+        import main
+
+        rutas = {getattr(r, "path", "") for r in main.app.routes}
+        self.assertIn("/tv/agenda", rutas)
+        fuente = inspect.getsource(main.tv_agenda)
+        # No debe ofrecer partidos ya jugados.
+        self.assertIn('solo_pre', fuente)
+        self.assertIn('!= "pre"', fuente)
+
+    def test_agenda_solo_ofrece_canales_online(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main._canales_por_liga)
+        self.assertIn('status") == "online"', fuente)
+        # Un canal saturado solo haria fallar al usuario.
+        self.assertIn("online", fuente)
+
+    def test_agenda_incluye_datos_del_partido(self):
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.tv_agenda)
+        for campo in ("home", "away", "date", "canales", "total"):
+            self.assertIn(f'"{campo}"', fuente)
+
     def test_existe_catalogo_y_endpoint(self):
         """Debe existir el catalogo dinamico y el endpoint que lo expone."""
         import main
