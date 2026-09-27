@@ -194,8 +194,9 @@ def generar_picks(system_prompt: str, mensaje: str):
                     if DEBUG:
                         print(f"[Dashboard-AI] {modelo} respondio ({len(texto)} chars)")
                     return texto, modelo
-                # 200 con content vacio: los gpt-oss gastan tokens en
-                # razonamiento antes de emitir texto.
+                # content vacio aqui SI es fallo: este modulo no usa tools, asi
+                # que no puede ser una peticion de herramienta. Es el razonamiento
+                # del gpt-oss consumiendo el presupuesto de max_tokens.
                 ultimo_error = f"{modelo} devolvio content vacio"
                 if DEBUG:
                     print(f"[Dashboard-AI] {modelo}: vacio, subiendo max_tokens")

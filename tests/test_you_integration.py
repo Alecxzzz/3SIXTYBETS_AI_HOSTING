@@ -201,6 +201,81 @@ class MotoresDedicadosTests(unittest.TestCase):
         nombres = [t["function"]["name"] for t in ia36.tools]
         self.assertIn("buscar_web", nombres)
 
+    def test_tool_call_valida_no_se_trata_como_fallo(self):
+        """REGRESION CRITICA: content=null con tool_calls es una respuesta VALIDA.
+
+        El loop agéntico pide la herramienta buscar_web y Groq devuelve
+        content=null + tool_calls poblado. Tratarlo como "content vacio" hacia
+        que se reintentara hasta agotar y devolver None -> el chat caia al
+        aviso de "365AI saturada" en cualquier analisis de partido (los
+        saludos si funcionaban, por eso el bug pasava desapercibido).
+        """
+        from unittest.mock import MagicMock, patch
+        import ai.ia36 as m
+
+        # Respuesta de Groq pidiendo herramienta: content=null (None en JSON).
+        con_tool = MagicMock(status_code=200)
+        con_tool.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "buscar_web",
+                                    "arguments": '{"query":"Dodgers Giants"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+        original = m.GROQ_API_KEY
+        m.GROQ_API_KEY = "test"
+        try:
+            with patch("ai.ia36.requests.post", return_value=con_tool) as mp:
+                data, modelo = m.llamar_modelo(
+                    [{"role": "user", "content": "analiza el partido"}],
+                    usar_tools=True,
+                    max_reintentos=3,
+                )
+        finally:
+            m.GROQ_API_KEY = original
+
+        self.assertIsNotNone(data, "una peticion de herramienta NO debe devolverse como None")
+        # Y no debe haber consumido reintentos: debe devolver en la primera.
+        self.assertEqual(mp.call_count, 1)
+
+    def test_content_vacio_sin_tools_sigue_reintentando(self):
+        """Sin tool_calls, el content vacio SI es un fallo a reintentar."""
+        from unittest.mock import MagicMock, patch
+        import ai.ia36 as m
+
+        vacio = MagicMock(status_code=200)
+        vacio.json.return_value = {"choices": [{"message": {"content": ""}}]}
+        bueno = MagicMock(status_code=200)
+        bueno.json.return_value = {"choices": [{"message": {"content": "hola"}}]}
+
+        original = m.GROQ_API_KEY
+        m.GROQ_API_KEY = "test"
+        try:
+            with patch("ai.ia36.requests.post", side_effect=[vacio, bueno]) as mp:
+                data, _ = m.llamar_modelo(
+                    [{"role": "user", "content": "hola"}],
+                    usar_tools=False,
+                    max_reintentos=3,
+                )
+        finally:
+            m.GROQ_API_KEY = original
+
+        self.assertEqual(data["choices"][0]["message"]["content"], "hola")
+        self.assertEqual(mp.call_count, 2)
+
     def test_modelos_de_apartado_no_comparten_el_de_365ai(self):
         import ai.dashboard_ia as dash
         import ai.stats_ia as stats

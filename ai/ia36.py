@@ -340,23 +340,36 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                 time.sleep(3)
                 continue
             if "choices" in data:
-                # groq devuelve 200 con content="" cuando el presupuesto de
-                # max_tokens lo consume el razonamiento del gpt-oss. No es una
-                # respuesta valida: hay que reintentar con mas tokens.
+                # OJO: content vacio NO siempre es un fallo. Cuando el modelo
+                # pide una herramienta responde con content=null y tool_calls
+                # poblado: eso es una respuesta VALIDA del loop agéntico. Solo
+                # es un fallo real cuando no hay content NI tool_calls (ahi si
+                # el presupuesto de max_tokens lo consumio el razonamiento).
                 try:
-                    contenido = (data["choices"][0]["message"].get("content") or "").strip()
+                    mensaje = data["choices"][0]["message"]
                 except (KeyError, IndexError, TypeError):
-                    contenido = ""
-                if not contenido:
-                    ultimo_error = "Groq devolvio content vacio (max_tokens agotado por razonamiento)"
+                    mensaje = {}
+                contenido = (mensaje.get("content") or "").strip()
+                tiene_tools = bool(mensaje.get("tool_calls"))
+
+                if not contenido and not tiene_tools:
+                    ultimo_error = (
+                        "Groq devolvio content vacio (max_tokens agotado por razonamiento)"
+                    )
                     if DEBUG:
-                        print(f"[36AI][DEBUG] content vacio en {modelo}; subiendo max_tokens", flush=True)
+                        print(
+                            f"[36AI][DEBUG] content vacio en {modelo}; subiendo max_tokens",
+                            flush=True,
+                        )
                     if max_tokens is None or max_tokens < 512:
                         payload["max_tokens"] = 1024
                     time.sleep(1)
                     continue
+
                 if DEBUG:
-                    print(f"[36AI][DEBUG] Respuesta: {json.dumps(data['choices'][0]['message'], ensure_ascii=False)[:500]}")
+                    print(
+                        f"[36AI][DEBUG] Respuesta: {json.dumps(mensaje, ensure_ascii=False)[:500]}"
+                    )
                 return data, modelo
             else:
                 ultimo_error = f"Respuesta sin 'choices': {json.dumps(data)[:500]}"
