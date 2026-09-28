@@ -47,9 +47,10 @@ MODELO_DEFAULT = os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b")
 # Cadena de fallback con modelos REALES disponibles en la cuenta de Groq
 # (llama-3.3-70b-versatile fue deprecado y devolvia 404 -> timeouts).
 MODELO_FALLBACK = os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b")
+# Cadena de fallback. Los limites diarios de Groq (TPD) son POR MODELO, asi
+# que cada uno debe ser distinto: si se repite, un 429 se repetiria tambien.
 MODELOS_FALLBACK_CADENA = [
-    os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b"),
-    "openai/gpt-oss-20b",
+    MODELO_FALLBACK,
     "qwen/qwen3.8-27b",
     # groq/compound-mini RETIRADO: la API responde 404 "model does not exist"
     # (verificado contra /models). No volver a incluirlo o rompe la cadena.
@@ -302,6 +303,37 @@ def _siguiente_modelo(actual: str):
     return cadena[idx + 1] if idx + 1 < len(cadena) else None
 
 
+def _segundos_para_reintentar(mensaje_error):
+    """Lee 'Please try again in 4m10.128s' del error de Groq y devuelve segundos.
+
+    Si no encuentra el patron devuelve 60s como valor conservador.
+    """
+    m = re.search(r"try again in (\d+)h(\d+)m([\d.]+)s", mensaje_error or "", re.I)
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    m = re.search(r"try again in (\d+)m([\d.]+)s", mensaje_error or "", re.I)
+    if m:
+        return int(m.group(1)) * 60 + float(m.group(2))
+    m = re.search(r"try again in ([\d.]+)s", mensaje_error or "", re.I)
+    if m:
+        return float(m.group(1))
+    return 60.0
+
+
+def _dormir_hasta(segundos):
+    """Duerme, troceado, para poder ser interrumpido.
+
+    Cuando TODOS los modelos agotaron el limite diario, Groq dice quantos
+    segundos faltan. El timeout de HTTP no cubre una espera de horas, asi que
+    se duerme en trozos de 60s en vez de una sola llamada larga.
+    """
+    restante = float(segundos)
+    while restante > 0:
+        trozo = min(60.0, restante)
+        time.sleep(trozo)
+        restante -= trozo
+
+
 def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, modelo_actual=None, max_tokens=None):
     """Llama a Groq chat completions con reintentos, fallback de modelo y compactación."""
     modelo = modelo_actual or seleccionar_modelo()
@@ -383,6 +415,35 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             ultimo_error = f"{response.status_code}: {response.text or '(sin cuerpo de error)'}"
 
         if response.status_code == 429:
+            # Un 429 por TPD (tokens por dia) NO se arregla esperando: el
+            # limite se reestablece en minutos u horas. En ese caso hay que
+            # cambiar de modelo YA. Los 429 de tipo rpm/requests si se pueden
+            # resolver esperando unos segundos.
+            es_limite_diario = "tokens per day" in ultimo_error.lower() or \
+                               "tpd" in ultimo_error.lower()
+
+            if es_limite_diario:
+                # Sin dormir: el siguiente modelo tiene su propio bucket.
+                siguiente = _siguiente_modelo(modelo)
+                if siguiente and siguiente != modelo:
+                    if DEBUG:
+                        print(f"[36AI] {modelo} agoto su limite diario de tokens. "
+                              f"Cambiando a: {siguiente}")
+                    modelo = siguiente
+                    payload["model"] = modelo
+                    if modelo.startswith("openai/gpt-oss"):
+                        payload["reasoning_effort"] = REASONING_EFFORT
+                    else:
+                        payload.pop("reasoning_effort", None)
+                    continue
+                # No hay mas modelos: esperar a que se reestablezca el dia.
+                espera = _segundos_para_reintentar(ultimo_error)
+                if DEBUG:
+                    print(f"[36AI] Todos los modelos agotaron su limite diario. "
+                          f"Esperando {espera:.0f}s.")
+                _dormir_hasta(espera)
+                continue
+
             time.sleep(12)
             # Tras el primer reintento fallido, saltar a otro modelo: los
             # limites de tasa de Groq son POR MODELO (gpt-oss-20b suele
