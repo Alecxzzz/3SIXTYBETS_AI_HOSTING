@@ -135,6 +135,39 @@ class CanalesCdnTests(unittest.TestCase):
         fuente = inspect.getsource(main.cdnlivetv_fresh)
         self.assertIn("provider-cap", fuente)
 
+    def test_agenda_usa_canal_real_de_dlive(self):
+        """La agenda debe usar el canal REAL de dlive, no la inferencia.
+
+        Regresion grave: todos los partidos de una liga salian con los mismos
+        canales (DAZN para todo el futbol, incluso DAZN F1 en Nations League).
+        Eso era una inferencia presentada como dato.
+        """
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.tv_agenda)
+        self.assertIn("dlive_buscar_canales", fuente)
+        # Debe marcar la fuente para que el frontend distinga real de estimado.
+        self.assertIn("fuente", fuente)
+        self.assertIn("estimado", fuente)
+        self.assertIn("dlive", fuente)
+
+    def test_dlive_descarta_placeholders(self):
+        """'Event Stream' es un placeholder generico, no un canal real."""
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.dlive_agenda)
+        self.assertIn("event stream", fuente.lower())
+
+    def test_dlive_exige_ambos_equipos(self):
+        """Un partido solo se acepta si aparecen AMBOS equipos en el evento."""
+        import inspect
+        import main
+
+        fuente = inspect.getsource(main.dlive_buscar_canales)
+        self.assertIn("all(p in texto for p in palabras)", fuente)
+
     def test_agenda_existe_y_filtra_terminados(self):
         import inspect
         import main

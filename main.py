@@ -3,7 +3,7 @@ import os
 import re
 import time
 import traceback
-from datetime import timedelta
+from datetime import datetime, timedelta
 import requests as http_requests
 from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -2566,6 +2566,10 @@ _cdn_lock = threading.Lock()
 # Cache del catalogo de canales: 10 min es suficiente para el estado online/offline.
 _CDN_CAT_TTL = 10 * 60
 _cdn_cat_cache = {}  # "catalogo" -> {"data": list, "ts": float}
+# Agenda de dlive.sx (canal REAL de cada partido). 30 min: la agenda cambia
+# pocas veces al dia y parsear el HTML de ~700 KB en cada carga es caro.
+_DLIVE_TTL = 30 * 60
+_dlive_cache = {}  # "agenda" -> {"data": list, "ts": float}
 
 
 def _cdn_b64d(s: str) -> str:
@@ -2710,6 +2714,168 @@ def cdnlivetv_catalogo():
     return data
 
 
+def dlive_agenda():
+    """Agenda REAL de dlive.sx: partido -> canal exacto que lo emite.
+
+    cdnlivetv NO expone su agenda (401 sin plan de 500 EUR/mes), asi que antes
+    se INFERIA el canal por deporte: todos los partidos de una liga salian con
+    los mismos canales (DAZN para todo el futbol, etc.), lo cual es falso --
+    un partido de Nations League no va por DAZN F1.
+
+    dlive.sx publica su agenda en el HTML principal, sin clave y con el canal
+    real de cada evento. Se parsea con regex y se cachea 30 min.
+
+    Estructura detectada (verificada en produccion):
+      <div class="schedule__event" ...>
+        <div ... data-title="... event ... HH:MM">
+          <span class="schedule__time">23:00</span>
+          <span class="schedule__eventTitle">...</span>
+          <div class="schedule__channels">
+            <a href="/watch.php?id=112" title="TSN2">TSN2</a>
+    """
+    url = "https://dlive.sx/"
+    with _cdn_lock:
+        cached = _dlive_cache.get("agenda")
+    if cached and _time.time() - cached["ts"] < _DLIVE_TTL:
+        return cached["data"]
+
+    headers = {"User-Agent": HLS_USER_AGENT}
+    try:
+        r = http_requests.get(url, headers=headers, timeout=20)
+        if not r.ok:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        html = r.text
+    except Exception as exc:
+        print(f"[dlive] agenda no disponible: {exc}", flush=True)
+        with _cdn_lock:
+            cached = _dlive_cache.get("agenda")
+        return cached["data"] if cached else []
+
+    eventos = []
+
+    # Un evento por bloque. NO se corta en el siguiente "schedule__event"
+    # (eso se comia los canales del evento anterior); se corta en la
+    # estructura que cierra el bloque: "schedule__channels" seguida de otro
+    # bloque o de un cierre de contenedor.
+    for bloque in re.findall(
+        r'class="schedule__event"(.*?)(?=class="schedule__event"|'
+        r'class="schedule__(?:day|cat|section)|</table>|\Z)',
+        html, re.DOTALL,
+    ):
+        m_hora = re.search(r'data-title="[^"]*?\s(\d{1,2}:\d{2})"', bloque)
+        m_titulo = re.search(
+            r'class="schedule__eventTitle">(.*?)</span>', bloque, re.DOTALL
+        )
+        if not m_hora or not m_titulo:
+            continue
+
+        titulo = re.sub(r"<[^>]+>", "", m_titulo.group(1))
+        titulo = re.sub(r"\s+", " ", titulo).strip()
+        titulo_limpio = re.sub(r"[^\w\s:.\-áéíóúñÁÉÍÓÚÑ()']", " ", titulo)
+        titulo_limpio = re.sub(r"\s+", " ", titulo_limpio).strip()
+        if len(titulo_limpio) < 4:
+            continue
+
+        # Canales: solo los DENTRO de schedule__channels de este bloque.
+        m_cans = re.search(
+            r'class="schedule__channels"(.*?)(?=</div>|\Z)', bloque, re.DOTALL
+        )
+        if not m_cans:
+            continue
+
+        canales = []
+        vistos = set()
+        for m_can in re.finditer(
+            r'href="(/watch\.php\?id=\d+)"[^>]*title="([^"]+)"', m_cans.group(1)
+        ):
+            nombre = m_can.group(2).strip()
+            # "Event Stream" es un placeholder generico, no un canal real.
+            if not nombre or nombre.lower() == "event stream" or nombre in vistos:
+                continue
+            vistos.add(nombre)
+            canales.append({
+                "nombre": nombre,
+                "url": f"{url.rstrip('/')}{m_can.group(1)}",
+            })
+        if not canales:
+            continue
+
+        eventos.append({
+            "hora": m_hora.group(1),
+            "titulo": titulo,
+            "titulo_limpio": titulo_limpio,
+            "canales": canales,
+        })
+
+    print(f"[dlive] agenda parseada: {len(eventos)} eventos", flush=True)
+    with _cdn_lock:
+        _dlive_cache["agenda"] = {"data": eventos, "ts": _time.time()}
+    return eventos
+
+
+def _norm_agenda(txt: str) -> str:
+    """Normaliza un nombre de evento para poder emparejarlo entre fuentes."""
+    txt = (txt or "").lower()
+    txt = re.sub(r"[^\w\s]", " ", txt)
+    return re.sub(r"\s+", " ", txt).strip()
+
+
+def dlive_buscar_canales(home: str, away: str, hora_iso: str = None):
+    """Canales REALES de un partido concreto en la agenda de dlive.
+
+    Empareja por nombre de equipos y, si se conoce, por hora. Devuelve la lista
+    de canales si encuentra el partido, o None si no.
+    """
+    eventos = dlive_agenda()
+    if not eventos:
+        return None
+
+    # Palabras clave de AMBOS equipos. dlive escribe "A vs B" con los mismos
+    # nombres que ESPN, asi que basta con que aparezcan las dos.
+    palabras = [
+        p
+        for p in _norm_agenda(f"{away} {home}").split()
+        if len(p) >= 4
+    ]
+    if len(palabras) < 2:
+        return None
+
+    mejor, mejor_puntaje = None, 0
+
+    for ev in eventos:
+        texto = _norm_agenda(ev["titulo_limpio"])
+        if not texto:
+            continue
+
+        # Ambas partes deben aparecer: si no, es otro partido.
+        if not all(p in texto for p in palabras):
+            continue
+
+        # Emparejar por hora. La agenda de dlive va en hora UK y el partido de
+        # ESPN trae su propio ISO date; se comparan en el mismo eje.
+        puntaje = 10
+        if hora_iso:
+            try:
+                dt_ev = datetime.fromisoformat(str(hora_iso).replace("Z", "+00:00"))
+                hh, mm = (int(x) for x in ev["hora"].split(":"))
+                # dlive usa UK/GMT; en horario de verano britanico va +1.
+                dif = abs(
+                    (hh * 60 + mm)
+                    - (dt_ev.hour * 60 + dt_ev.minute + 60)
+                )
+                dif = min(dif, 24 * 60 - dif)
+                if dif > 120:  # mas de 2h de diferencia: no es este partido
+                    continue
+                puntaje += max(0, 6 - dif // 30)
+            except (ValueError, TypeError):
+                pass
+
+        if puntaje > mejor_puntaje:
+            mejor, mejor_puntaje = ev, puntaje
+
+    return mejor["canales"] if mejor else None
+
+
 def _canales_por_liga(equipo_local: str, equipo_visita: str, sport: str) -> list:
     """Canales cdnlivetv que probablemente emiten este partido, de mayor a menor.
 
@@ -2807,7 +2973,31 @@ def tv_agenda(
             if not local or not visita:
                 continue
 
-            canales = _canales_por_liga(local, visita, s)
+            # 1) Canal REAL segun la agenda de dlive. Si lo sabemos, mandan sus
+            #    datos sobre cualquier inferencia.
+            reales = None
+            try:
+                reales = dlive_buscar_canales(local, visita, g.get("date"))
+            except Exception as exc:
+                print(f"[agenda] dlive fallo: {exc}", flush=True)
+
+            if reales:
+                canales = [
+                    {
+                        "name": c["nombre"],
+                        "code": "",
+                        "dlive": c["url"],
+                    }
+                    for c in reales[:3]
+                ]
+                fuente = "dlive"
+            else:
+                # 2) Sin dato real: se infiere por deporte y se MARCA como
+                #    estimado. Antes se mostraba como si fuera exacto y era
+                #    falso (todos los partidos de una liga con los mismos).
+                canales = _canales_por_liga(local, visita, s)
+                fuente = "estimado"
+
             if not canales:
                 continue
 
@@ -2824,6 +3014,7 @@ def tv_agenda(
                 "total": odds.get("over_under"),
                 "linea": odds.get("details"),
                 "canales": canales,
+                "fuente": fuente,
             })
 
     # Ordenar por hora de inicio.
