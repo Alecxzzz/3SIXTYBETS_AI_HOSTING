@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import traceback
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import db
@@ -653,6 +654,52 @@ MERCADOS_POR_DEPORTE = {
 }
 
 DEPORTES_DASHBOARD = list(MERCADOS_POR_DEPORTE.keys())
+# Deportes que el BOOKMAKER cubre con cuotas reales pero que aun no estan en
+# el dashboard. Se listan para que quede constancia de que la fuente los tiene
+# (nfl/hockey) y activarlos es solo incorporarlos a MERCADOS_POR_DEPORTE.
+DEPORTES_EN_BOOKMAKER = ("soccer", "nba", "mlb", "nfl", "tennis", "hockey")
+
+
+def catalogo_mercados() -> dict:
+    """Catalogo UNICO de mercados, el mismo para el backend y el frontend.
+
+    Es la fuente de verdad de que mercados se pueden proponer. Antes cada
+    superficie tenia su propia lista y se desincronizaban: el frontend
+    tenia el catalogo completo (con mercados que el resolver no sabe
+    comprobar) y el backend el recortado. Ahora ambos leen de aqui, asi que
+    un mercado que se puede proponer es el mismo en los dos lados y coincide
+    con lo que el sistema sabe resolver.
+
+    Devuelve, por deporte:
+        {"label": <nombre>, "deportes": <clave>, "mercados": [
+            {"mercado": <nombre>, "peso": <0-100>, "resoluble": bool,
+             "efectividad": <% medida o None>}, ...]}
+    """
+    salida = {}
+    for sport, (label, mercados) in MERCADOS_POR_DEPORTE.items():
+        items = []
+        for m in _priorizar_mercados(mercados):
+            peso = peso_mercado(m)
+            if peso <= 0:
+                continue  # el sistema no sabe resolverlo: no se ofrece
+            items.append({
+                "mercado": m,
+                "peso": peso,
+                "resoluble": True,
+                "efectividad": _EFECTIVIDAD_MERCADO.get(_norm_mercado(m).split()[0], None),
+            })
+        salida[sport] = {"label": label, "deporte": sport, "mercados": items}
+    return salida
+
+
+# Efectividad medida en produccion (30 dias, solo picks RESUELTOS). Se usa para
+# mostrar la chance real al usuario y para ordenar el catalogo; None cuando el
+# mercado aun no tiene historial suficiente.
+_EFECTIVIDAD_MERCADO = {
+    "ganador": 80, "doble": 84, "1x2": 76, "handicap": 78,
+    "totales": 72, "ambos": 41, "multigoles": 75, "over": 77,
+    "hits": 66, "strikeouts": 75, "mitad": 40,
+}
 
 # ============================================================
 # MERCADOS RESOLUBLES Y RANKING POR EFECTIVIDAD
@@ -673,18 +720,22 @@ DEPORTES_DASHBOARD = list(MERCADOS_POR_DEPORTE.keys())
 #     unicos que se resuelven el 100% de las veces y sin gastar una sola
 #     llamada de IA.
 _MARC_RESOLUBLE_MARCADOR = (
-    "ganador", "moneyline", " 1x2", "1x2 (", "ambos equipos marcan", "btts",
-    "doble oportunidad", "multigoles", "multigol", "total de goles",
-    "totales incl extra innings", "over de goles", "handicap incl extra",
-    "total de puntos", "totales del partido", "handicap de sets",
-    "ganador y total",
+    "ganador", "moneyline", "1x2", "ambos equipos marcan", "btts",
+    "doble oportunidad", "multigol", "total de goles",
+    "totales", "over de goles", "handicap", "total de puntos",
+    "total del partido", "handicap de sets", "primer gol",
+    # Mercados de MITAD: se resuelven con el marcador por periodos de ESPN
+    # (_resolver_por_mitades). Antes estaban en la lista de irresolubles y por
+    # eso 'Nacional gana cualquier mitad' se rechazaba pese a que el bookmaker
+    # lo publica a 1.27.
+    "cualquier mitad", "ambas mitades", "1x2 1", "1ª mitad", "1a mitad",
 )
 # (b) Mercados que el resolver cubre con una fuente de estadisticas real
 #     (boxscore de MLB / stats de Sofascore). Resolubles, pero dependen de que
 #     esa fuente responda.
 _MARC_RESOLUBLE_STATS = (
-    "hits", "strikeout", "s.o)", " so)", "hr totales", "jonrones",
-    "total de hits", "hits mas", "hits menos", "rebotes", "asistencias",
+    "hits", "strikeout", "hr totales", "jonrones",
+    "total de hits", "rebotes", "asistencias",
     "tarjeta", "corner", "esquina",
 )
 # (c) Mercados que hoy NO se sabe resolver: props complejos de jugador, sets
@@ -697,20 +748,42 @@ _MARC_NO_RESOLUBLE = (
     "handicap de juegos", "handicap de sets", "juegos",
     "aces", "dobles faltas", "break", "tie break",
     "primer set", "segundo set", "primer cuarto", "1er cuarto", "primer medio",
-    "primera mitad", "segunda mitad", "carrera a", "meta",
+    "carrera a", "meta",
     "minimo puntos", "minimo rebotes", "minimo asistencias", "minimo triples",
     "puntos+rebotes", "puntos+asistencias", "asistencias+rebotes", "doble-doble",
     "triple-doble", "lanzador total", "bases totales",
 )
 
 
+def _norm_mercado(market: str) -> str:
+    """Normaliza un nombre de mercado para poder compararlo.
+
+    Tres diferencias hacian que un mercado REAL del bookmaker se rechazara
+    como si no existiera, y el partido se perdia en vez de reanalizarse:
+      * parentesis: 'Hándicap (incl. extra innings)' vs 'Handicap incl...'
+      * acentos: el bookmaker escribe 'Hándicap' y el catalogo 'Handicap'
+      * mayusculas: 'Doble oportunidad' vs 'doble oportunidad'
+    """
+    t = (market or "").lower()
+    t = t.replace("(", " ").replace(")", " ")
+    # Transliterar acentos: 'Hándicap' -> 'Handicap'. Se usa NFD para separar
+    # el acento y se descarta SOLO el caracter acentuado: borrarlo entero
+    # ('hándicap' -> 'hndicap') hacia que el mercado real no coincidiera con el
+    # catalogo y el partido se perdiera.
+    t = "".join(c for c in unicodedata.normalize("NFD", t) if not unicodedata.combining(c))
+    t = "".join(c for c in t if c.isascii() or c.isspace())
+    t = " ".join(t.split())
+    return t
+
+
 def mercado_resoluble(market: str) -> bool:
     """True si el sistema sabe resolver este mercado por su cuenta.
 
     Si es False, el pick solo se resuelve con la IA y 6 verificaciones
-    multi-fuente: en la practica acababa ANULADO. Se usa para priorizar.
+    multi-fuente: en la practica acababa ANULADO. Se usa para priorizar y para
+    reanalizar con otro mercado.
     """
-    t = (market or "").lower()
+    t = _norm_mercado(market)
     if not t:
         return False
     if any(x in t for x in _MARC_NO_RESOLUBLE):
@@ -731,7 +804,7 @@ def peso_mercado(market: str) -> int:
       * BTTS                    41% (10/24)  <- el que mas se repite y peor
     Cuanto mas se repite un mercado, mas pesa su efectividad historica.
     """
-    t = (market or "").lower()
+    t = _norm_mercado(market)
     if not mercado_resoluble(t):
         return 0
     if "btts" in t or ("ambos equipos marcan" in t and "2.5" not in t):
@@ -753,7 +826,176 @@ def peso_mercado(market: str) -> int:
         return 62
     if any(x in t for x in ("total de goles", "totales", "over de goles", "multigol")):
         return 70          # 72-77%
+    if "cualquier mitad" in t or "ambas mitades" in t or "mitad" in t:
+        # Medido: 6 ACIERTO / 9 FALLO / 6 ANULADO (40% de acierto). Ahora es
+        # resoluble con el marcador por periodos, asi que el 40% es real y no
+        # consecuencia de las anulaciones. Cuota baja = mas facil que gane.
+        return 68
     return 60
+
+
+# Palabras que identifican un pick de un deporte CONCRETO. Si un pick llega
+# con una palabra que pertenece a OTRO deporte ('Aces' es de tenis, 'Rebotes'
+# de NBA, 'extra innings' de MLB), es que la IA se cruzo de catalogo: se
+# rechaza y se reanaliza. No deberia ocurrir (el prompt manda un solo catalogo
+# por deporte) pero es una garantia barata contra un pick absurdo en el panel.
+_PALABRAS_POR_DEPORTE = {
+    "tennis": ("aces", "tie break", "breaks", "handicap de juegos", "handicap de sets",
+               "sets exactos", "primer set", "segundo set", "marcador exacto"),
+    "mlb": ("extra innings", "jonrones", "hr totales", "strikeout", "ponches"),
+    "nba": ("rebotes", "triple doble", "doble doble", "primer cuarto", "1er cuarto",
+            "carrera a", "cuartos"),
+    "soccer": ("corners", "esquina", "tarjetas", "valla invicta", "primer gol"),
+}
+
+
+def mercado_de_otro_deporte(market: str, sport: str) -> bool:
+    """True si el mercado usa palabras de un deporte DISTINTO al del partido."""
+    t = _norm_mercado(market)
+    if not t:
+        return False
+    for otro, palabras in _PALABRAS_POR_DEPORTE.items():
+        if otro == sport:
+            continue
+        if any(p in t for p in palabras):
+            return True
+    return False
+
+
+# Cuantas veces se le vuelve a preguntar a la IA cuando el pick propuesto no
+# es publicable (mercado no resoluble, cuota fuera de rango, mercado que el
+# sportsbook no ofrece). Cada reintento le manda la lista REAL de mercados con
+# su cuota, para que elija bien a la primera. Antes un solo rechazo equivalia
+# a perder el partido entero.
+REINTENTOS_REANALISIS = int(os.getenv("DASHBOARD_REINTENTOS_REANALISIS", "3"))
+
+
+def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: str):
+    """Devuelve el motivo por el que el pick no es publicable, o None si lo es.
+
+    Centraliza los filtros para poder REINTENTAR con la misma regla en vez de
+    descartar en el primer fallo.
+    """
+    market = (market or pick.get("market") or "").strip()
+    titulo = str(pick.get("titulo") or "")
+    selection = str(pick.get("selection") or "")
+
+    if _mercado_prohibido(market, titulo, selection):
+        return "prohibido"
+
+    # El mercado no puede pertenecer a otro deporte: un 'Aces' en un partido
+    # de fútbol o un 'rebotes' en MLB es un pick absurdo (la IA se cruzó de
+    # catálogo). Se rechaza y se reanaliza.
+    if mercado_de_otro_deporte(market, partido.get("sport") or ""):
+        return "otro_deporte"
+
+    # El mercado debe existir de verdad: en el catalogo del deporte o en lo que
+    # el sportsbook publico para ese evento.
+    if market and _market_norm(market) not in {_market_norm(m) for m in disponibles}:
+        from cuotas_doradobet import (
+            detalle_mercado_para_ia,
+            event_id_doradobet,
+        )
+
+        evento = event_id_doradobet(partido["sport"], partido["home_name"], partido["away_name"])
+        detalle = detalle_mercado_para_ia(evento) if evento else ""
+        if not detalle or _market_norm(market) not in _market_norm(detalle):
+            return "no_publicado"
+
+    # Mercados que el resolver no sabe comprobar. Antes cada uno era un pick
+    # que acababa ANULADO; ahora se reintenta con otros.
+    if not mercado_resoluble(market):
+        return "no_resoluble"
+
+    try:
+        odds = float(pick.get("odds") or 0)
+    except (TypeError, ValueError):
+        odds = 0
+    if not odds or not (ODDS_MINIMA <= odds <= ODDS_MAXIMA):
+        return "cuota"
+
+    rationale_txt = f"{pick.get('rationale') or ''} {titulo}"
+    if (
+        not _nombre_valido(partido["home_name"])
+        or not _nombre_valido(partido["away_name"])
+        or _texto_sin_datos(rationale_txt)
+        or _texto_sin_datos(partido["event_name"])
+    ):
+        return "calidad"
+
+    return None
+
+
+def _seleccionar_mercados_ia(mercados: list, limite: int = 20) -> list:
+    """Elige que mercados reales se le ofrecen a la IA en el reintento.
+
+    El bookmaker publica cientos (146 en un partido de fútbol). Mandarlos
+    todos seria gastar el prompt en repetir el catalogo y la IA se perderia.
+    Se priorizan los que el sistema sabe RESOLVER (peso alto) y, a igual, los
+    de mayor probabilidad (cuota mas baja), que son los que el usuario quiere.
+    """
+    def _clave(m):
+        return (-peso_mercado(m.get("market") or ""), float(m.get("odds") or 9.9))
+    return sorted(mercados, key=_clave)[:limite]
+
+
+def _mensaje_reanalisis(partido: dict, label: str, mercados_reales: list,
+                        motivo: str, intento: int) -> str:
+    """Mensaje para el reintento: la IA elige entre mercados REALES y su cuota.
+
+    'mercados_reales' viene del sportsbook con el precio ya filtrado al rango
+    publicable, asi que cualquier opcion que se le ofrezca es apostable de
+    verdad. Es la diferencia entre una cuota estimada (que luego resultaba
+    imposible de jugar) y la cuota real.
+    """
+    explicacion = {
+        "no_resoluble": (
+            "ese mercado no se puede verificar despues (no hay forma de saber si "
+            "acierto o fallo al final del partido), asi que no sirve"
+        ),
+        "cuota": f"su cuota no estaba entre {ODDS_MINIMA} y {ODDS_MAXIMA}",
+        "no_publicado": "ese mercado no lo publica el bookmaker para este partido",
+        "prohibido": "ese tipo de apuesta esta prohibido en la plataforma",
+        "otro_deporte": (
+            "ese mercado no existe en este deporte (parece de otro: en futbol "
+            "no hay aces, en baseball no hay rebotes, en tenis no hay corners)"
+        ),
+        "calidad": "el pick tenia datos genericos o incompletos",
+    }.get(motivo, "el pick no era publicable")
+
+    base = (
+        f"Partido: {partido['away_name']} (visitante) vs "
+        f"{partido['home_name']} (local)\n"
+        f"Deporte: {label}\n"
+        f"Fecha/hora: {partido['date']}\n\n"
+        f"Tu propuesta anterior NO sirve porque {explicacion}.\n\n"
+        "Elige OTRA apuesta, obligatoriamente de esta lista de mercados REALES "
+        "que el bookmaker tiene publicados AHORA para este partido, con su "
+        "cuota exacta (no inventes ni ajustes la cuota):\n"
+    )
+    if mercados_reales:
+        elegidos = _seleccionar_mercados_ia(mercados_reales)
+        base += "\n".join(
+            f"- [{m['odds']}] {m['titulo']}   (market: '{m['market']}', "
+            f"seleccion: '{m['selection']}')"
+            for m in elegidos
+        )
+        base += (
+            f"\n({len(elegidos)} de {len(mercados_reales)} mercados publicables; "
+            "estan ordenados de mas a menos seguro)"
+        )
+    else:
+        base += (
+            "(el bookmaker no publica mercados con cuota en rango para este "
+            "partido: elige el mercado del catalogo mas seguro y estima la "
+            f"cuota entre {ODDS_MINIMA} y {ODDS_MAXIMA})"
+        )
+    base += (
+        f"\n\nIntento {intento} de {REINTENTOS_REANALISIS}. Prefiere el mercado con "
+        "mas probabilidad de acierto dentro de los disponibles. Responde SOLO "
+        "con el JSON del pick, sin texto extra."
+    )
+    return base
 
 
 def _priorizar_mercados(mercados: list) -> list:
@@ -1248,6 +1490,21 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         texto, modelo = _preguntar_ia(mensaje, p["sport"])
         pick = _parsear_pick_json(texto)
 
+        # Mercados REALES del bookmaker para este partido, con su cuota exacta.
+        # Se piden una vez por partido (el payload esta cacheado 10 min) y se
+        # usan para los reintentos: asi el pick sale con la cuota de verdad en
+        # lugar de una estimada por la IA.
+        markets_reales = []
+        try:
+            from cuotas_doradobet import mercados_reales as _mr
+
+            markets_reales = _mr(
+                p["sport"], p["home_name"], p["away_name"], p["date"],
+                ODDS_MINIMA, ODDS_MAXIMA,
+            )
+        except Exception:
+            markets_reales = []
+
         if not pick:
             # SIN_CUOTA: ningun proveedor respondio (402 de You.com / 429 de
             # Groq). No se descarta el partido y se corta el ciclo: seguir
@@ -1269,66 +1526,56 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
 
         market = (pick.get("market") or "").strip()
 
-        # Mercados prohibidos: "sin empate" (DNB) y similares nunca se muestran.
-        if _mercado_prohibido(
-            market, str(pick.get("titulo") or ""), str(pick.get("selection") or "")
-        ):
-            rechazados_prohibido += 1
-            db.registrar_descarte(p["event_id"], "mercado_prohibido")
-            continue
-
-        # Validar que el mercado pertenece al catalogo del deporte y no repite
-        # (el no-repetir solo bloquea en deportes que NO son futbol: en futbol
-        # se genera pick para cada partido con mas volumen)
-        if _market_norm(market) not in {_market_norm(m) for m in disponibles}:
-            # Los mercados de props adicionales (Goleador, Asistencias,
-            # Remates a Puerta, Tarjetas, etc.) pueden existir solo en
-            # GetEventDetails; se aceptan únicamente si Doradobet los publicó.
-            from cuotas_doradobet import event_id_doradobet, detalle_mercado_para_ia
-            evento_dorado = event_id_doradobet(p["sport"], p["home_name"], p["away_name"])
-            detalle = detalle_mercado_para_ia(evento_dorado) if evento_dorado else ""
-            if not detalle or _market_norm(market) not in _market_norm(detalle):
+        # RE-ANALISIS CON CUOTAS REALES. En vez de descartar el partido cuando
+        # la IA propone un mercado que no se puede resolver (o una cuota fuera
+        # de rango), se le vuelve a preguntar CON la lista real de mercados que
+        # el sportsbook tiene publicados y su cuota exacta. Asi la IA elige
+        # entre commodities que de verdad existen y que se pueden apostar, y el
+        # pick sale con la cuota real (no estimada).
+        intentos = 0
+        while intentos < REINTENTOS_REANALISIS:
+            intentos += 1
+            motivo = _motivo_rechazo_pick(pick, p, disponibles, market)
+            if not motivo:
+                break
+            if intentos >= REINTENTOS_REANALISIS:
+                break
+            if motivo == "sin_datos":
+                break  # la IA no tiene datos del partido: no insistir
+            mensaje = _mensaje_reanalisis(
+                p, label, markets_reales, motivo, intentos
+            )
+            texto, modelo = _preguntar_ia(mensaje, p["sport"])
+            if modelo == "SIN_CUOTA":
                 errores += 1
-                continue
-        # MERCADO RESOLUBLE: filtro que mas valor aporta. Un pick cuyo mercado
-        # el resolver no sabe decidir NO cuenta como acierto ni como fallo:
-        # acaba ANULADO y solo ocupa sitio en el panel. Medido en produccion,
-        # los mercados no resolubles acumularon el 90-100% de anulaciones. Se
-        # descartan aqui (con motivo propio, para no reintentar) en vez de
-        # guardarlos para luego anularlos.
-        if not mercado_resoluble(market):
-            rechazados_no_resoluble += 1
-            db.registrar_descarte(p["event_id"], "no_resoluble")
+                sin_cuota = True
+                break
+            nuevo = _parsear_pick_json(texto)
+            if not nuevo:
+                errores += 1
+                break
+            pick = nuevo
+            market = (pick.get("market") or "").strip()
+        else:
+            pass
+
+        # Ultimo filtro: si sigue sin ser publicable, se descarta.
+        motivo_final = _motivo_rechazo_pick(pick, p, disponibles, market)
+        if motivo_final:
+            if motivo_final == "no_resoluble":
+                rechazados_no_resoluble += 1
+            elif motivo_final == "prohibido":
+                rechazados_prohibido += 1
+            elif motivo_final == "cuota":
+                rechazados_cuota += 1
+            elif motivo_final == "calidad":
+                rechazados_calidad += 1
+            else:
+                errores += 1
+            if motivo_final != "sin_datos":
+                db.registrar_descarte(p["event_id"], motivo_final)
             continue
 
-        # El "no repetir mercado" es una PREFERENCIA que ya se le pasa a la IA
-        # en el mensaje (lista de mercados usados). Se elimino el veto duro para
-        # deportes que no son futbol: en la practica descartaba casi todos los
-        # partidos de tenis/MLB/NBA y dejaba el dashboard con 1-2 picks.
-
-        # RANGO GENERAL: la cuota IA debe estar en 1.20-2.50 (los GOLDEN
-        # 1.35-1.40 son 1-2 destacados, no todos).
-        try:
-            odds_pick = float(pick.get("odds") or 0)
-        except (TypeError, ValueError):
-            odds_pick = 0
-        if not odds_pick or not (ODDS_MINIMA <= odds_pick <= ODDS_MAXIMA):
-            rechazados_cuota += 1
-            db.registrar_descarte(p["event_id"], "cuota_fuera_rango")
-            continue
-
-        # Gate de calidad: nada de picks genericos o sin datos reales
-        # (equipos '?', 'Jugador A', rationale 'sin datos...', sin cuota).
-        rationale_txt = str(pick.get("rationale") or "") + " " + str(pick.get("titulo") or "")
-        if (
-            not _nombre_valido(p["home_name"])
-            or not _nombre_valido(p["away_name"])
-            or _texto_sin_datos(rationale_txt)
-            or _texto_sin_datos(p["event_name"])
-        ):
-            rechazados_calidad += 1
-            db.registrar_descarte(p["event_id"], "calidad")
-            continue
 
         # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
         # Debe caer en el rango general 1.20-2.50; si no hay cuota real se
@@ -1497,13 +1744,39 @@ def _resolver_prop_mlb(pick: dict):
     if "jugador" not in texto and " del jugador" not in texto:
         return None
 
-    match = re.search(r"(over|under)\s*\+?\s*([0-9]+(?:\.[0-9]+)?)", texto)
-    if not match:
-        return None
-    es_over = match.group(1) == "over"
-    linea = float(match.group(2))
+    # Dos formatos de linea, según de dónde venga el pick:
+    #   'over 0.5' / 'under 4.5'  -> forma que usaba la IA
+    #   '1+' / '2+'                -> forma que publica Doradobet en sus props
+    #                              ('Kyle Schwarber hits 1+ @ 1.588')
+    # Antes solo se aceptaba la primera, asi que un prop con la cuota REAL del
+    # bookmaker devolvia None y el pick acababa ANULADO.
+    match = re.search(r"(over|under)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto)
+    if match:
+        es_over = match.group(1) == "over"
+        linea = float(match.group(2).replace(",", "."))
+    else:
+        match = re.search(r"\b([0-9]+)\s*\+", texto)
+        if not match:
+            return None
+        # 'N+' significa N o mas, es decir over de (N-1).
+        es_over = True
+        linea = max(0.0, float(match.group(1)) - 1.0)
 
+    # Nombre del jugador. El resolver Historically lo sacaba de lo que habia
+    # antes de ':' ('Kyle Schwarber: Over 0.5 HR'). Los props de Doradobet
+    # traen otro formato ('Kyle Schwarber hits totales 1+'), asi que se toman
+    # las palabras iniciales hasta el primer numero o signo +, y se descartan
+    # las palabras que son el tipo de stat.
     jugador = str(pick.get("titulo") or "").split(":")[0].strip()
+    if not jugador or len(jugador) < 4:
+        jugador = str(pick.get("selection") or "").strip()
+    jugador = re.split(r"\d|\bover\b|\bunder\b|\+", jugador)[0].strip()
+    # Quitar el tipo de stat si quedo pegado ('Kyle Schwarber hits totales').
+    for _tipo in ("hits totales", "hits", "home runs", "strikeouts",
+                  "bases totales", "bases", "hr totales"):
+        if _norm_texto(jugador).endswith(_tipo):
+            jugador = _norm_texto(jugador)[: -len(_tipo)].strip()
+            break
     if not jugador or len(jugador) < 4:
         return None
     jt = set(_norm_texto(jugador).split())
@@ -1819,6 +2092,117 @@ def _resolver_deterministico(pick: dict, detail: dict):
     return None
 
 
+def _resolver_por_mitades(pick: dict, detail: dict):
+    """Resuelve mercados de MITAD con el marcador por periodos de ESPN.
+
+    Cubre 'Gana cualquier mitad' / 'Gana ambas mitades' / '1x2 1a mitad'. Son
+    mercados que el bookmaker publica y con cuotas muy bajas (1.27 el de
+    Nacional), pero el marcador FINAL no los determina: hacen falta los
+    marcadores de cada periodo, que ESPN expone en 'linescores'
+    (competitor.linescores[i] = goles de la mitad i).
+
+    Sin esto, todos esos picks acababan ANULADOS (medido: 6 de 15 en produccion).
+    Si ESPN no trae linescores se devuelve None y el pick queda como estaba.
+    """
+    texto = " ".join([
+        str(pick.get("market") or ""),
+        str(pick.get("titulo") or ""),
+        str(pick.get("selection") or ""),
+    ]).lower()
+    # 'Gana cualquier mitad' y 'Gana ambas mitades' son mercados DISTINTOS y el
+    # titulo de cualquiera de los dos contiene la palabra 'mitad'. Se decide
+    # primero por 'ambas' (exige ganar las dos) y solo si no aparece se trata
+    # como 'cualquier' (basta con ganar una).
+    es_ambas = "ambas" in texto
+    es_cualquier = (not es_ambas) and ("cualquier" in texto or "alguna" in texto)
+    # Solo se mira la 1a mitad si el mercado lo dice de forma explicita
+    # ('1a mitad - 1x2', '1x2 1a mitad'). Antes se detectaba con un '1' suelto,
+    # que tambien aparece en cualquier otra parte del texto.
+    es_primera = bool(
+        re.search(r"\b1\s*(?:a|ª|er)?\s*(?:mitad|half)\b", texto)
+        or "1x2 1" in texto
+    )
+
+    if not (es_ambas or es_cualquier or es_primera):
+        return None
+
+    teams = detail.get("teams") or []
+    if len(teams) < 2:
+        return None
+
+    # MarCADOR POR PERIODO: cada competidor trae linescores con un valor por
+    # periodo. Se normalizan a enteros.
+    periodos = []
+    for t in teams:
+        ls = t.get("linescores") or []
+        vals = []
+        for p in ls:
+            if isinstance(p, dict):
+                v = p.get("displayValue", p.get("value"))
+            else:
+                v = p
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                vals.append(0.0)
+        periodos.append(vals)
+
+    if not periodos[0] or not periodos[1]:
+        return None
+    n = min(len(periodos[0]), len(periodos[1]))
+    if n == 0:
+        return None
+
+    def _lado():
+        """Indice del equipo (0 local / 1 visitante) al que se apostó.
+
+        No basta con 'el nombre del equipo esta en el titulo': el pick suele
+        llevar el nombre CORTO ('Nacional gana cualquier mitad') y el equipo se
+        llama 'Atlético Nacional'. Se comparan palabras sueltas para que el
+        apellido ('nacional') baste, con cuidado de no emparejar por palabras
+        vacías.
+        """
+        h = (teams[0].get("name") or "").lower()
+        a = (teams[1].get("name") or "").lower()
+        cand = f"{pick.get('titulo') or ''} {pick.get('selection') or ''}".lower()
+        for nombre, i in ((h, 0), (a, 1)):
+            if not nombre:
+                continue
+            if nombre in cand:
+                return i
+            #.Any() sobre palabras con 4+ letras: 'nacional' identifica a
+            # 'atlético nacional' sin que el titulo repita el nombre entero.
+            palabras = [w for w in _norm_texto(nombre).split() if len(w) >= 4]
+            if palabras and any(w in _norm_texto(cand) for w in palabras):
+                return i
+        return None
+
+    lado = _lado()
+    if lado is None:
+        return None
+
+    # Solo la 1a mitad: compara el primer periodo.
+    if es_primera and not (es_ambas or es_cualquier):
+        return "ACIERTO" if periodos[lado][0] > periodos[1 - lado][0] else "FALLO"
+
+    mitades = [(periodos[0][i], periodos[1][i]) for i in range(n)]
+    gana_mitades = mitades if lado == 0 else [(b, a) for a, b in mitades]
+    propias = [g for g, _ in gana_mitades]
+    rivales = [r for _, r in gana_mitades]
+
+    if es_ambas:
+        # Gana las DOS mitades.
+        return "ACIERTO" if all(p > r for p, r in zip(propias, rivales)) else "FALLO"
+    if es_cualquier:
+        # Gana AL MENOS UNA mitad. Los empates a mitad no cuentan como ganar.
+        gana_alguna = any(p > r for p, r in zip(propias, rivales))
+        sel = (str(pick.get("selection") or "")).strip().lower()
+        quiere_si = not sel.startswith(("no", "nunca", "-"))
+        return "ACIERTO" if gana_alguna == quiere_si else "FALLO"
+
+    return None
+
+
 def _detalle_resolucion(pick: dict):
     """Obtiene el detalle del partido para resolver el pick.
 
@@ -1854,14 +2238,23 @@ def _detalle_resolucion(pick: dict):
             state = ((comps.get("status") or {}).get("type") or {}).get("state")
             teams = []
             for c in comps.get("competitors", []):
+                # linescores: marcador por periodo. Necesario para los mercados
+                # de mitad ('gana cualquier mitad'), que el marcador final no
+                # determina. Sin esto llegaban vacios y el pick se anulaba.
+                linescores = c.get("linescores") or []
                 teams.append({
                     "name": (c.get("team") or {}).get("displayName", "?"),
                     "score": _parse_number(c.get("score")),
                     "homeAway": c.get("homeAway"),
+                    "linescores": linescores,
                 })
             # Si ESPN responde pero sin equipos, el evento no existe para esa
             # liga: se cae al scoreboard del dia en vez de devolver vacio.
             if state and len(teams) >= 2:
+                if not any(t.get("linescores") for t in teams):
+                    # scoreboard del dia: puede traer linescores, se acepta igual
+                    for t in teams:
+                        t["linescores"] = []
                 return {"state": state, "teams": teams}
         except Exception:
             pass
@@ -2222,6 +2615,17 @@ def resolver_picks_finalizados() -> dict:
 
         # 1) Reglas directas con el marcador (mismo duelo, guard de fecha)
         resultado = _resolver_deterministico(pick, detail)
+        if resultado:
+            db.update_pick_result(pick["id"], resultado)
+            resueltos += 1
+            continue
+
+        # 1-bis) Mercados de MITAD: necesitan el marcador por periodos, no el
+        # total. Van aparte porque el marcador final no los determina.
+        try:
+            resultado = _resolver_por_mitades(pick, detail)
+        except Exception:
+            resultado = None
         if resultado:
             db.update_pick_result(pick["id"], resultado)
             resueltos += 1

@@ -1387,6 +1387,22 @@ def dashboard_home(user=Depends(get_current_user_optional)):
     return data
 
 
+@app.get("/dashboard/catalogo")
+def dashboard_catalogo(user=Depends(get_current_user)):
+    """Catalogo UNICO de mercados del dashboard.
+
+    El frontend y el backend leen de aqui, de modo que lo que la IA puede
+    proponer y lo que se muestra al usuario son exactamente los mismos
+    mercados, y todos son veros: cada entrada viene con su peso (prioridad) y
+    la efectividad medida en produccion.
+    """
+    return {
+        "catalogo": dashboard.catalogo_mercados(),
+        "deportes_activos": list(dashboard.MERCADOS_POR_DEPORTE.keys()),
+        "deportes_en_bookmaker": list(dashboard.DEPORTES_EN_BOOKMAKER),
+    }
+
+
 @app.get("/dashboard/picks")
 def dashboard_picks(user=Depends(get_current_user)):
     """Pronosticos del dia: solo pendientes vigentes y con datos reales."""
