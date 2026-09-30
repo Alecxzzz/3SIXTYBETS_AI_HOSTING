@@ -788,6 +788,19 @@ def mercado_resoluble(market: str) -> bool:
         return False
     if any(x in t for x in _MARC_NO_RESOLUBLE):
         return False
+    # Mercados POR PARTES del partido (inning, cuarto, tiempo). Contienen
+    # 'ganador' o '1x2' asi que pasaban el filtro general, pero el resolver
+    # solo tiene el marcador FINAL: no puede saber quien va ganando tras el
+    # inning 5. Sin este chequeo el sistema publicaba 'Innings 1 a 5 - Ganador'
+    # con peso 88 y luego lo resolvia comparando el resultado del partido
+    # entero, que no es lo mismo.
+    # OJO: 'extra innings' NO es un mercado por partes (es el formato de MLB)
+    # y contiene 'inning', asi que se excluye antes de comprobarlo.
+    if "extra inning" not in t and any(x in t for x in (
+        "inning", "inngs", "primer cuarto", "1er cuarto",
+        "primer inning", "cuarto cuarto", "segundo cuarto", "tercer cuarto",
+    )):
+        return False
     return any(x in t for x in _MARC_RESOLUBLE_MARCADOR + _MARC_RESOLUBLE_STATS)
 
 
@@ -807,6 +820,22 @@ def peso_mercado(market: str) -> int:
     t = _norm_mercado(market)
     if not mercado_resoluble(t):
         return 0
+    # ---- MERCADOS DE HITS: la diferencia entre equipo y jugador es enorme ----
+    # Medido en produccion (45 dias):
+    #   'Hits mas de/menos de' (total del PARTIDO)  1A/7F  = 12%  <- peor
+    #   'Equipo A/B hits mas de/menos de'           4A/6F  = 40%
+    #   'Hits totales DEL JUGADOR'                   8A/1F  = 89%  <- el bueno
+    # El total de hits del partido no lo controla nadie: depende de los
+    # lanzadores rivales y por eso es una moneda al aire. Los hits del
+    # jugador si dependen de su propio ritmo de bateo.
+    if "hit" in t:
+        es_jugador = "jugador" in t
+        total_partido = "partido" in t or "hits mas de/menos de" in t
+        if es_jugador:
+            return 86 if "total" in t else 74   # hits del jugador: 89%
+        if total_partido:
+            return 25                          # 12% historico: no se ofrece
+        return 35                              # 40% (Equipo A/B hits)
     if "btts" in t or ("ambos equipos marcan" in t and "2.5" not in t):
         return 30          # 41% historico: el mas flojo de los buenos
     if any(x in t for x in ("1x2", "moneyline")):
@@ -869,6 +898,20 @@ def mercado_de_otro_deporte(market: str, sport: str) -> bool:
 # a perder el partido entero.
 REINTENTOS_REANALISIS = int(os.getenv("DASHBOARD_REINTENTOS_REANALISIS", "3"))
 
+# PROBABILIDAD MINIMA exigida por el usuario: el % de acierto medido en los
+# ultimos N partidos tiene que ser 70 o mas. Por debajo se RE-ANALIZA.
+PROBABILIDAD_MINIMA = int(os.getenv("DASHBOARD_PROB_MINIMA", "70"))
+ULTIMOS_PARTIDOS = int(os.getenv("DASHBOARD_ULTIMOS_PARTIDOS", "10"))
+
+try:
+    from probabilidad import probabilidad_pick, linea_optima_por_promedio
+except Exception:  # sin el modulo, el filtro queda inactivo (no rompe el panel)
+    def probabilidad_pick(*_a, **_k):
+        return None
+
+    def linea_optima_por_promedio(*_a, **_k):
+        return None, 0
+
 
 def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: str):
     """Devuelve el motivo por el que el pick no es publicable, o None si lo es.
@@ -923,6 +966,18 @@ def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: s
     ):
         return "calidad"
 
+    # FILTRO DE PROBABILIDAD REAL. El usuario exige 70% o mas medido sobre los
+    # ultimos 10 partidos; si no llega, se RE-ANALIZA el partido buscando otro.
+    # Solo bloquea si la probabilidad se pudo MEDIR: cuando no hay datos no se
+    # inventa un porcentaje, y el filtro de resolubilidad sigue siendo el que
+    # protege. (Ej: 'Schwarber 1+ hit' daba 30% real, asi que este filtro es
+    # el que de verdad evita los picks malos, no la categoria del mercado.)
+    prob = probabilidad_pick(
+        pick, partido.get("sport") or "", partido.get("league"), ULTIMOS_PARTIDOS
+    )
+    if prob is not None and prob < PROBABILIDAD_MINIMA:
+        return "baja_probabilidad"
+
     return None
 
 
@@ -956,6 +1011,12 @@ def _mensaje_reanalisis(partido: dict, label: str, mercados_reales: list,
         "cuota": f"su cuota no estaba entre {ODDS_MINIMA} y {ODDS_MAXIMA}",
         "no_publicado": "ese mercado no lo publica el bookmaker para este partido",
         "prohibido": "ese tipo de apuesta esta prohibido en la plataforma",
+        "baja_probabilidad": (
+            f"su probabilidad real en los ultimos {ULTIMOS_PARTIDOS} partidos es "
+            f"INFERIOR al {PROBABILIDAD_MINIMA}% exigido, asi que no se publica. "
+            f"Elige otro mercado del catalogo que SI llegue al "
+            f"{PROBABILIDAD_MINIMA}% segun su historial real"
+        ),
         "otro_deporte": (
             "ese mercado no existe en este deporte (parece de otro: en futbol "
             "no hay aces, en baseball no hay rebotes, en tenis no hay corners)"
@@ -1232,7 +1293,25 @@ REGLAS OBLIGATORIAS:
    Si el mercado no tiene cuota en 1.20-2.50, ELIGE OTRO mercado/linea que
    si la tenga. PROHIBIDO devolver null o fuera de rango.
 7. Respeta los minimos indicados (handicap minimo, under mas bajo en NBA/tenis).
-7. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
+8. PROHIBIDO apostar a los MERCADOS QUE NO CONTROLA NADIE. Estos tienen
+   efectividad medida en produccion y son la mayoria de los fallos:
+   - Total de hits/goles/puntos DEL PARTIDO      12% de acierto (1 de 8).
+     Depende de los rivales, no de tu equipo. NO lo elijas NUNCA.
+   - Total de un EQUIPO entero (Equipo A/B hits)  40% de acierto.
+   - 'Ambos equipos marcan' (BTTS)              41% de acierto.
+   En su lugar, elige mercados de UN JUGADOR (sus hits, jonrones, ponches:
+   89% de acierto) o de resultado de EQUIPO (ganador 80%, doble oportunidad
+   84%, handicap 78%, totales 72%).
+9. No elijas un UNDER por sistema. Un 'Under 3.5' a cuota alta (1.85) es una
+   apuesta de que el partido sera aburrido, y no tienes ninguna ventaja para
+   pensarlo: si la cuota es alta es porque el mercado la ve improbable. Para
+   una apuesta Under solo elige una linea con cuota BAJA (<=1.45), que
+   significa que es lo esperable. Si te sale un Under a 1.85 o mas, es
+   significa que ese lado no es lo esperable: cambia de mercado.
+10. La cuota que se te da es la REAL del bookmaker. Si un mercado aparece con
+   cuota alta, no lo 'corrijas' inventando una cuota baja: es que ese lado es
+   improbable.
+11. Responde EXCLUSIVAMENTE con un JSON valido, sin texto extra, con esta forma exacta:
 {
   "market": "<nombre del mercado del catalogo que elegiste (para validar)>",
   "titulo": "<apuesta en lenguaje natural y corto para mostrar al usuario. Ejemplos: 'Corners de Club Brugge: Over 3.5', 'Total de corners del partido: Over 7.5', 'Ambos equipos marcan: SI', 'HÃ¡ndicap asiatico Real Madrid -1.5', 'Total de puntos Lakers: Under 210.5'>",
@@ -1580,6 +1659,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     rechazados_prohibido = 0
     rechazados_sin_verificar = 0
     rechazados_no_resoluble = 0
+    rechazados_baja_prob = 0
 
     # Partidos ya analizados y descartados hace poco (cuota baja, sin datos,
     # mercado prohibido...): no se vuelven a gastar llamadas de IA en ellos.
@@ -1738,6 +1818,10 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 break
             if motivo == "sin_datos":
                 break  # la IA no tiene datos del partido: no insistir
+            if motivo == "baja_probabilidad":
+                # Se insiste: el usuario pide que si no llega al 70% se busque
+                # OTRO pronostico del mismo partido, no que se abandone.
+                pass
             mensaje = _mensaje_reanalisis(
                 p, label, markets_reales, motivo, intentos
             )
@@ -1760,6 +1844,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         if motivo_final:
             if motivo_final == "no_resoluble":
                 rechazados_no_resoluble += 1
+            elif motivo_final == "baja_probabilidad":
+                rechazados_baja_prob += 1
             elif motivo_final == "prohibido":
                 rechazados_prohibido += 1
             elif motivo_final == "cuota":
@@ -1864,6 +1950,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         "rechazados_prohibido": rechazados_prohibido,
         "rechazados_sin_verificar": rechazados_sin_verificar,
         "rechazados_no_resoluble": rechazados_no_resoluble,
+        "rechazados_baja_probabilidad": rechazados_baja_prob,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     return stats_out
