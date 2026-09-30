@@ -256,11 +256,31 @@ def probabilidad_pick(pick, sport, league=None, n=10):
         stat = "runs" if ("carrera" in texto or "total" in texto or "runs" in texto) else "hits"
         return int(round(sum(1 for p in partidos if _cumple(p.get(stat, 0))) * 100 / len(partidos)))
 
-    if sport == "soccer":
-        if not league:
+    if sport in ("soccer", "futbol", "football"):
+        equipo = (pick.get("homeName") or pick.get("home_name")
+                   or pick.get("equipo") or "")
+        # 'Over 1.5 goles de X' / 'X Over 1.5': el equipo puede venir en el
+        # titulo y no en los campos del pick, asi que se busca ahi tambien.
+        if not equipo:
+            for campo in ("titulo", "selection"):
+                m = re.search(r"([A-Za-z\u00c0-\u017f][\w\u00c0-\u017f .'-]{2,40}?)\s+(?:Over|Under|Mas de|Menos de|M[a\u00e1]s de)", str(pick.get(campo) or ""), re.I)
+                if m:
+                    equipo = m.group(1).strip()
+                    break
+        if not equipo or linea is None:
             return None
-        equipo = pick.get("homeName") or pick.get("home_name") or ""
-        return soccer_prob_equipo_marca(league, equipo, linea if lado != "over_plus" else float(linea), n)
+        valor = float(linea) if lado != "over_plus" else float(linea)
+        try:
+            import fotmob
+        except Exception:
+            return None
+        eq = fotmob.buscar_equipo(equipo)
+        if not eq:
+            return soccer_prob_equipo_marca(league, equipo, valor, n) if league else None
+        # BTTS no tiene linea: se mide aparte
+        if "btts" in texto or "ambos equipos" in texto:
+            return fotmob.prob_partido_ambos_marcan(eq["id"], n)
+        return fotmob.prob_equipo_equipo(eq["id"], valor, lado, n)
 
     return None
 
