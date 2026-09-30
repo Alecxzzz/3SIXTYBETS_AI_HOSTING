@@ -995,7 +995,126 @@ def _mensaje_reanalisis(partido: dict, label: str, mercados_reales: list,
         "mas probabilidad de acierto dentro de los disponibles. Responde SOLO "
         "con el JSON del pick, sin texto extra."
     )
+    # Si hay props de jugador entre las opciones, se manda tambien su forma
+    # reciente: sin esto la IA elige entre jugadores sin saber como vienen.
+    base += _form_jugadores_props(mercados_reales)
     return base
+
+
+def _mlb_id_por_nombre(nombre: str):
+    """MLB playerId a partir del nombre ('Kyle Schwarber' -> 656941).
+
+    El bookmaker publica los props por NOMBRE, pero statsapi.mlb.com (la unica
+    fuente de forma reciente por jugador) indexa por id. Sin esta busqueda no
+    habia forma de darle a la IA los ultimos partidos de Schwarber.
+    """
+    import requests
+
+    try:
+        r = requests.get(
+            f"{MLB_BASE}/people/search", params={"names": nombre}, timeout=12
+        )
+        people = r.json().get("people") or []
+    except Exception:
+        return None
+    if not people:
+        return None
+    # Se elige el que coincide por apellido: 'Schwarber' puede devolver varios.
+    apellido = _norm_texto(nombre).split()[-1] if _norm_texto(nombre) else ""
+    for p in people:
+        if apellido and apellido in _norm_texto(p.get("fullName") or ""):
+            return p.get("id")
+    return people[0].get("id")
+
+
+def _mlb_forma_jugador(nombre: str, ultimos: int = 5) -> str:
+    """Forma reciente de un jugador de MLB en una linea legible.
+
+    Devuelve algo como:
+        'Kyle Schwarber: ultimos 5 -> 2.0 hits (4 de 5 con al menos 1), '
+        '0.4 HR, media .245'
+
+    Antes el generador solo daba forma de EQUIPO, asi que publicaba props de
+    jugador ('Schwarber 1+ hit @ 1.59') sin darle a la IA un solo dato del
+    jugador: la IA apostaba a ciegas en el jugador.
+    """
+    pid = _mlb_id_por_nombre(nombre)
+    if not pid:
+        return ""
+    import requests
+
+    try:
+        r = requests.get(
+            f"{MLB_BASE}/people/{pid}/stats",
+            params={"stats": "gameLog", "group": "hitting", "season": datetime.now().year},
+            timeout=15,
+        )
+        splits = ((r.json().get("stats") or [{}])[0].get("splits") or [])
+    except Exception:
+        return ""
+    if not splits:
+        return ""
+    ult = splits[-ultimos:]
+    hits, hrs, runs, ab, con_hit = [], [], [], 0, 0
+    for s in ult:
+        st = s.get("stat") or {}
+        def _n(k):
+            try:
+                return int(st.get(k) or 0)
+            except (TypeError, ValueError):
+                return 0
+        h = _n("hits")
+        hits.append(h)
+        hrs.append(_n("homeRuns"))
+        runs.append(_n("runs"))
+        ab += _n("atBats")
+        if h > 0:
+            con_hit += 1
+    if not hits:
+        return ""
+    prom_h = sum(hits) / len(hits)
+    return (
+        f"{nombre}: ultimos {len(hits)} -> {prom_h:.1f} hits de media "
+        f"({con_hit} de {len(hits)} con al menos 1), {sum(hrs)} HR, "
+        f"{sum(runs)} carreras, {ab} turnos al bate"
+    )
+
+
+def _form_jugadores_props(mercados_reales: list, limite: int = 4) -> str:
+    """Texto con la forma reciente de los jugadores con props publicados.
+
+    Solo se consulta a los que de verdad tienen mercados de jugador en este
+    partido y con cuota en rango: son los unicos que la IA podria elegir, y
+    cada consulta cuesta una llamada a statsapi.
+    """
+    if not mercados_reales:
+        return ""
+    jugadores = []
+    vistos = set()
+    for m in mercados_reales:
+        j = m.get("jugador")
+        if not j or j in vistos:
+            continue
+        vistos.add(j)
+        jugadores.append(j)
+        if len(jugadores) >= limite:
+            break
+    lineas = []
+    for j in jugadores:
+        try:
+            t = _mlb_forma_jugador(j)
+        except Exception:
+            t = ""
+        if t:
+            lineas.append("- " + t)
+    if not lineas:
+        return ""
+    return (
+        "\n\nFORMULA RECIENTE DE LOS JUGADORES CON MERCADOS PUBLICADOS "
+        "(statsapi.mlb.com, datos reales):\n" + "\n".join(lineas)
+        + "\nSi eliges un prop de jugador, basate en estos numeros reales, "
+        "no en lo que recuerdes de su nombre."
+    )
 
 
 def _priorizar_mercados(mercados: list) -> list:
@@ -1487,13 +1606,10 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
         )
 
-        texto, modelo = _preguntar_ia(mensaje, p["sport"])
-        pick = _parsear_pick_json(texto)
-
         # Mercados REALES del bookmaker para este partido, con su cuota exacta.
-        # Se piden una vez por partido (el payload esta cacheado 10 min) y se
-        # usan para los reintentos: asi el pick sale con la cuota de verdad en
-        # lugar de una estimada por la IA.
+        # Se piden ANTES de preguntar a la IA (no despues) porque su lista es
+        # la que dice que jugadores tienen prop publicado: sin ella no se puede
+        # dar a la IA la forma de esos jugadores.
         markets_reales = []
         try:
             from cuotas_doradobet import mercados_reales as _mr
@@ -1504,6 +1620,14 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             )
         except Exception:
             markets_reales = []
+
+        # Forma reciente de los JUGADORES con prop publicado (statsapi). Cierra
+        # el paso 'sacar sus analisis en lo que ha destacado ultimamente': antes
+        # solo se daba forma de equipo, y los props de jugador se elegian a ciegas.
+        mensaje += _form_jugadores_props(markets_reales)
+
+        texto, modelo = _preguntar_ia(mensaje, p["sport"])
+        pick = _parsear_pick_json(texto)
 
         if not pick:
             # SIN_CUOTA: ningun proveedor respondio (402 de You.com / 429 de
