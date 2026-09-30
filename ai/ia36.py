@@ -95,6 +95,34 @@ tools = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verificar_plantilla",
+            "description": (
+                "VERIFICA CON FUENTE OFICIAL a que equipo pertenece realmente un jugador "
+                "y devuelve la competicion (liga), division, record, plantilla activa y el "
+                "partido real de ese equipo en la fecha de hoy. USA ESTA HERRAMIENTA "
+                "OBLIGATORIAMENTE antes de analizar cualquier partido donde se mencionen "
+                "jugadores: es la unica forma de no inventarse que alguien juega en un equipo "
+                "donde no juega. Devuelve tambien el rival REAL de la fecha."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "equipo": {
+                        "type": "string",
+                        "description": "Nombre del equipo a verificar (ej: 'Texas Rangers')."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador a verificar (ej: 'Tyler Mahle'). Opcional."
+                    }
+                },
+                "required": ["equipo"]
+            }
+        }
     }
 ]
 
@@ -207,6 +235,58 @@ def buscar_web(query, max_resultados=3):
         return truncar_texto(texto)
     except Exception as e:
         return f"Error en la búsqueda: {e}"
+
+
+def verificar_plantilla(equipo, jugador=None):
+    """
+    Herramienta de 36AI: devuelve la verdad oficial sobre un equipo y su
+    plantilla (competicion, division, record, roster, rival real de hoy).
+    """
+    try:
+        from ai.verificacion import (
+            contexto_equipo,
+            verificar_jugador_en_equipo,
+        )
+    except Exception as exc:
+        return f"Verificacion no disponible: {exc}"
+
+    partes = []
+
+    if jugador:
+        v = verificar_jugador_en_equipo(jugador, equipo)
+        if v.get("encontrado"):
+            partes.append(
+                f"JUGADOR {v['jugador']}: equipo real = {v['equipo_real']}. "
+                f"Competicion: {v['competicion']}."
+            )
+        if v.get("motivo"):
+            partes.append(v["motivo"])
+
+    if equipo:
+        try:
+            ctx = contexto_equipo(equipo)
+        except Exception:
+            ctx = {}
+        if ctx.get("encontrado"):
+            lineas = [f"EQUIPO {ctx['nombre']} | Competicion: {ctx['competicion']}"]
+            if ctx.get("division"):
+                lineas.append(f"Division: {ctx['division']}")
+            if ctx.get("record"):
+                lineas.append(f"Record: {ctx['record']}")
+            if ctx.get("tabla"):
+                lineas.append(f"Tabla: {ctx['tabla']}")
+            if ctx.get("partido_real"):
+                pr = ctx["partido_real"]
+                lineas.append(
+                    f"Partido real de hoy: {pr['visitante']} vs {pr['local']} "
+                    f"(rival: {ctx['rival_real']})"
+                )
+            if ctx.get("plantilla"):
+                lineas.append("Plantilla: " + ", ".join(ctx["plantilla"][:25]))
+            partes.append("\n".join(lineas))
+
+    salida = "\n".join(p for p in partes if p).strip()
+    return truncar_texto(salida) if salida else "Sin datos de verificacion."
 
 
 def compactar_messages(messages, max_chars=MAX_CHARS_MENSAJES):
@@ -538,12 +618,25 @@ def analizar_36ai(mensaje_usuario, system_prompt):
 
     try:
         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        fecha_iso = datetime.now().strftime("%Y-%m-%d")
     except Exception:
         fecha_hoy = ""
+        fecha_iso = ""
+
+    # VERIFICACION DE PLANTILLA Y COMPETICION (fuente oficial).
+    # Sin esto el modelo se inventa el roster: realmnte paso con
+    # "Texas Rangers (Tyler Mahle) vs Phillies" cuando Mahle juega en Atlanta.
+    try:
+        from ai.verificacion import construir_contexto_verificacion
+        bloque_verificacion = construir_contexto_verificacion(mensaje_usuario, fecha_iso)
+    except Exception as exc:
+        bloque_verificacion = ""
+        if DEBUG:
+            print(f"[36AI] verificacion no disponible: {exc}")
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"[Fecha actual: {fecha_hoy}] Analiza: {mensaje_usuario}"}
+        {"role": "user", "content": f"[Fecha actual: {fecha_hoy}] Analiza: {mensaje_usuario}{bloque_verificacion}"}
     ]
 
     modelo_en_uso = None
@@ -620,6 +713,11 @@ def analizar_36ai(mensaje_usuario, system_prompt):
 
                 if nombre_funcion == "buscar_web":
                     resultado = buscar_web(args.get("query", ""))
+                elif nombre_funcion == "verificar_plantilla":
+                    resultado = verificar_plantilla(
+                        args.get("equipo", ""),
+                        args.get("jugador"),
+                    )
                 elif nombre_funcion == "buscar_cuotas":
                     resultado = buscar_cuotas(
                         args.get("equipo_local", ""),

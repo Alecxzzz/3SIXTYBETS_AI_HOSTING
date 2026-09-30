@@ -703,6 +703,17 @@ def chat(request: Request, data: Chat,
         f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
         if ctx_espn else ""
     )
+    # Verificacion de plantilla/competicion desde fuente oficial. Impide que
+    # la IA se invente que un jugador juega en un equipo donde no juega
+    # (bug real: "Texas Rangers (Tyler Mahle)", cuando Mahle esta en Atlanta).
+    bloque_verif = ""
+    if parece_partido:
+        try:
+            from ai.verificacion import construir_contexto_verificacion
+            bloque_verif = construir_contexto_verificacion(data.mensaje)
+        except Exception as exc:
+            bloque_verif = ""
+            print(f"[Chat-verif] no disponible: {exc}", flush=True)
     # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
     fallo_365 = False
     if modelo_id in ("36ai", "36", "ia36", "groq"):
@@ -710,6 +721,9 @@ def chat(request: Request, data: Chat,
         # procesar_36ai clasifica solo: conversación -> respuesta natural,
         # partido -> análisis agéntico con formato EDGE.
         # Se inyectan las estadisticas reales de ESPN como base del análisis.
+        # OJO: no se le pasa bloque_verif aqui. analizar_36ai ya inyecta la
+        # verificacion por su cuenta; pasarsela dos veces duplicaria el
+        # contexto y las alertas de plantilla en el prompt.
         respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
         if respuesta_36 and str(respuesta_36).strip():
             return respuesta_36
@@ -1027,7 +1041,20 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
             "records, cuotas). Basa tu pick en estos datos reales."
         )
 
-    respuesta = SearchEngine().ask_you(bloque_memoria + data.mensaje, system_prompt=reglas)
+    # Plantilla y competicion verificadas: la verdad oficial va por delante
+    # de la memoria del modelo (evita inventar que un jugador juega en un
+    # equipo donde no juega).
+    if bloque_verif:
+        reglas = reglas + (
+            f"\n\n{bloque_verif}"
+            "\n\nEstos datos son oficiales: mandan sobre lo que recuerdes. Si un "
+            "jugador no esta en la plantilla del equipo nombrado, esa "
+            "combinacion no existe: no la analices como si fuera real."
+        )
+
+    respuesta = SearchEngine().ask_you(
+        bloque_memoria + data.mensaje + bloque_verif, system_prompt=reglas
+    )
     # You.com sin creditos en el analisis EDGE: Groq es el motor de relevo.
     if _respuesta_you_agotada(respuesta):
         alternativa = _responder_groq(
