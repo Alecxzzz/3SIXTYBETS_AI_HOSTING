@@ -1,0 +1,2 @@
+[WARN] ODDS_API_KEY no configurada: cuotas reales de odds-api.io deshabilitadas (se usan cuotas de ESPN/estimadas).
+[WARN] CHAT_CONV_SECRET no configurado: se genera uno aleatorio. Si Northflank corre mas de una instancia o reinicia seguido, define CHAT_CONV_SECRET en el panel para que los tokens sobrevivan.

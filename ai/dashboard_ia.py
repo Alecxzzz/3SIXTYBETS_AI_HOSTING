@@ -61,11 +61,94 @@ BASE_URL = os.getenv(
 )
 MODELO = os.getenv("DASHBOARD_AI_MODEL", "openai/gpt-oss-20b")
 MODELO_FALLBACK = os.getenv("DASHBOARD_AI_FALLBACK", "openai/gpt-oss-120b")
+# Rotacion extra de modelos: Groq aplica el limite de TPD POR MODELO, asi que
+# cuando uno se agota (429) el siguiente de la lista sigue teniendo margen.
+# Antes, al agotarse gpt-oss-20b y gpt-oss-120b, el dashboard se quedaba mudo
+# hasta el dia siguiente.
+MODELOS_EXTRA = [
+    m.strip()
+    for m in os.getenv(
+        "DASHBOARD_AI_MODELOS_EXTRA",
+        # Modelos confirmados en la cuenta de Groq del proyecto (verificado
+        # contra GET /openai/v1/models). Los que no existan devuelven 404 y el
+        # bucle pasa al siguiente, pero cada 404 suma latencia a un ciclo que
+        # puede tener 90 partidos: por eso solo van los que SI respondieron.
+        "qwen/qwen3.8-27b",
+    ).split(",")
+    if m.strip()
+]
 
 MAX_TOKENS = int(os.getenv("DASHBOARD_AI_MAX_TOKENS", "2000"))
 TIMEOUT = int(os.getenv("DASHBOARD_AI_TIMEOUT", "60"))
 MAX_REINTENTOS = int(os.getenv("DASHBOARD_AI_MAX_REINTENTOS", "3"))
 REASONING_EFFORT = os.getenv("DASHBOARD_AI_REASONING_EFFORT", "low")
+
+# Cooldown POR MODELO cuando Groq responde 429 (TPD/RPM agotado). Sin esto, el
+# generador reintentaba 3 veces en cada uno de los ~90 partidos de la ventana:
+# cientos de llamadas que solo gastan cuota y ralentizan el ciclo entero.
+# Es por modelo y no global porque Groq descuenta el limite diario de forma
+# independiente para cada uno: pausar todo dejaria fuera modelos con cuota.
+MODELOS_EN_PAUSA = {}
+PAUSA_429_S = int(os.getenv("DASHBOARD_AI_PAUSA_429", "900"))
+
+# CONTADOR DE TOKENS POR DIA. Los 429 son reactivos: solo avisan cuando ya se
+# agoto el TPD, y para entonces el dia ya esta perdido (nadie ve picks). Este
+# contador es proactivo: al acercarse al limite se reserve una parte para las
+# ULTIMAS horas del dia, que son las de mayor trafico, en vez de quemarla en
+# las primeras horas. Es lo que hace que el sistema "aguante presion".
+PRESUPUESTO_TPD = int(os.getenv("DASHBOARD_AI_TPD", "190000"))
+# % del presupuesto que se puede gastar antes de las 20:00 (hora local del
+# servidor, UTC en el hosting) para dejar margen a la punta de trafico.
+RESERVA_PUNTA = float(os.getenv("DASHBOARD_AI_RESERVA_PUNTA", "0.75"))
+HORA_PUNTA = int(os.getenv("DASHBOARD_AI_HORA_PUNTA", "20"))
+# Si el TPD real del plan es mayor, se ajusta con DASHBOARD_AI_TPD.
+
+_consumo = {"dia": "", "tokens": 0, "llamadas": 0}
+
+
+def _reset_consumo() -> None:
+    hoy = time.strftime("%Y-%m-%d")
+    if _consumo["dia"] != hoy:
+        _consumo.update(dia=hoy, tokens=0, llamadas=0)
+
+
+def presupuesto_disponible() -> int:
+    """Tokens que aún se pueden gastar hoy sin comerse la reserva de la punta."""
+    _reset_consumo()
+    tpm = PRESUPUESTO_TPD
+    if time.localtime().tm_hour < HORA_PUNTA:
+        tpm = int(tpm * RESERVA_PUNTA)
+    return max(0, tpm - _consumo["tokens"])
+
+
+def registrar_consumo(tokens: int) -> None:
+    _reset_consumo()
+    _consumo["tokens"] += max(0, int(tokens or 0))
+    _consumo["llamadas"] += 1
+
+
+def estado_consumo() -> dict:
+    """Consumo del dia (para /dashboard/salud)."""
+    _reset_consumo()
+    return {
+        "tokens_hoy": _consumo["tokens"],
+        "llamadas_hoy": _consumo["llamadas"],
+        "presupuesto": PRESUPUESTO_TPD,
+        "disponible": presupuesto_disponible(),
+    }
+
+
+def _modelo_en_pausa(modelo: str) -> bool:
+    return time.time() < MODELOS_EN_PAUSA.get(modelo, 0.0)
+
+
+def _marcar_cuota_agotada(modelo: str, motivo: str) -> None:
+    MODELOS_EN_PAUSA[modelo] = time.time() + PAUSA_429_S
+    print(
+        f"[Dashboard-AI] Limite de Groq agotado en {modelo} ({motivo}); "
+        f"pausa {PAUSA_429_S}s para ese modelo",
+        flush=True,
+    )
 
 DEBUG = os.getenv("DASHBOARD_AI_DEBUG", "false").lower() == "true"
 
@@ -141,7 +224,22 @@ def _construir_payload(modelo: str, system_prompt: str, mensaje: str) -> dict:
     return payload
 
 
-def generar_picks(system_prompt: str, mensaje: str):
+def _cadena_modelos() -> list:
+    """Modelos a probar en orden, sin repetir.
+
+    Groq descuenta el limite diario POR MODELO, asi que rotar es lo que
+    mantiene vivo el dashboard cuando un modelo agota su TPD.
+    """
+    cadena = [MODELO, MODELO_FALLBACK, *MODELOS_EXTRA]
+    vistos, out = set(), []
+    for m in cadena:
+        if m and m not in vistos:
+            vistos.add(m)
+            out.append(m)
+    return out
+
+
+def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
     """Genera el texto del pick con el modelo DEDICADO del dashboard.
 
     Antes de preguntar al modelo se hace una busqueda web (lesiones, cuotas,
@@ -160,7 +258,10 @@ def generar_picks(system_prompt: str, mensaje: str):
     ultimo_error = ""
 
     # Contexto web (una sola vez, compartido por modelo principal y fallback).
-    contexto_web = buscar_contexto_web(mensaje)
+    # Las VERIFICACIONES la desactivan: ya se le pide al modelo que contraste
+    # con fuentes externas y repetir 3 busquedas web por cada pasada multiplicaba
+    # el gasto de tokens y el tiempo del ciclo sin aportar datos nuevos.
+    contexto_web = buscar_contexto_web(mensaje) if buscar_web else ""
     if DEBUG:
         print(f"[Dashboard-AI] contexto web: {len(contexto_web)} chars", flush=True)
 
@@ -173,9 +274,19 @@ def generar_picks(system_prompt: str, mensaje: str):
             + contexto_web
         )
 
-    for modelo in (MODELO, MODELO_FALLBACK):
-        if not modelo:
+    for modelo in _cadena_modelos():
+        if not modelo or _modelo_en_pausa(modelo):
             continue
+        if presupuesto_disponible() <= 0:
+            # Se gasto el presupuesto del dia (o su parte reservada). Se corta
+            # aqui en vez de esperar a que el 429 lo tire todo: es preferible
+            # dejar de generar AHORA que quedarse mudo hasta manana.
+            print(
+                f"[Dashboard-AI] Presupuesto diario agotado "
+                f"({estado_consumo()['tokens_hoy']}/{PRESUPUESTO_TPD} tokens)",
+                flush=True,
+            )
+            return None, None
         payload = _construir_payload(modelo, system_con_contexto, mensaje)
 
         for intento in range(max(1, MAX_REINTENTOS)):
@@ -189,6 +300,13 @@ def generar_picks(system_prompt: str, mensaje: str):
                 continue
 
             if r.status_code == 200:
+                # Contar lo que DE VERDAD costo la llamada (prompt + respuesta):
+                # es lo que descuenta Groq del TPD.
+                try:
+                    _uso = r.json().get("usage") or {}
+                    registrar_consumo(int(_uso.get("total_tokens") or 0))
+                except Exception:
+                    registrar_consumo(0)
                 texto = _extraer_texto(r.json())
                 if texto:
                     if DEBUG:
@@ -209,10 +327,21 @@ def generar_picks(system_prompt: str, mensaje: str):
                 print(f"[Dashboard-AI] {ultimo_error}", flush=True)
 
             if r.status_code == 429:
-                time.sleep(min(2 ** intento * 4, 12))
-                continue
+                # Limite de cuota/rate: no insistir con el mismo modelo ni
+                # reintentar 3 veces (agota el TPD del resto del dia). Se pasa
+                # al siguiente modelo de la rotacion.
+                _marcar_cuota_agotada(modelo, r.text[:120])
+                break
             if r.status_code in (500, 502, 503):
                 time.sleep(min(2 ** intento * 2, 8))
+                continue
+            if r.status_code == 400 and "too large" in r.text.lower() and contexto_web:
+                # Prompt mas largo que la ventana del modelo: se reintenta
+                # recortando el contexto web. Antes ese 400 agotaba el modelo
+                # y se perdia el pick aunque otro mas grande respondiera.
+                contexto_web = ""
+                payload = _construir_payload(modelo, system_prompt, mensaje)
+                ultimo_error = f"{modelo}: prompt recortado por exceeded context"
                 continue
             # 404 (modelo retirado) u otro error: probar el siguiente modelo.
             break

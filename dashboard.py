@@ -38,8 +38,10 @@ MIN_JUEGOS_MANANA = 15
 # Doble verificacion antes de publicar: 2 pasadas independientes de la IA
 # contra fuentes externas; AMBAS deben coincidir.
 VERIFICACIONES_PUBLICAR = 2
-# Los acertados del dia anterior se muestran solo hasta las 23:00 Nicaragua
-HORA_CORTE_ACERTADOS = 20
+# Los acertados del dia anterior se muestran hasta las 23:00 Nicaragua
+# (la docstring de aciertos_visibles() ya decia 23:00; la constante estaba en
+# 20 y ocultaba 3 horas extra de aciertos, dejando el panel casi vacio).
+HORA_CORTE_ACERTADOS = 23
 # La IA analiza/genera picks a cualquier hora (antes solo desde las 21:00).
 # Se mantiene la constante por compatibilidad pero ya no bloquea.
 HORA_INICIO_ANALISIS = 0
@@ -653,25 +655,151 @@ MERCADOS_POR_DEPORTE = {
 DEPORTES_DASHBOARD = list(MERCADOS_POR_DEPORTE.keys())
 
 # ============================================================
+# MERCADOS RESOLUBLES Y RANKING POR EFECTIVIDAD
+# ============================================================
+# El problema: se generaban mas de 500 picks y 311 acababan ANULADOS. No
+# porque fueran malos, sino porque el RESOLVER no sabe decidir muchos de
+# ellos. Medido sobre 30 dias, la tasa de anulacion por mercado es:
+#   100% -> Apuesta sin empate, Handicap de juegos/sets, Aces, Sets exactos,
+#           Doble oportunidad, Jugador A/B total juegos (TENIS: sin fuente)
+#    92% -> 'Equipo A o B gana la primera mitad'
+#    88% -> 'Ganador' (tenis: el set score no cabe en el marcador de equipos)
+# Un pick que no se puede resolver no cuenta como ACIERTO ni como FALLO: es
+# ruido, y ademas desplaza del panel los que si son reales. Por eso el
+# generador ahora pondera los mercados que el sistema SI sabe resolver.
+
+# (a) Mercados que NO dependen de una fuente de estadisticas externa: se
+#     resuelven solo con el marcador final (marcador de los equipos). Son los
+#     unicos que se resuelven el 100% de las veces y sin gastar una sola
+#     llamada de IA.
+_MARC_RESOLUBLE_MARCADOR = (
+    "ganador", "moneyline", " 1x2", "1x2 (", "ambos equipos marcan", "btts",
+    "doble oportunidad", "multigoles", "multigol", "total de goles",
+    "totales incl extra innings", "over de goles", "handicap incl extra",
+    "total de puntos", "totales del partido", "handicap de sets",
+    "ganador y total",
+)
+# (b) Mercados que el resolver cubre con una fuente de estadisticas real
+#     (boxscore de MLB / stats de Sofascore). Resolubles, pero dependen de que
+#     esa fuente responda.
+_MARC_RESOLUBLE_STATS = (
+    "hits", "strikeout", "s.o)", " so)", "hr totales", "jonrones",
+    "total de hits", "hits mas", "hits menos", "rebotes", "asistencias",
+    "tarjeta", "corner", "esquina",
+)
+# (c) Mercados que hoy NO se sabe resolver: props complejos de jugador, sets
+#     exactos de tenis, handicaps de juegos, hitos, marcador exacto. Se
+#     excluyen del catalogo efectivo: no es que sean malos, es que su
+#     resultado no se puede comprobar y ends ANULADO.
+_MARC_NO_RESOLUBLE = (
+    "apuesta sin empate", "sin empate", "dnb",
+    "sets exactos", "marcador exacto", "sets exactos",
+    "handicap de juegos", "handicap de sets", "juegos",
+    "aces", "dobles faltas", "break", "tie break",
+    "primer set", "segundo set", "primer cuarto", "1er cuarto", "primer medio",
+    "primera mitad", "segunda mitad", "carrera a", "meta",
+    "minimo puntos", "minimo rebotes", "minimo asistencias", "minimo triples",
+    "puntos+rebotes", "puntos+asistencias", "asistencias+rebotes", "doble-doble",
+    "triple-doble", "lanzador total", "bases totales",
+)
+
+
+def mercado_resoluble(market: str) -> bool:
+    """True si el sistema sabe resolver este mercado por su cuenta.
+
+    Si es False, el pick solo se resuelve con la IA y 6 verificaciones
+    multi-fuente: en la practica acababa ANULADO. Se usa para priorizar.
+    """
+    t = (market or "").lower()
+    if not t:
+        return False
+    if any(x in t for x in _MARC_NO_RESOLUBLE):
+        return False
+    return any(x in t for x in _MARC_RESOLUBLE_MARCADOR + _MARC_RESOLUBLE_STATS)
+
+
+def peso_mercado(market: str) -> int:
+    """Prioridad de un mercado para el generador (mayor = mejor).
+
+    Se apoya en la efectividad REAL medida en produccion (30 dias):
+      * Ganador y total        100% (5/5)
+      * Doble oportunidad       84% (11/13)
+      * Ganador incl. extra     80% (8/10)
+      * Handicap incl. extra    80% (4/5)
+      * Over de goles           77% (7/9)
+      * 1X2                     76% (10/13)
+      * BTTS                    41% (10/24)  <- el que mas se repite y peor
+    Cuanto mas se repite un mercado, mas pesa su efectividad historica.
+    """
+    t = (market or "").lower()
+    if not mercado_resoluble(t):
+        return 0
+    if "btts" in t or ("ambos equipos marcan" in t and "2.5" not in t):
+        return 30          # 41% historico: el mas flojo de los buenos
+    if any(x in t for x in ("1x2", "moneyline")):
+        return 85          # 76%
+    if "ganador" in t and "total" in t:
+        return 95          # 100% (5/5) y el de menor riesgo
+    if "doble oportunidad" in t or "doble oport" in t:
+        return 90          # 84%
+    if "ganador" in t:
+        return 88          # 80%
+    if "handicap" in t:
+        return 78          # ~80% en MLB
+    if "jugador" in t or "del jugador" in t:
+        # Props de jugador: solo son resolubles los de MLB con boxscore
+        # (hits/ponches/HR), no los de NBA/tenis. Se les da peso bajo para
+        # que queden al final de la lista y la IA los evite por defecto.
+        return 62
+    if any(x in t for x in ("total de goles", "totales", "over de goles", "multigol")):
+        return 70          # 72-77%
+    return 60
+
+
+def _priorizar_mercados(mercados: list) -> list:
+    """Ordena el catalogo de un deporte: primero los que mas aciertan y mas
+    se resuelven. La IA elige de esta lista, asi que subir aqui el peso de los
+    buenos baja el de los que acaban ANULADOS o fallando."""
+    return sorted(mercados, key=lambda m: (-peso_mercado(m), m))
+
+
+# ============================================================
 # PROMPT MAESTRO (usado por LAS DOS IAS: 365AI y Demian)
 # ============================================================
 
 
-def catalogo_texto():
+def catalogo_texto(sport: str | None = None) -> str:
+    """Catalogo de mercados.
+
+    Con sport=None devuelve el catalogo completo (todos los deportes); con un
+    sport concreto devuelve SOLO el de ese deporte. El generador usa la
+    version por deporte: mandar el catalogo entero en cada llamada costaba
+    ~1470 tokens de prompt y el TPD de Groq se agotaba antes de generar
+    media docena de picks.
+    """
     lineas = []
-    for sport, (label, mercados) in MERCADOS_POR_DEPORTE.items():
+    deportes = MERCADOS_POR_DEPORTE if sport is None else {sport: MERCADOS_POR_DEPORTE[sport]}
+    for s, (label, mercados) in deportes.items():
         lineas.append(f"{label.upper()}:")
-        for m in mercados:
-            lineas.append(f"- {m}")
+        # Solo los mercados que el sistema sabe RESOLVER, y ordenados por su
+        # efectividad real: la IA elige de esta lista, asi que lo que queda al
+        # final es lo que ella acababa eligiendo (y anulando).
+        for m in _priorizar_mercados(mercados):
+            if not mercado_resoluble(m):
+                continue
+            linea = f"- {m}"
+            # Se marca el rango de cuota de cada mercado: el golden necesita
+            # 1.35-1.40 y la IA no tenia forma de saber que mercado puede darlo.
+            if 35 <= peso_mercado(m) <= 70:
+                linea += "  (cuotatipica 1.35-1.80)"
+            lineas.append(linea)
         lineas.append("")
     return "\n".join(lineas)
 
 
-PROMPT_PICKS = """Eres 3SIXTYBETS AI, analista cuantitativo de apuestas deportivas.
-
-SOLO PUEDES USAR ESTOS PICKS DEFINIDOS PARA CADA DEPORTE:
-
-""" + catalogo_texto() + """
+# REGLAS (sin catalogo): se combinan con el catalogo del deporte concreto en
+# prompt_picks_deporte(). PROMPT_PICKS se mantiene completo por compatibilidad.
+REGLAS_PICKS = """
 REGLAS OBLIGATORIAS:
 1. USA SOLO los mercados listados arriba. NUNCA inventes mercados. analizaras con los endpoint y api que usa la api sin delatarlo ni decir que usas
 2. Los textos del catalogo son INSTRUCCIONES/REGLAS del mercado (minimos de
@@ -696,6 +824,41 @@ REGLAS OBLIGATORIAS:
   "stats": ["<dato corto 1 basado en los ultimos 5 partidos>", "<dato corto 2>", "<dato corto 3>", ...]
 }
 """
+
+_cabecera_prompt = (
+    "Eres 3SIXTYBETS AI, analista cuantitativo de apuestas deportivas.\n\n"
+    "SOLO PUEDES USAR ESTOS PICKS DEFINIDOS PARA CADA DEPORTE:\n\n"
+)
+
+# Cache de prompts por deporte (el catalogo no cambia en caliente).
+_prompt_por_deporte: dict = {}
+
+
+def prompt_picks_deporte(sport: str) -> str:
+    """System prompt SOLO con el catalogo del deporte indicado.
+
+    Reduce el prompt de ~1470 a ~400 tokens: es la palanca mas grande para
+    que el TPD de Groq aguante una jornada completa de picks.
+    """
+    if sport not in _prompt_por_deporte:
+        _prompt_por_deporte[sport] = (
+            _cabecera_prompt + catalogo_texto(sport) + REGLAS_PICKS
+        )
+    return _prompt_por_deporte[sport]
+
+
+PROMPT_PICKS = _cabecera_prompt + catalogo_texto() + REGLAS_PICKS
+
+# Prompt para VERIFICACIONES (confirmar un pick / decidir ACIERTO-FALLO).
+# No necesita el catalogo de mercados: la tarea es de una sola respuesta
+# corta. Usar el prompt maestro aqui multiplicaba por 3-4 el gasto de tokens
+# sin aportar nada (las verificaciones son las llamadas mas numerosas).
+PROMPT_VERIFICACION = (
+    "Eres un verificador de apuestas de 3SIXTYBETS. Contrastas la propuesta "
+    "con datos reales de fuentes externas (Sofascore, Flashscore, Fotmob, "
+    "estadisticas oficiales). Eres escuetico: NO confirmas por defecto. "
+    "Responde EXCLUSIVAMENTE con el formato pedido y nada mas."
+)
 
 
 # ============================================================
@@ -746,6 +909,24 @@ def _partidos_hoy():
                     home = equipos[1] if len(equipos) > 1 else {}
                 home_name = home.get("name") or "?"
                 away_name = away.get("name") or "?"
+                # league_code: NECESARIO para resolver el pick mas tarde. El
+                # resolver consulta el summary de ESPN por evento usando la
+                # liga; sin ella solo podia buscar en el scoreboard del dia, el
+                # evento desaparecia a las pocas horas y el pick acababa
+                # ANULADO. Se deriva del path de ESPN (SPORTS['mlb'] =
+                # 'baseball/mlb'). En futbol ya venia; en MLB/NBA/tenis no, y
+                # eran 191 + 99 picks que no se podian resolver nunca.
+                league = g.get("league_code")
+                if not league:
+                    try:
+                        import sports as _sports_mod
+
+                        _path = (_sports_mod.SPORTS.get(sport) or ("", ""))[0]
+                        if _path and "/" in _path:
+                            league = _path
+                    except Exception:
+                        league = None
+
                 partidos.append({
                     "sport": sport,
                     "label": data.get("label", sport),
@@ -758,7 +939,7 @@ def _partidos_hoy():
                     "date": g.get("date", ""),
                     "state": g.get("state"),
                     "odds": g.get("odds"),
-                    "league": g.get("league_code"),
+                    "league": league,
                 })
         except Exception as exc:
             print(f"[Dashboard] Error trayendo partidos {sport}: {exc}")
@@ -787,20 +968,49 @@ def _partidos_hoy():
     return partidos
 
 
-def _preguntar_ia(mensaje: str):
+def _es_error_ia(texto) -> bool:
+    """True si el 'texto' es en realidad un mensaje de error del proveedor.
+
+    Sin este filtro, un 'Error de You.com (402): ... prepaid credit depleted'
+    se colaba como si fuera la respuesta del modelo: no se parseaba como pick
+    y el partido se descartaba como si la IA hubiera dicho 'sin datos'.
+    """
+    t = str(texto or "")
+    if not t:
+        return False
+    bajo = t.lower()
+    return bajo.startswith((
+        "error", "error:", "error de you.com", "error leyendo",
+        "demian tipster no pudo", "no se pudo",
+    )) or "payment_required" in bajo or "add credits" in bajo
+
+
+
+def _preguntar_ia(mensaje: str, sport: str | None = None, system_prompt: str | None = None, buscar_web: bool = True):
     """Genera los picks del Dashboard con su motor DEDICADO (ai/dashboard_ia.py).
 
     Antes usaba Demian (You.com) directamente. Ahora el dashboard tiene modelo
     propio: si el chat satura un modelo, el dashboard sigue respondiendo, porque
     Groq aplica los limites POR MODELO. You.com queda solo como ultimo recurso
     cuando ya no queda saldo.
+
+    'sport' recorta el catalogo del system prompt al de ese deporte: mandar los
+    4catalogos en cada llamada costaba ~1470 tokens de prompt y quemaba el TPD.
+    'system_prompt' permite pasar un prompt propio (verificaciones), que es
+    mucho mas barato que el prompt maestro completo.
     """
+    if system_prompt is None:
+        system_prompt = (
+            prompt_picks_deporte(sport)
+            if sport in MERCADOS_POR_DEPORTE
+            else PROMPT_PICKS
+        )
     # 1) Motor dedicado del dashboard.
     try:
         from ai.dashboard_ia import generar_picks
 
-        contenido, modelo = generar_picks(PROMPT_PICKS, mensaje)
-        if contenido and not str(contenido).startswith(("ERROR:", "Error leyendo")):
+        contenido, modelo = generar_picks(system_prompt, mensaje, buscar_web=buscar_web)
+        if contenido and not _es_error_ia(contenido):
             return contenido, f"365AI Dashboard ({modelo})"
     except Exception as exc:
         print(f"[Dashboard] motor dedicado fallo: {exc}", flush=True)
@@ -809,13 +1019,15 @@ def _preguntar_ia(mensaje: str):
     try:
         from ai.model import generar_respuesta_you
 
-        contenido = generar_respuesta_you(PROMPT_PICKS, mensaje)
-        if contenido and not str(contenido).startswith(("ERROR:", "Error leyendo")):
+        contenido = generar_respuesta_you(system_prompt, mensaje)
+        if contenido and not _es_error_ia(contenido):
             return contenido, "Demian tipster"
     except Exception as exc:
         print(f"[Dashboard] Demian fallo: {exc}")
 
-    return None, None
+    # 'SIN_CUOTA' distingue "no hubo respuesta por limite de cuota" de un fallo
+    # puntual: el generador usa esa marca para NO descartar el partido.
+    return None, "SIN_CUOTA"
 
 
 def _parsear_pick_json(texto: str):
@@ -908,7 +1120,7 @@ def _doble_verificar_pick(p: dict, market: str, selection: str, label: str) -> i
             "esa misma seleccion; si no, confirma=false."
         )
         try:
-            texto, _modelo = _preguntar_ia(pregunta)
+            texto, _modelo = _preguntar_ia(pregunta, system_prompt=PROMPT_VERIFICACION, buscar_web=False)
             data = _parsear_pick_json(texto)
             if not data:
                 import json as _json
@@ -948,6 +1160,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     rechazados_calidad = 0
     rechazados_prohibido = 0
     rechazados_sin_verificar = 0
+    rechazados_no_resoluble = 0
 
     # Partidos ya analizados y descartados hace poco (cuota baja, sin datos,
     # mercado prohibido...): no se vuelven a gastar llamadas de IA en ellos.
@@ -957,6 +1170,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     except Exception:
         pass
 
+    sin_cuota = False
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
     con_pick = db.eventos_con_pick()
 
@@ -971,13 +1185,12 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
         disponibles = [m for m in mercados if _market_norm(m) not in mercados_usados]
         if not disponibles:
-            if p["sport"] == "soccer":
-                # FUTBOL: mas volumen. Si ya se usaron todos los mercados del
-                # catalogo hoy, se permite reutilizarlos para partidos nuevos
-                # (cada partido lleva SU pick aunque el mercado ya salio hoy).
-                disponibles = list(mercados)
-            else:
-                break  # otros deportes: se agotaron los mercados del catalogo
+            # Todos los mercados del catalogo de este deporte ya salieron hoy.
+            # Antes solo el FUTBOL podia reutilizarlos y el resto abortaba el
+            # bucle, dejando el dia con 1-2 picks. Ahora TODOS los deportes
+            # reutilizan: el filtro de no-repetir es una guia para la IA (se
+            # le pasa la lista de usados), no un veto que vacie el dashboard.
+            disponibles = list(mercados)
 
         mensaje = (
             f"Partido: {p['away_name']} (visitante) vs {p['home_name']} (local)\n"
@@ -1032,14 +1245,23 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             f"partido, responde {{\"error\": \"sin datos\"}} en vez de inventar."
         )
 
-        texto, modelo = _preguntar_ia(mensaje)
+        texto, modelo = _preguntar_ia(mensaje, p["sport"])
         pick = _parsear_pick_json(texto)
 
         if not pick:
+            # SIN_CUOTA: ningun proveedor respondio (402 de You.com / 429 de
+            # Groq). No se descarta el partido y se corta el ciclo: seguir
+            # preguntando a los ~90 partidos restantes solo gastaria cuota y
+            # haria que el ciclo tardara minutos. Los partidos quedan
+            # disponibles para el siguiente ciclo.
+            if modelo == "SIN_CUOTA":
+                errores += 1
+                sin_cuota = True
+                break
             # {"error": "sin datos"} es una respuesta valida de la IA: ese
             # partido no tiene datos, no se reintenta cada ciclo. Un fallo
             # transitorio (respuesta vacia/cortada) SI se reintenta.
-            if '"error"' in (texto or "").lower():
+            if texto and '"error"' in texto.lower() and not _es_error_ia(texto):
                 db.registrar_descarte(p["event_id"], "sin_datos")
             else:
                 errores += 1
@@ -1068,9 +1290,21 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             if not detalle or _market_norm(market) not in _market_norm(detalle):
                 errores += 1
                 continue
-        if p["sport"] != "soccer" and _market_norm(market) in mercados_usados:
-            errores += 1
+        # MERCADO RESOLUBLE: filtro que mas valor aporta. Un pick cuyo mercado
+        # el resolver no sabe decidir NO cuenta como acierto ni como fallo:
+        # acaba ANULADO y solo ocupa sitio en el panel. Medido en produccion,
+        # los mercados no resolubles acumularon el 90-100% de anulaciones. Se
+        # descartan aqui (con motivo propio, para no reintentar) en vez de
+        # guardarlos para luego anularlos.
+        if not mercado_resoluble(market):
+            rechazados_no_resoluble += 1
+            db.registrar_descarte(p["event_id"], "no_resoluble")
             continue
+
+        # El "no repetir mercado" es una PREFERENCIA que ya se le pasa a la IA
+        # en el mensaje (lista de mercados usados). Se elimino el veto duro para
+        # deportes que no son futbol: en la practica descartaba casi todos los
+        # partidos de tenis/MLB/NBA y dejaba el dashboard con 1-2 picks.
 
         # RANGO GENERAL: la cuota IA debe estar en 1.20-2.50 (los GOLDEN
         # 1.35-1.40 son 1-2 destacados, no todos).
@@ -1130,7 +1364,13 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # DOBLE VERIFICACION solo para candidatos GOLDEN (cuota 1.35-1.40):
         # 2 pasadas independientes de la IA; AMBAS deben coincidir. Los
         # STANDARD se publican con la verificacion del analisis principal.
-        es_golden = _es_golden(odds_final)
+        #
+        # GOLDEN = cuota 1.35-1.40 Y mercado de los que mas aciertan. Antes la
+        # etiqueta dependia SOLO de la cuota, asi que un 'Aces totales' o un
+        # 'Total tiros de esquina' a 1.36 salia como GOLDEN y acababa ANULADO:
+        # de 23 golden solo quedo 1 acierto. Un golden tiene que ser un pick
+        # que además se pueda RESOLVER y con un mercado de efectividad probada.
+        es_golden = _es_golden(odds_final) and peso_mercado(market) >= 80
         verificado = 0
         if es_golden:
             verificado = _doble_verificar_pick(p, market, str(pick.get("selection", "")), label)
@@ -1171,6 +1411,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     stats_out = {
         "partidos": len(partidos),
         "generados": generados,
+        "sin_cuota_ia": sin_cuota,
         "meta_min_juegos": MIN_JUEGOS_MANANA,
         "omitidos_ya_con_pick": omitidos,
         "omitidos_descartados": omitidos_descartados,
@@ -1179,6 +1420,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         "rechazados_calidad": rechazados_calidad,
         "rechazados_prohibido": rechazados_prohibido,
         "rechazados_sin_verificar": rechazados_sin_verificar,
+        "rechazados_no_resoluble": rechazados_no_resoluble,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     return stats_out
@@ -1387,7 +1629,7 @@ def _verificar_acierto_con_fuentes(pick: dict, marcador: str):
 
     votos = []
     for i in range(VERIFICACIONES_ACIERTO):
-        texto, _ = _preguntar_ia(mensaje)
+        texto, _ = _preguntar_ia(mensaje, system_prompt=PROMPT_VERIFICACION, buscar_web=False)
         upper = (texto or "").upper()
         if "ACIERTO" in upper:
             votos.append("ACIERTO")
@@ -1433,7 +1675,7 @@ def _resolver_pick_con_ia(pick: dict):
         f"determinar con ese marcador, responde INDETERMINADO."
     )
 
-    texto, _ = _preguntar_ia(mensaje)
+    texto, _ = _preguntar_ia(mensaje, system_prompt=PROMPT_VERIFICACION, buscar_web=False)
     if not texto:
         return None
     upper = texto.upper()
@@ -1581,25 +1823,31 @@ def _detalle_resolucion(pick: dict):
     """Obtiene el detalle del partido para resolver el pick.
 
     A diferencia de get_game_detail (que para soccer solo busca en el
-    scoreboard de hoy), usa la liga guardada en el pick para consultar el
+    scoreboard de HOY), usa la liga guardada en el pick para consultar el
     summary de ESPN aunque el partido sea de dias anteriores.
+
+    El summary por evento funciona para TODOS los deportes de ESPN, no solo
+    futbol. Antes solo el Futbol lo usaba; MLB/NBA/tenis iban directos a
+    get_game_detail, que busca en el scoreboard del dia: al pasar unas horas
+    el evento ya no estaba ahi y el pick acababa ANULADO aunque el marcador
+    final estuviera disponible en ESPN. Se generaliza porque el endpoint
+    responde igual para los cuatro deportes.
     """
     import sports
 
     sport = pick["sport"]
     eid = pick["eventId"]
+    league = pick.get("league")
 
-    # Futbol: summary con la liga guardada
-    if sport == "soccer":
-        league = pick.get("league")
-        if not league:
-            return sports.get_game_detail(sport, eid)
+    # summary por evento: funciona si hay liga guardada y para cualquier
+    # deporte de ESPN.
+    if league:
         try:
             import requests as http_requests
 
             from sports import ESPN_BASE, _parse_number
 
-            url = f"{ESPN_BASE}/soccer/{league}/summary?event={eid}"
+            url = f"{ESPN_BASE}/{sport}/{league}/summary?event={eid}"
             data = http_requests.get(url, timeout=20).json()
             header = data.get("header") or {}
             comps = (header.get("competitions") or [{}])[0]
@@ -1611,11 +1859,14 @@ def _detalle_resolucion(pick: dict):
                     "score": _parse_number(c.get("score")),
                     "homeAway": c.get("homeAway"),
                 })
-            return {"state": state, "teams": teams}
+            # Si ESPN responde pero sin equipos, el evento no existe para esa
+            # liga: se cae al scoreboard del dia en vez de devolver vacio.
+            if state and len(teams) >= 2:
+                return {"state": state, "teams": teams}
         except Exception:
-            return sports.get_game_detail(sport, eid)
+            pass
 
-    # Resto de deportes: get_game_detail funciona directo
+    # Sin liga guardada o sin respuesta valida: scoreboard del dia.
     return sports.get_game_detail(sport, eid)
 
 
@@ -1909,27 +2160,33 @@ def resolver_picks_finalizados() -> dict:
     pendientes = db.list_picks_pendientes() or []
     resueltos = 0
     for pick in pendientes:
-        # Expirar picks antiguos que ya no se pueden resolver (sin liga,
-        # evento fuera de ESPN, etc.) para no bloquear la cola de pendientes
-        try:
-            creado = datetime.fromisoformat(pick.get("createdAt") or "")
-            horas = (datetime.now(timezone.utc).replace(tzinfo=None) - creado).total_seconds() / 3600
-        except (ValueError, TypeError):
-            horas = 0
-        if horas > 24:
-            db.update_pick_result(pick["id"], "ANULADO")
-            continue
-
-        # Expirar pendientes cuyo EVENTO ya paso hace mas de 3h y sigue sin
-        # resolverse (eventos fantasma de ESPN, tenis sin datos, etc.)
+        # Edad del evento y del pick. El orden importa: primero se calcula
+        # CUANDO se juega el partido, porque de eso depende que el pick siga
+        # siendo vigente.
         try:
             ev = datetime.fromisoformat(str(pick.get("eventDate") or "").replace("Z", "+00:00"))
             horas_evento = (datetime.now(timezone.utc) - ev).total_seconds() / 3600
         except (ValueError, TypeError):
             horas_evento = 0
-        if horas_evento > 3:
-            db.update_pick_result(pick["id"], "ANULADO")
+        try:
+            creado = datetime.fromisoformat(pick.get("createdAt") or "")
+            horas = (datetime.now(timezone.utc).replace(tzinfo=None) - creado).total_seconds() / 3600
+        except (ValueError, TypeError):
+            horas = 0
+
+        # El partido AUN NO ha empezado: el pick sigue vivo. Antes se anulaba
+        # por antiguedad (>24h) aunque el evento fuera dentro de horas, y el
+        # scheduler genera en una ventana de 32h: eso se llevaba por delante
+        # picks de manana que todavia no se habian jugado y nunca podian
+        # contar como acierto ni como fallo.
+        if horas_evento < 0:
             continue
+
+        # Antiguedad: el pick se anula SOLO si ya no hay nada que hacer. Se
+        # consulta primero el marcador (abajo) y solo se anula si, habiendo
+        # datos, el mercado no se puede decidir. Antes se anulaba por edad
+        # (>24h) sin mirar los datos: se llevaba por delante cientos de picks
+        # cuyo resultado final SI estaba disponible en ESPN.
 
         try:
             detail = _detalle_resolucion(pick)
@@ -1989,6 +2246,13 @@ def resolver_picks_finalizados() -> dict:
         #    con el mismo veredicto; si no, el pick queda PENDIENTE.
         ia_resultado = _resolver_pick_con_ia(pick)
         if ia_resultado is None:
+            # Hay marcador final pero el mercado no se puede decidir con el
+            # (props sin boxscore, mercados sin fuente). A partir de 72h el
+            # pick ya no va a mejorar: se anula para no dejarlo eternamente
+            # PENDIENTE. Antes este anulado no existia y todos estos picks
+            # se acumulaban en PENDIENTE sin llegar nunca a resolverse.
+            if horas > 72:
+                db.update_pick_result(pick["id"], "ANULADO")
             continue
         marcador = " vs ".join(
             f"{t.get('name', '?')} {t.get('score', '-')}"
@@ -2350,6 +2614,17 @@ def salud_scheduler() -> dict:
     )
     s["ligas_prioritarias"] = list(LIGAS_TOP_EUROPA)
     s["verificaciones_por_acierto"] = VERIFICACIONES_ACIERTO
+    # Consumo de cuota de la IA: lo primero que hay que mirar cuando el
+    # dashboard deja de generar picks.
+    try:
+        from ai.dashboard_ia import estado_consumo, MODELOS_EN_PAUSA
+
+        s["ia_consumo"] = estado_consumo()
+        s["ia_modelos_en_pausa"] = [
+            m for m, hasta in MODELOS_EN_PAUSA.items() if time.time() < hasta
+        ]
+    except Exception:
+        pass
     if _salud.get("ultima_generacion_ts"):
         s["ultima_generacion_hace_min"] = round(
             (time.time() - _salud["ultima_generacion_ts"]) / 60, 1
