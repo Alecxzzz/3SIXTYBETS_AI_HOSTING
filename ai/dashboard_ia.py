@@ -26,6 +26,7 @@ le pasa los resultados al modelo como contexto.
 Busqueda: ai.ia36.buscar_web (DuckDuckGo, ya anade mes y anio a la consulta).
 """
 
+import json
 import os
 import time
 
@@ -105,6 +106,37 @@ HORA_PUNTA = int(os.getenv("DASHBOARD_AI_HORA_PUNTA", "20"))
 
 _consumo = {"dia": "", "tokens": 0, "llamadas": 0}
 
+# REGULADOR DE ITPM (tokens de entrada por minuto). Los modelos qwen de Groq
+# aceptan 7000 tokens/min de entrada. El generador dispara peticiones seguidas
+# (un pick, y hasta 3 reintentos) y se pasa ese limite: Groq responde 413 y el
+# el ciclo se queda sin picks. Aqui se lleva la cuenta de lo enviado en la
+# ventana de un minuto y se espera antes de salir, en vez de comerse el error.
+ITPM_LIMITE = int(os.getenv("DASHBOARD_AI_ITPM", "6000"))
+ITPM_VENTANA_S = 60
+_itpm = {"marca": 0.0, "tokens": 0}
+
+
+def _itpm_registrar(tokens: int) -> None:
+    ahora = time.time()
+    if ahora - _itpm["marca"] > ITPM_VENTANA_S:
+        _itpm["marca"] = ahora
+        _itpm["tokens"] = 0
+    _itpm["tokens"] += max(0, int(tokens or 0))
+
+
+def _itpm_espera(payload: dict) -> float:
+    """Segundos que hay que esperar para no pasarse del limite de ITPM.
+
+    0 significa que todavia hay margen (no hay que esperar).
+    """
+    largo = len(json.dumps(payload, ensure_ascii=False)) // 3  # ~chars->tokens
+    if _itpm["tokens"] + largo > ITPM_LIMITE:
+        restante = ITPM_VENTANA_S - (time.time() - _itpm["marca"])
+        return max(0.0, restante)
+    _itpm_registrar(largo)
+    return 0.0
+
+
 
 def _reset_consumo() -> None:
     hoy = time.strftime("%Y-%m-%d")
@@ -151,6 +183,20 @@ def _marcar_cuota_agotada(modelo: str, motivo: str) -> None:
     )
 
 DEBUG = os.getenv("DASHBOARD_AI_DEBUG", "false").lower() == "true"
+
+# max_tokens POR MODELO. El limite OTPM (tokens de SALIDA por minuto) de Groq
+# va de 1000 a 20000 segun el modelo: pedir mas de lo que el modelo puede
+# servir por minuto devuelve 429 aunque quede cuota de dia. Un pick es un JSON
+# de ~200 tokens, asi que 2000 era ademas un desperdicio. Estos valores estan
+# por debajo del OTPM de cada modelo con margen para la respuesta.
+MAX_TOKENS_POR_MODELO = {
+    "qwen/qwen3.8-27b": 600,     # OTPM 1000
+    "allallam-2-7b": 600,
+}
+
+
+def _max_tokens_para(modelo: str) -> int:
+    return MAX_TOKENS_POR_MODELO.get(modelo, MAX_TOKENS)
 
 
 def dashboard_configurado() -> bool:
@@ -217,7 +263,7 @@ def _construir_payload(modelo: str, system_prompt: str, mensaje: str) -> dict:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": mensaje},
         ],
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": _max_tokens_para(modelo),
     }
     if modelo.startswith("openai/gpt-oss"):
         payload["reasoning_effort"] = REASONING_EFFORT
@@ -290,6 +336,17 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
         payload = _construir_payload(modelo, system_con_contexto, mensaje)
 
         for intento in range(max(1, MAX_REINTENTOS)):
+            # Espera preventiva ANTES de enviar: mejor ralentizar el ciclo que
+            # recibir un 413 y perder el pick. Solo espera si la ventana de
+            # ITPM del modelo ya esta llena.
+            espera = _itpm_espera(payload)
+            if espera > 0:
+                print(
+                    f"[Dashboard-AI] {modelo}: ITPM al limite, esperando "
+                    f"{espera:.0f}s antes de enviar",
+                    flush=True,
+                )
+                time.sleep(min(espera + 1, 70))
             try:
                 r = requests.post(
                     BASE_URL, headers=headers, json=payload, timeout=TIMEOUT
@@ -318,13 +375,33 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
                 ultimo_error = f"{modelo} devolvio content vacio"
                 if DEBUG:
                     print(f"[Dashboard-AI] {modelo}: vacio, subiendo max_tokens")
-                payload["max_tokens"] = min(MAX_TOKENS * 2, 8000)
+                # Se sube el techo de salida, pero nunca por encima del OTPM
+                # del modelo: pedir mas de lo que puede servir por minuto
+                # devolvia 429 y se perdia la respuesta.
+                payload["max_tokens"] = min(_max_tokens_para(modelo) * 2, 8000)
                 time.sleep(1)
                 continue
 
             ultimo_error = f"{modelo} {r.status_code}: {r.text[:200]}"
             if DEBUG:
                 print(f"[Dashboard-AI] {ultimo_error}", flush=True)
+
+            # 413 en Groq = ITPM (limite de tokens de ENTRADA POR MINUTO del
+            # modelo, 7000 en los qwen), NO de ventana de contexto: el prompt
+            # mide ~1000 tokens y aun asi lo rechaza porque se han enviado
+            # demasiados tokens en el minuto. Asi que no se recorta (el prompt
+            # ya es pequeno) sino que se ESPERA a que se libere la ventana.
+            if r.status_code == 413:
+                espera = _itpm_espera(payload)
+                if espera > 0:
+                    ultimo_error = f"{modelo}: ITPM saturado, esperando {espera:.0f}s"
+                    print(f"[Dashboard-AI] {ultimo_error}", flush=True)
+                    time.sleep(min(espera, 65))
+                    payload = _construir_payload(modelo, system_con_contexto, mensaje)
+                    continue
+                # La ventana no se libera: este modelo no aguanta nuestro ritmo.
+                _marcar_cuota_agotada(modelo, "ITPM: no aguanta nuestro ritmo")
+                break
 
             if r.status_code == 429:
                 # Limite de cuota/rate: no insistir con el mismo modelo ni
