@@ -14,7 +14,9 @@ Fuentes usadas:
   - ESPN site v2      -> plantilla y record de cualquier liga (NBA/NFL/NHL/fut)
 """
 
+import os
 import re
+import threading
 import time
 import unicodedata
 
@@ -310,15 +312,22 @@ def _mapa_teams():
     mapa = {}
     if data:
         for t in data.get("teams", []):
+            # OJO: la API devuelve `league` y `division` como OBJETOS
+            # ({id, name, link}), no como cadenas. Leer "leagueName" daria
+            # None y despues no se podria ubicar al equipo en su tabla.
+            liga = t.get("league") or {}
+            liga_nombre = liga.get("name") if isinstance(liga, dict) else liga
+            liga_id = liga.get("id") if isinstance(liga, dict) else None
             division = t.get("division")
             if isinstance(division, dict):
                 division = division.get("name")
             mapa[str(t.get("id"))] = {
                 "id": t.get("id"),
                 "nombre": t.get("name"),
-                "abbrev": t.get("abbrev"),
+                "abbrev": t.get("abbreviation") or t.get("abbrev"),
                 "franquicia": t.get("franchiseName"),
-                "liga": t.get("leagueName"),
+                "liga": liga_nombre,
+                "liga_id": liga_id,
                 "division": division,
                 "deporte": (t.get("sport") or {}).get("name"),
                 "venue": (t.get("venue") or {}).get("name"),
@@ -401,7 +410,183 @@ def mlb_partidos_fecha(team_id, fecha_iso):
     return _cache_put(clave, salida)
 
 
+# ------------------------------------------- standings / contexto competitivo
+
+def mlb_standings(league_id, temporada, tipo="byLeague"):
+    """Tabla de posiciones de una liga de MLB, con estado de clasificacion."""
+    clave = f"mlb:standings:{league_id}:{temporada}:{tipo}"
+    cacheado = _cache_get(clave)
+    if cacheado is not None:
+        return cacheado
+    data = _get(f"{MLB_BASE}/standings", params={
+        "leagueId": league_id, "season": temporada, "standingTypes": tipo,
+    })
+    filas = []
+    for grupo in (data or {}).get("records", []) or []:
+        for rec in grupo.get("teamRecords", []) or []:
+            equipo = rec.get("team") or {}
+            splits = {}
+            for s in (rec.get("records") or {}).get("splitRecords", []) or []:
+                splits[s.get("type")] = s
+            filas.append({
+                "id": equipo.get("id"),
+                "nombre": equipo.get("name"),
+                "wins": rec.get("wins"),
+                "losses": rec.get("losses"),
+                "pct": rec.get("winningPercentage"),
+                "divisionRank": rec.get("divisionRank"),
+                "leagueRank": rec.get("leagueRank"),
+                "gamesBack": rec.get("gamesBack"),
+                "wildCardGamesBack": rec.get("wildCardGamesBack"),
+                "lastTen": (
+                    f"{splits['lastTen']['wins']}-{splits['lastTen']['losses']}"
+                    if "lastTen" in splits else None
+                ),
+                "home": (
+                    f"{splits['home']['wins']}-{splits['home']['losses']}"
+                    if "home" in splits else None
+                ),
+                "away": (
+                    f"{splits['away']['wins']}-{splits['away']['losses']}"
+                    if "away" in splits else None
+                ),
+                "runDiff": rec.get("runDifferential"),
+                "clinched": rec.get("clinched"),
+                "divisionLeader": rec.get("divisionLeader"),
+                "divisionChamp": rec.get("divisionChamp"),
+                "eliminacion": rec.get("wildCardEliminationNumber"),
+                "streak": (rec.get("streak") or {}).get("streakCode"),
+            })
+    return _cache_put(clave, filas)
+
 def mlb_lanzadores_titulares(game_pk):
+    """Lanzadores titulares CONFIRMADOS de un partido de MLB (boxscore)."""
+    if not game_pk:
+        return []
+    clave = f"mlb:box:{game_pk}"
+    cacheado = _cache_get(clave)
+    if cacheado is not None:
+        return cacheado
+    data = _get(f"{MLB_BASE}/game/{game_pk}/boxscore")
+    titulares = []
+    if data:
+        for lado in ("away", "home"):
+            equipo = ((data.get("teams") or {}).get(lado) or {})
+            for _pid, info in (equipo.get("players") or {}).items():
+                posicion = ((info.get("position") or {}).get("abbreviation") or "")
+                bateo = ((info.get("stats") or {}).get("battingOrder") or "")
+                # El lanzador titular es el que bate 1 en el orden de bateo
+                if posicion == "P" and str(bateo) in ("1", "1.0"):
+                    titulares.append({
+                        "equipo": (equipo.get("team") or {}).get("name"),
+                        "nombre": (info.get("person") or {}).get("fullName"),
+                        "posicion": posicion,
+                    })
+    return _cache_put(clave, titulares)
+
+
+def stance_mlb(nombre_equipo, temporada):
+    """
+    Fila de la tabla de un equipo de MLB con su situacion de MOTIVACION:
+    por que ese partido importa (titulo, playoffs, eliminacion o nada en juego).
+    """
+    tid = mlb_team_id(nombre_equipo)
+    if not tid:
+        return None
+    mapa = _mapa_teams().get(str(tid), {})
+    # league_id viene directo del endpoint de equipos (103 = AL, 104 = NL).
+    league_id = mapa.get("liga_id")
+    if not league_id:
+        league_id = {"american league": "103", "national league": "104"}.get(
+            (mapa.get("liga") or "").lower()
+        )
+    if not league_id:
+        return None
+
+    filas = mlb_standings(league_id, temporada)
+    fila = next((f for f in filas if str(f.get("id")) == str(tid)), None)
+    if not fila:
+        return None
+
+    ordenadas = sorted(
+        filas, key=lambda f: (f.get("wins") or 0), reverse=True
+    )
+    fila["posicion_real"] = ordenadas.index(fila) + 1
+    fila["total_equipos"] = len(ordenadas)
+    fila["lider"] = ordenadas[0]
+    return fila
+
+
+def motivation_text(estado):
+    """
+    Traduce la situacion de tabla a lenguaje de motivacion. Esto es lo que
+    le dice al modelo POR QUE ese partido importa de verdad.
+    """
+    if not estado:
+        return ""
+    partes = []
+
+    pos = estado.get("posicion_real")
+    total = estado.get("total_equipos")
+    if pos and total:
+        partes.append(f"Posicion {pos} de {total} en su liga.")
+
+    if estado.get("divisionChamp"):
+        partes.append("Ya GANO su division: juega por asegurar el primer puesto.")
+    elif estado.get("divisionLeader"):
+        partes.append("Va LIDER de la division: defender la ventaja es la motivacion.")
+    elif estado.get("clinched"):
+        partes.append(
+            "Ya esta CLASIFICADO a playoffs: el objetivo ahora es llegar fuerte."
+        )
+
+    elim = estado.get("eliminacion")
+    # La API usa "-" si sigue vivo y "E" (eliminados) si ya no hay retorno.
+    if elim in ("E", "e", "ELIMINATED"):
+        partes.append(
+            "Esta ELIMINADO: ya no hay nada en juego. Se suelen rotar las "
+            "bajas y baja el rendimiento, con mas tendencia a perder por margen."
+        )
+    elif elim not in ("-", "", None):
+        try:
+            n = float(elim)
+            if n <= 10:
+                partes.append(
+                    f"A {elim} juegos de la eliminacion: esta en el limite EXACTO, "
+                    "cada partido es de vida o muerte."
+                )
+            else:
+                partes.append(f"A {elim} juegos de la eliminacion: aun con margen.")
+        except (TypeError, ValueError):
+            partes.append(f"Eliminacion a {elim} juegos.")
+
+    gb = estado.get("gamesBack")
+    lider = estado.get("lider") or {}
+    eliminado = elim in ("E", "e", "ELIMINATED")
+    if not eliminado and gb not in ("-", "", None) and lider:
+        try:
+            n = float(gb)
+            if n <= 3:
+                partes.append(
+                    f"Solo {gb} juegos por detras del lider ({lider.get('nombre')}, "
+                    f"{lider.get('wins')}-{lider.get('losses')}): pelea por el titulo abierta."
+                )
+            elif n <= 10:
+                partes.append(f"A {gb} juegos del lider: pelea por puesto de honor.")
+            else:
+                partes.append(
+                    f"A {gb} juegos del lider: el objetivo realista son los playoffs."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    racha = estado.get("streak")
+    if racha:
+        tipo = "victorias" if str(racha).startswith("W") else "derrotas"
+        partes.append(f"Viene de {racha} ({tipo} seguidas).")
+
+    return " ".join(partes)
+
     """Lanzadores titulares CONFIRMADOS de un partido de MLB (boxscore)."""
     if not game_pk:
         return []
@@ -559,7 +744,8 @@ def contexto_equipo(nombre_equipo, fecha_iso=None):
     ctx = {
         "encontrado": False, "nombre": None, "competicion": None, "liga": None,
         "deporte": None, "record": None, "tabla": None, "division": None,
-        "plantilla": [], "partido_real": None, "rival_real": None, "notas": [],
+        "plantilla": [], "partido_real": None, "rival_real": None, "rival_id": None,
+        "notas": [], "id": None,
     }
 
     tid = mlb_team_id(nombre_equipo)
@@ -568,7 +754,9 @@ def contexto_equipo(nombre_equipo, fecha_iso=None):
         info = {
             "id": int(tid),
             "nombre": datos.get("nombre"),
-            "competicion": datos.get("liga") or _nombre_liga("mlb"),
+            # La liga del endpoint es "American/National League": se
+            # expande a la descripcion completa de MLB.
+            "competicion": _nombre_liga("mlb", datos.get("liga")),
             "liga_slug": "mlb",
             "deporte": "baseball",
             "division": datos.get("division"),
@@ -588,6 +776,7 @@ def contexto_equipo(nombre_equipo, fecha_iso=None):
         }
 
     ctx["encontrado"] = True
+    ctx["id"] = info["id"]
     ctx["nombre"] = info["nombre"]
     ctx["competicion"] = info["competicion"]
     ctx["liga"] = info["liga_slug"]
@@ -603,6 +792,10 @@ def contexto_equipo(nombre_equipo, fecha_iso=None):
                 ctx["partido_real"] = juego
                 es_local = _norm(juego.get("local") or "") == _norm(info["nombre"] or "")
                 ctx["rival_real"] = juego.get("visitante") if es_local else juego.get("local")
+                # Id del rival en MLB: hace falta para el H2H de la temporada.
+                ctx["rival_id"] = (
+                    juego.get("localId") if es_local else juego.get("visitanteId")
+                ) or mlb_team_id(ctx["rival_real"])
                 titulares = mlb_lanzadores_titulares(juego.get("gamePk"))
                 if titulares:
                     ctx["notas"].append(
@@ -847,5 +1040,336 @@ def construir_contexto_verificacion(mensaje, fecha_iso=None):
         "del partido que SI existe en esa competicion."
     )
     return cabecera + "\n".join(cuerpo) + cierre
+
+
+
+def mlb_carga_calendario(team_id, temporada):
+    """
+    Fatiga y calendario: cuantos partidos jugados en los ultimos 7 dias y
+    cuantos les tocan en los siguientes. El agotamiento cambia el juego.
+    """
+    from datetime import datetime, timedelta
+    hoy = datetime.now()
+    clave = f"mlb:fatiga:{team_id}:{temporada}:{hoy.strftime('%Y-%m-%d')}"
+    cacheado = _cache_get(clave)
+    if cacheado is not None:
+        return cacheado
+
+    jugados, proximos, detalle = 0, 0, []
+    data = _get(f"{MLB_BASE}/schedule", params={
+        "sportId": 1, "teamId": team_id, "season": temporada,
+    })
+    for dia in (data or {}).get("dates", []) or []:
+        for juego in dia.get("games", []) or []:
+            fecha = (juego.get("gameDate") or "")[:10]
+            try:
+                d = datetime.strptime(fecha, "%Y-%m-%d")
+            except ValueError:
+                continue
+            dias = (d.date() - hoy.date()).days
+            if -7 <= dias < 0:
+                jugados += 1
+            elif 0 <= dias <= 7:
+                proximos += 1
+                teams = juego.get("teams", {}) or {}
+                rival = ((teams.get("away") or {}).get("team", {}) or {}).get("name")
+                local = ((teams.get("home") or {}).get("team", {}) or {}).get("name")
+                detalle.append(f"{fecha}: {rival} @ {local}")
+    return _cache_put(clave, {
+        "jugados_7d": jugados,
+        "proximos_7d": proximos,
+        "detalle": detalle[:5],
+    })
+
+
+def mlb_h2h_equipo(team_id, rival_id, temporada, limite=6):
+    """Partidos directos entre dos equipos de MLB en la temporada."""
+    clave = f"mlb:h2h:{team_id}:{rival_id}:{temporada}"
+    cacheado = _cache_get(clave)
+    if cacheado is not None:
+        return cacheado
+    data = _get(f"{MLB_BASE}/schedule", params={
+        "sportId": 1, "teamId": team_id, "opponentId": rival_id, "season": temporada,
+    })
+    juegos = []
+    for dia in (data or {}).get("dates", []) or []:
+        for juego in dia.get("games", []) or []:
+            teams = juego.get("teams", {}) or {}
+            away = (teams.get("away") or {}).get("team", {}) or {}
+            home = (teams.get("home") or {}).get("team", {}) or {}
+            juegos.append({
+                "fecha": juego.get("officialDate"),
+                "partido": f"{away.get('name')} @ {home.get('name')}",
+                "marcador": (f"{(teams.get('away') or {}).get('score')}-"
+                             f"{(teams.get('home') or {}).get('score')}"),
+                "estado": ((juego.get("status") or {}).get("detailedState") or ""),
+            })
+    return _cache_put(clave, sorted(juegos, key=lambda j: j.get("fecha") or "")[-limite:])
+
+
+
+# ------------------------------------------- investigacion profunda (noticias)
+
+# Consultas pensadas para sacar MOTIVACION y contexto, no solo marcador.
+_PISTAS_MLB = [
+    "{equipo} playoff race {mes} {anio} standings clinch",
+    "{equipo} injuries {mes} {anio}",
+    "{equipo} {rival} preview {mes} {anio}",
+    "{equipo} rotation {mes} {anio}",
+]
+_PISTAS_FUTBOL = [
+    "{equipo} Champions League {mes} {anio} qualification",
+    "{equipo} injuries lesionados {mes} {anio}",
+    "{equipo} {rival} previa {mes} {anio}",
+    "{equipo} forma ultimos partidos {mes} {anio}",
+]
+_PISTAS_GENERICAS = [
+    "{equipo} injuries {mes} {anio}",
+    "{equipo} {rival} preview {mes} {anio}",
+    "{equipo} standings {mes} {anio}",
+]
+
+_MESES = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+          "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+
+
+def _pistas(equipo, rival, competicion=""):
+    comp = (competicion or "").lower()
+    if "mlb" in comp or "beisbol" in comp:
+        plantilla = _PISTAS_MLB
+    elif any(k in comp for k in ("liga", "champions", "europa", "mls", "futbol")):
+        plantilla = _PISTAS_FUTBOL
+    else:
+        plantilla = _PISTAS_GENERICAS
+
+    from datetime import datetime
+    mes, anio = _MESES[datetime.now().month - 1], datetime.now().year
+    return [
+        p.format(equipo=equipo, rival=rival or "rival", mes=mes, anio=anio)
+        for p in plantilla
+    ]
+
+
+def investigar_noticias(equipo, rival=None, competicion="", max_resultados=6,
+                       limite_pistas=1):
+    """
+    Noticias recientes del equipo: lesiones, motivacion, rotacion, previa.
+
+    Usa el mismo buscador (ddgs) que ya usa 365AI, asi que no se anaden
+    dependencias.
+
+    OJO con el coste: una consulta de ddgs tarda ~10s. Por eso aqui solo se
+    lanza UNA consulta de arranque y con un reloj de pared; el resto de la
+    investigacion la hace la IA con su herramienta buscar_web, que ya sabe
+    cuando merece la pena buscar mas. Asi el chat no se cuelga.
+
+    Si no hay resultados, devuelve '' y el analisis sigue adelante con los
+    datos estructurados (tabla, motivacion, H2H), que no dependen de la web.
+    """
+    if not equipo:
+        return ""
+    clave = f"noticias:{_norm(equipo)}:{_norm(rival)}:{competicion}"
+    cacheado = _cache_get(clave)
+    if cacheado is not None:
+        return cacheado
+
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return _cache_put(clave, "")
+
+    presupuesto = float(os.getenv("AI36_NOTICIAS_SEGUNDOS", "10"))
+    vistos, notas = set(), []
+
+    def _barrer():
+        """Corre las consultas y va llenando `notas` en el hilo."""
+        try:
+            with DDGS(timeout=presupuesto) as ddgs:
+                for consulta in _pistas(equipo, rival, competicion)[:limite_pistas]:
+                    try:
+                        for r in ddgs.text(consulta, max_results=max_resultados):
+                            titulo = (r.get("title") or "").strip()
+                            cuerpo = (r.get("body") or "").strip()
+                            if not cuerpo or titulo in vistos:
+                                continue
+                            vistos.add(titulo)
+                            notas.append(f"- {titulo}: {cuerpo[:220]}")
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    # La busqueda web puede colgarse varios segundos. Se lanza en un hilo
+    # daemon y se espera como mucho `presupuesto`: si se pasa, se devuelve
+    # lo que ya se reunio en vez de bloquear la peticion del chat.
+    hilo = threading.Thread(target=_barrer, daemon=True)
+    hilo.start()
+    hilo.join(presupuesto)
+
+    return _cache_put(clave, "\n".join(notas))
+
+
+
+# ------------------------------------------- investigacion completa del partido
+
+def _bloque_mlb_equipo(equipo, ctx, rival_nombre, temporada, rival_id=None):
+    """Ficha profunda de un equipo de MLB: tabla, motivacion, ritmo, carga."""
+    lineas = []
+    tid = ctx.get("id")
+    estado = stance_mlb(equipo, temporada)
+    if estado:
+        lineas.append(
+            f"  Tabla: {estado.get('wins')}-{estado.get('losses')} "
+            f"(pct {estado.get('pct')}), differential de carreras "
+            f"{estado.get('runDiff')}, ultimos 10: {estado.get('lastTen')}, "
+            f"casa {estado.get('home')}, fuera {estado.get('away')}."
+        )
+        motiv = motivation_text(estado)
+        if motiv:
+            lineas.append(f"  MOTIVACION: {motiv}")
+
+    carga = mlb_carga_calendario(tid, temporada)
+    if carga.get("jugados_7d") is not None:
+        linea = (f"  Carga de calendario: {carga['jugados_7d']} partidos en los ultimos "
+                 f"7 dias, {carga['proximos_7d']} en los siguientes.")
+        if (carga["jugados_7d"] or 0) >= 6:
+            linea += " Agotamiento alto: el rendimiento suele bajar."
+        elif (carga["proximos_7d"] or 0) >= 7:
+            linea += " Temporada avanzada y tramo denso al frente."
+        lineas.append(linea)
+        for d in carga.get("detalle", [])[:3]:
+            lineas.append(f"    - {d}")
+
+    if rival_id:
+        h2h = mlb_h2h_equipo(tid, rival_id, temporada)
+        # Solo los partidos YA DISPUTADOS: los programados vienen con
+        # marcador "0-0" o None y ensuciarian el historico.
+        jugados = [
+            j for j in h2h
+            if j.get("marcador") and j["marcador"] not in ("None-None", "0-0")
+        ]
+        if jugados:
+            linea = "  H2H temporada: " + "; ".join(
+                f"{j['fecha']} {j['partido']} {j['marcador']}" for j in jugados[-4:]
+            )
+            # Quien ganó la serie lleva ventaja psicológica de cara al partido.
+            ganados = {}
+            for j in jugados:
+                try:
+                    a, b = (int(x) for x in j["marcador"].split("-"))
+                except (ValueError, TypeError):
+                    continue
+                visitante = (j.get("partido") or "").split(" @ ")[0]
+                local = (j.get("partido") or "").split(" @ ")[-1]
+                if a > b:
+                    ganados[visitante] = ganados.get(visitante, 0) + 1
+                elif b > a:
+                    ganados[local] = ganados.get(local, 0) + 1
+            if ganados:
+                dominador = max(ganados, key=ganados.get)
+                linea += (f"  Suma la serie {dominador} "
+                          f"{ganados[dominador]}-{sum(ganados.values()) - ganados[dominador]}.")
+            lineas.append(linea)
+    return lineas
+
+
+def construir_investigacion(mensaje, fecha_iso=None, con_noticias=True):
+    """
+    INVESTIGACION PROFUNDA del partido: que se juega, por quien, contra quien,
+    en que competicion, con que motivacion, en que forma y con que-fatiga.
+
+    Es el bloque que el modelo recibe antes de analizar. Devuelve "" si el
+    mensaje no menciona entidades reconocibles.
+    """
+    if not mensaje or not mensaje.strip():
+        return ""
+    from datetime import datetime
+    hoy = fecha_iso or datetime.now().strftime("%Y-%m-%d")
+    temporada = int(hoy[:4])
+
+    jugadores, equipos = extraer_entidades(mensaje)
+    cuerpo = []
+
+    # --- 1. Jugadores: equipo real, rol y si el partido es real ---
+    for nombre in jugadores:
+        v = verificar_jugador_en_equipo(nombre)
+        if not v.get("encontrado"):
+            cuerpo.append(f"- {nombre}: {v['motivo']}")
+            continue
+        linea = (f"- {nombre} ({v.get('posicion') or 'jugador'}) juega en "
+                 f"{v['equipo_real']} dentro de {v['competicion']}.")
+        if v.get("motivo"):
+            linea += f"  {v['motivo']}"
+        cuerpo.append(linea)
+
+    # --- 2 y 3. Equipos: cabecera + profundidad de MLB (tabla, motivacion,
+    #         carga de calendario, H2H y plantilla) en el MISMO bucle, para
+    #         que cada dato quede bajo su equipo y no al final mezclado.
+    fichas = []
+    for nombre in equipos:
+        ctx = contexto_equipo(nombre, hoy)
+        if not ctx.get("encontrado"):
+            cuerpo.extend(f"- {n}" for n in ctx.get("notas", []))
+            continue
+        ctx["nombre_pedido"] = nombre
+        fichas.append(ctx)
+        bloque = []
+        bloque.append("")
+        bloque.append(f"EQUIPO: {nombre} -> {ctx['nombre']}")
+        bloque.append(f"  Competicion: {ctx['competicion']}"
+                      + (f" | Division: {ctx['division']}" if ctx.get("division") else ""))
+        if ctx.get("record"):
+            bloque.append(f"  Record: {ctx['record']}")
+        if ctx.get("tabla"):
+            bloque.append(f"  En la tabla: {ctx['tabla']}")
+        if ctx.get("partido_real"):
+            pr = ctx["partido_real"]
+            bloque.append(
+                f"  PARTIDO REAL DE HOY ({hoy}): {pr['visitante']} vs {pr['local']} "
+                f"({pr.get('estado') or 'programado'}). Rival real: {ctx['rival_real']}."
+            )
+        elif ctx.get("rival_real"):
+            bloque.append(f"  Rival: {ctx['rival_real']}")
+
+        if ctx.get("liga") == "mlb":
+            bloque.extend(_bloque_mlb_equipo(
+                ctx.get("nombre"), ctx, ctx.get("rival_real"),
+                temporada, ctx.get("rival_id"),
+            ))
+            if ctx.get("plantilla"):
+                bloque.append(
+                    f"  Plantilla ({len(ctx['plantilla'])}): "
+                    + ", ".join(ctx["plantilla"][:16])
+                )
+            for n in ctx.get("notas", []):
+                if "titulares" in n.lower():
+                    bloque.append(f"  {n}")
+
+        cuerpo.extend(bloque)
+
+    if not cuerpo:
+        return ""
+
+    # --- 4. Noticias: lesiones, rotacion y motivacion reciente ---
+    if con_noticias and fichas:
+        principal = fichas[0]
+        noticias = investigar_noticias(
+            principal.get("nombre"), principal.get("rival_real"),
+            principal.get("competicion") or "",
+        )
+        if noticias:
+            cuerpo.append("")
+            cuerpo.append("NOTICIAS Y CONTEXTO RECIENTE (lesiones, rotacion, motivacion):")
+            cuerpo.append(noticias)
+
+    return (
+        "\n\n" + "#" * 66 + "\n"
+        "INVESTIGACION PROFUNDA DEL PARTIDO (datos oficiales + noticias)\n"
+        "Responde a: QUE se juega, en QUE competicion, POR que importa\n"
+        "(motivacion), en QUE forma llega cada equipo y con que desgaste.\n"
+        "Usa TODO esto como base. No inventes lo que no este aqui.\n"
+        + "#" * 66 + "\n"
+        + "\n".join(cuerpo)
+    )
 
     return _cache_put(clave, titulares)

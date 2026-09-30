@@ -109,6 +109,77 @@ class TestVerificacionOnline(unittest.TestCase):
         self.assertEqual(ctx["deporte"], "futbol")
 
 
+class TestInvestigacionProfunda(unittest.TestCase):
+    """El bloque que se inyecta antes de pedirle el analisis a la IA."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not _red_disponible():
+            raise unittest.SkipTest("Sin acceso a las APIs de MLB")
+
+    def test_incluye_motivacion_y_contexto(self):
+        txt = v.construir_investigacion(
+            "Philadelphia Phillies vs Atlanta Braves", "2026-09-30",
+            con_noticias=False,
+        )
+        self.assertIn("INVESTIGACION PROFUNDA", txt)
+        self.assertIn("MOTIVACION:", txt)
+        self.assertIn("Tabla:", txt)
+        self.assertIn("H2H temporada:", txt)
+        self.assertIn("Carga de calendario:", txt)
+        # La competicion debe decir MLB, no "National League" a secas.
+        self.assertIn("MLB", txt)
+
+    def test_h2h_solo_partidos_disputados(self):
+        """Los partidos programados vienen con marcador 0-0 y deben excluirse."""
+        h2h = v.mlb_h2h_equipo(143, 144, 2026)
+        self.assertTrue(h2h)
+        jugados = [j for j in h2h if j["marcador"] not in ("0-0", "None-None")]
+        self.assertTrue(jugados, "Deberia haber H2H ya disputado")
+        for j in jugados:
+            self.assertNotEqual(j["marcador"], "0-0")
+
+    def test_motivacion_texto_segun_situacion(self):
+        """La motivacion cambia segun donde este el equipo."""
+        elimination = v.motivation_text({
+            "posicion_real": 14, "total_equipos": 15, "eliminacion": "3",
+            "gamesBack": "20", "streak": "L2",
+            "lider": {"nombre": "Yankees", "wins": 100, "losses": 50},
+        })
+        self.assertIn("3 juegos de la eliminacion", elimination)
+        self.assertIn("vida o muerte", elimination)
+        self.assertIn("L2", elimination)
+
+        campeon = v.motivation_text({
+            "posicion_real": 1, "total_equipos": 15, "divisionChamp": True,
+            "clinched": True, "gamesBack": "-", "eliminacion": "-",
+            "streak": "W3",
+            "lider": {"nombre": "Yankees", "wins": 100, "losses": 50},
+        })
+        self.assertIn("GANO su division", campeon)
+        self.assertNotIn("eliminacion", campeon)
+
+    def test_carga_de_calendario_es_realista(self):
+        """Un equipo no juega 81 partidos en 7 dias (bug del filtro de fechas)."""
+        carga = v.mlb_carga_calendario(143, 2026)
+        self.assertIsNotNone(carga["jugados_7d"])
+        self.assertLessEqual(carga["jugados_7d"], 10)
+        self.assertLessEqual(carga["proximos_7d"], 10)
+
+    def test_charla_no_dispara_investigacion(self):
+        for texto in ("hola", "..", "123", "gracias!"):
+            self.assertEqual(v.construir_investigacion(texto), "")
+
+    def test_alerta_roster_sigue_presente(self):
+        """La correccion de plantilla no se perdio al anadir la investigacion."""
+        txt = v.construir_investigacion(
+            "Texas Rangers (Tyler Mahle) vs Philadelphia Phillies", "2026-09-30",
+            con_noticias=False,
+        )
+        self.assertIn("Atlanta Braves", txt)
+        self.assertIn("Philadelphia Phillies vs Atlanta Braves", txt)
+
+
 if __name__ == "__main__":
     # unittest escribe el progreso en stderr; se usa un TextTestRunner con
     # stream explicito para que no se confunda con un error de powershell.

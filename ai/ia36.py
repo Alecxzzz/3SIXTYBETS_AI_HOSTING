@@ -101,12 +101,16 @@ tools = [
         "function": {
             "name": "verificar_plantilla",
             "description": (
-                "VERIFICA CON FUENTE OFICIAL a que equipo pertenece realmente un jugador "
-                "y devuelve la competicion (liga), division, record, plantilla activa y el "
-                "partido real de ese equipo en la fecha de hoy. USA ESTA HERRAMIENTA "
-                "OBLIGATORIAMENTE antes de analizar cualquier partido donde se mencionen "
-                "jugadores: es la unica forma de no inventarse que alguien juega en un equipo "
-                "donde no juega. Devuelve tambien el rival REAL de la fecha."
+                "INVESTIGA A FONDO un partido en la fuente oficial. Devuelve, por "
+                "equipo: la COMPETICION y division, el record, la situacion en la "
+                "tabla, la MOTIVACION real (si pelean por el titulo, por el acceso "
+                "a playoffs, si estan eliminados o si ya no tienen nada en juego), "
+                "la forma reciente, la carga de calendario/fatiga, el H2H de la "
+                "temporada y el partido REAL de esa fecha. "
+                "Tambien acepta un jugador: te dice a que equipo pertenece de "
+                "verdad. USA ESTA HERRAMIENTA OBLIGATORIAMENTE antes de analizar "
+                "cualquier partido con jugadores: es la unica forma de no "
+                "inventarse que alguien juega en un equipo donde no juega."
             ),
             "parameters": {
                 "type": "object",
@@ -245,6 +249,8 @@ def verificar_plantilla(equipo, jugador=None):
     try:
         from ai.verificacion import (
             contexto_equipo,
+            motivation_text,
+            stance_mlb,
             verificar_jugador_en_equipo,
         )
     except Exception as exc:
@@ -275,6 +281,23 @@ def verificar_plantilla(equipo, jugador=None):
                 lineas.append(f"Record: {ctx['record']}")
             if ctx.get("tabla"):
                 lineas.append(f"Tabla: {ctx['tabla']}")
+            # Situacion de tabla y por que importa: la motivacion real.
+            try:
+                from datetime import datetime
+                temporada = datetime.now().year
+                estado = stance_mlb(ctx["nombre"], temporada)
+            except Exception:
+                estado = None
+            if estado:
+                lineas.append(
+                    f"Posicion {estado.get('posicion_real')} de "
+                    f"{estado.get('total_equipos')} | {estado.get('wins')}-"
+                    f"{estado.get('losses')} | ultimos 10: {estado.get('lastTen')} | "
+                    f"casa {estado.get('home')} | fuera {estado.get('away')}"
+                )
+                motiv = motivation_text(estado)
+                if motiv:
+                    lineas.append(f"MOTIVACION: {motiv}")
             if ctx.get("partido_real"):
                 pr = ctx["partido_real"]
                 lineas.append(
@@ -623,20 +646,22 @@ def analizar_36ai(mensaje_usuario, system_prompt):
         fecha_hoy = ""
         fecha_iso = ""
 
-    # VERIFICACION DE PLANTILLA Y COMPETICION (fuente oficial).
-    # Sin esto el modelo se inventa el roster: realmnte paso con
-    # "Texas Rangers (Tyler Mahle) vs Phillies" cuando Mahle juega en Atlanta.
+    # INVESTIGACION PROFUNDA: competicion, motivacion, forma, H2H y noticias.
+    # Sin esto el modelo se inventa el roster (realmnte paso con
+    # "Texas Rangers (Tyler Mahle)", cuando Mahle juega en Atlanta Braves)
+    # y ademas no sabe POR QUE importa el partido.
     try:
-        from ai.verificacion import construir_contexto_verificacion
-        bloque_verificacion = construir_contexto_verificacion(mensaje_usuario, fecha_iso)
+        from ai.verificacion import construir_investigacion
+        bloque_investigacion = construir_investigacion(mensaje_usuario, fecha_iso)
     except Exception as exc:
-        bloque_verificacion = ""
+        bloque_investigacion = ""
         if DEBUG:
-            print(f"[36AI] verificacion no disponible: {exc}")
+            print(f"[36AI] investigacion no disponible: {exc}")
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"[Fecha actual: {fecha_hoy}] Analiza: {mensaje_usuario}{bloque_verificacion}"}
+        {"role": "user",
+         "content": f"[Fecha actual: {fecha_hoy}] Analiza: {mensaje_usuario}{bloque_investigacion}"}
     ]
 
     modelo_en_uso = None

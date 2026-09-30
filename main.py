@@ -703,17 +703,19 @@ def chat(request: Request, data: Chat,
         f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
         if ctx_espn else ""
     )
-    # Verificacion de plantilla/competicion desde fuente oficial. Impide que
-    # la IA se invente que un jugador juega en un equipo donde no juega
-    # (bug real: "Texas Rangers (Tyler Mahle)", cuando Mahle esta en Atlanta).
+    # Investigacion profunda del partido (competicion, motivacion, forma,
+    # H2H y noticias) desde fuente oficial. Impide que la IA se invente que
+    # un jugador juega en un equipo donde no juega (bug real: "Texas Rangers
+    # (Tyler Mahle)", cuando Mahle esta en Atlanta Braves) y le da el
+    # contexto de POR QUE importa el partido.
     bloque_verif = ""
     if parece_partido:
         try:
-            from ai.verificacion import construir_contexto_verificacion
-            bloque_verif = construir_contexto_verificacion(data.mensaje)
+            from ai.verificacion import construir_investigacion
+            bloque_verif = construir_investigacion(data.mensaje)
         except Exception as exc:
             bloque_verif = ""
-            print(f"[Chat-verif] no disponible: {exc}", flush=True)
+            print(f"[Chat-investigacion] no disponible: {exc}", flush=True)
     # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
     fallo_365 = False
     if modelo_id in ("36ai", "36", "ia36", "groq"):
