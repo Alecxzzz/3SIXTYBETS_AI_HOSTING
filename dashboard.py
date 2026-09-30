@@ -1117,6 +1117,64 @@ def _form_jugadores_props(mercados_reales: list, limite: int = 4) -> str:
     )
 
 
+def _pick_deterministico(partido: dict, mercados_reales: list, label: str):
+    """Elige el mejor pick SIN llamar a la IA.
+
+    Por que existe: la cuota de Groq es por dia y, cuando se agota, el ciclo
+    terminaba con 0 picks aunque el bookmaker tuviera mercados con cuota
+    real. Pero esos mercados ya traen la informacion que hace falta:
+      * la cuota REAL (menor cuota = mayor probabilidad de acierto) y
+      * la efectividad medida de cada mercado en produccion (peso_mercado).
+
+    Asi que el pick se elige por el mismo criterio que usaba la IA en su
+    regla 5 ('la apuesta mas FACIL de acertar con valor'), pero sin gastar un
+    solo token: el mercado resoluble de mayor peso y, a igualdad, el de menor
+    cuota. El resultado es defendible y, a diferencia de una estimacion de la
+    IA, la cuota es la real del bookmaker.
+
+    Devuelve None si no hay ningun mercado publicable y resoluble.
+    """
+    if not mercados_reales:
+        return None
+    candidatos = [m for m in mercados_reales if mercado_resoluble(m.get("market") or "")]
+    if not candidatos:
+        return None
+
+    def _clave(m):
+        return (-peso_mercado(m.get("market") or ""), float(m.get("odds") or 9.9))
+
+    mejor = sorted(candidatos, key=_clave)[0]
+    cuota = float(mejor.get("odds") or 0)
+    peso = peso_mercado(mejor.get("market") or "")
+    es_golden = _es_golden(cuota) and peso >= 80
+    if es_golden:
+        confianza = "ALTA"
+    elif peso >= 85:
+        confianza = "ALTA"
+    elif peso >= 70:
+        confianza = "MEDIA"
+    else:
+        confianza = "BAJA"
+    return {
+        "market": mejor.get("market"),
+        "titulo": mejor.get("titulo"),
+        "selection": mejor.get("selection"),
+        "odds": cuota,
+        "confidence": confianza,
+        "rationale": (
+            f"Elegido por criterio cuantitativo: mercado de efectividad "
+            f"probada (peso {peso}/100) y la cuota mas baja entre los "
+            f"resolubles de este partido, que es la que mas probabilidad de "
+            f"acierto tiene. Cuota real del bookmaker, no estimada."
+        ),
+        "stats": [
+            f"Cuota real: {cuota} (menor = mas probable)",
+            f"Mercado: {mejor.get('market')}",
+            f"Seleccion: {mejor.get('selection')}",
+        ],
+    }
+
+
 def _priorizar_mercados(mercados: list) -> list:
     """Ordena el catalogo de un deporte: primero los que mas aciertan y mas
     se resuelven. La IA elige de esta lista, asi que subir aqui el peso de los
@@ -1629,12 +1687,26 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         texto, modelo = _preguntar_ia(mensaje, p["sport"])
         pick = _parsear_pick_json(texto)
 
+        if not pick and modelo == "SIN_CUOTA":
+            # SIN_CUOTA: la IA no respondio (TPD/ITPM de Groq agotado, 402 de
+            # You.com). Antes aqui se cortaba el ciclo y el dia se quedaba sin
+            # picks. Ahora se sigue con ELECCION CUANTITATIVA sobre los mercados
+            # reales que ya tenemos: no gasta un solo token y la cuota es la
+            # verdadera del bookmaker, no una estimacion de la IA.
+            if not sin_cuota:
+                print(
+                    "[Dashboard] IA sin cuota: se generan picks por criterio "
+                    "cuantitativo sobre los mercados reales",
+                    flush=True,
+                )
+            sin_cuota = True
+            errores += 1
+            pick = _pick_deterministico(p, markets_reales, label)
+            modelo = "cuantitativo (sin IA)"
+            if not pick:
+                break
+
         if not pick:
-            # SIN_CUOTA: ningun proveedor respondio (402 de You.com / 429 de
-            # Groq). No se descarta el partido y se corta el ciclo: seguir
-            # preguntando a los ~90 partidos restantes solo gastaria cuota y
-            # haria que el ciclo tardara minutos. Los partidos quedan
-            # disponibles para el siguiente ciclo.
             if modelo == "SIN_CUOTA":
                 errores += 1
                 sin_cuota = True
