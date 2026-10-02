@@ -19,7 +19,6 @@ import re
 import threading
 import time
 import unicodedata
-
 import requests
 
 ESPN_SEARCH_URL = "https://site.api.espn.com/apis/search/v2"
@@ -68,16 +67,29 @@ DEPORTE_ES = {
 }
 
 LIGA_ES = {
-    "mlb": "MLB (Major League Baseball, beisbol de utmost nivel de USA)",
+    # --- USA: deportes principales ---
+    "mlb": "MLB (Major League Baseball, beisbol de maximo nivel de USA)",
     "nba": "NBA (basquetbol profesional de USA)",
     "wnba": "WNBA (basquetbol femenino de USA)",
     "nfl": "NFL (futbol americano profesional de USA)",
     "nhl": "NHL (hockey sobre hielo profesional de USA)",
+    "mls": "MLS (futbol de Estados Unidos y Canada)",
+    "nwsl": "NWSL (futbol femenino de USA)",
+
+    # --- USA: universitario ---
+    "college-football": "NCAA Football (futbol americano universitario)",
+    "mens-college-basketball": "NCAA Basketball masculino",
+    "womens-college-basketball": "NCAA Basketball femenino",
+    "college-baseball": "NCAA Baseball (beisbol universitario)",
+
+    # --- Tenis / individuales ---
     "atp": "ATP (tenis masculino profesional)",
     "wta": "WTA (tenis femenino profesional)",
-    "mls": "MLS (futbol de Estados Unidos y Canada)",
-    "uefa.champions": "UEFA Champions League",
-    "uefa.europa": "UEFA Europa League",
+    "f1": "Formula 1",
+    "pga": "PGA Tour (golf)",
+    "ufc": "UFC (artes marciales mixtas)",
+
+    # --- Futbol: Europa (primeras divisiones) ---
     "eng.1": "Premier League (Inglaterra)",
     "esp.1": "LaLiga (Espana)",
     "ita.1": "Serie A (Italia)",
@@ -85,6 +97,51 @@ LIGA_ES = {
     "fra.1": "Ligue 1 (Francia)",
     "por.1": "Liga Portugal",
     "ned.1": "Eredivisie (Paises Bajos)",
+    "bel.1": "Pro League (Belgica)",
+    "sco.1": "Scottish Premiership (Escocia)",
+    "tur.1": "Super Lig (Turquia)",
+    "gre.1": "Super League (Grecia)",
+
+    # --- Futbol: Europa (segundas divisiones y copas) ---
+    "eng.2": "EFL Championship (Inglaterra)",
+    "esp.2": "LaLiga 2 (Espana)",
+    "ita.2": "Serie B (Italia)",
+    "ger.2": "2. Bundesliga (Alemania)",
+    "fra.2": "Ligue 2 (Francia)",
+    "eng.fa": "FA Cup (Inglaterra)",
+    "eng.league_cup": "EFL Cup / Carabao Cup (Inglaterra)",
+    "esp.copa_del_rey": "Copa del Rey (Espana)",
+
+    # --- Futbol: torneos UEFA ---
+    "uefa.champions": "UEFA Champions League",
+    "uefa.europa": "UEFA Europa League",
+    "uefa.europa.conf": "UEFA Conference League",
+    "uefa.nations": "UEFA Nations League",
+
+    # --- Futbol: America Latina ---
+    "mex.1": "Liga MX (Mexico)",
+    "arg.1": "Liga Profesional (Argentina)",
+    "bra.1": "Brasileirao Serie A (Brasil)",
+    "col.1": "Liga BetPlay (Colombia)",
+    "chi.1": "Primera Division (Chile)",
+    "uru.1": "Primera Division (Uruguay)",
+    "ecu.1": "LigaPro (Ecuador)",
+    "par.1": "Division Profesional (Paraguay)",
+    "per.1": "Liga 1 (Peru)",
+
+    # --- Futbol: torneos continentales y selecciones ---
+    "conmebol.libertadores": "Copa Libertadores",
+    "conmebol.sudamericana": "Copa Sudamericana",
+    "concacaf.champions": "CONCACAF Champions Cup",
+    "concacaf.gold": "Copa Oro CONCACAF",
+    "fifa.world": "Copa Mundial FIFA",
+    "fifa.friendly": "Amistosos internacionales",
+
+    # --- Futbol: resto del mundo ---
+    "aus.1": "A-League (Australia)",
+    "jpn.1": "J1 League (Japon)",
+    "chn.1": "Super Liga (China)",
+    "ksa.1": "Saudi Pro League (Arabia Saudita)",
 }
 
 _CACHE = {}
