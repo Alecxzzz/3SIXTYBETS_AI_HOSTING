@@ -2337,6 +2337,25 @@ _segment_cache = {}  # key: tsUrl -> { buffer, timestamp, contentType }
 _segment_cache_lock = threading.Lock()
 _SEGMENT_CACHE_TTL = 30  # segundos
 
+# Techo de entradas. Sin este tope la cache crece solo (TTL 30s) y guarda el
+# buffer completo de cada .ts en RAM: con varios usuarios simultaneos el
+# contenedor supera el limite de memoria, Northflank lo reinicia y TODA la TV
+# cae de golpe sin que el error apunte al proxy.
+_SEGMENT_CACHE_MAX = 400
+
+# Precargas en vuelo por manifiesto. hls.js vuelve a pedir el manifest cada
+# TARGETDURATION (~6s); sin este cerrojo cada peticion relanza el hilo que
+# descarga la ventana de segmentos, asi que el mismo .ts se descarga 2 veces y
+# los hilos se acumulan (de ahi la falta de estabilidad). Con el cerrojo solo
+# hay UNA precarga activa por base_url.
+_preload_lock = threading.Lock()
+_preload_en_curso = set()  # base_url
+
+# Maximo de segmentos a precargar por manifiesto. La ventana util para arrancar
+# son los primeros; bajar el resto duplicaba ancho de banda sin aportar al
+# time-to-first-frame.
+_PRELOAD_MAX_SEGMENTOS = 8
+
 def _clean_segment_cache():
     """Elimina segmentos expirados del caché."""
     now = _time.time()
@@ -2344,6 +2363,11 @@ def _clean_segment_cache():
         expired = [k for k, v in _segment_cache.items() if now - v["timestamp"] > _SEGMENT_CACHE_TTL]
         for k in expired:
             del _segment_cache[k]
+        # Eviction por antiguedad si aun asi se supera el techo.
+        if len(_segment_cache) > _SEGMENT_CACHE_MAX:
+            orden = sorted(_segment_cache.items(), key=lambda kv: kv[1]["timestamp"])
+            for k, _v in orden[: len(_segment_cache) - _SEGMENT_CACHE_MAX]:
+                del _segment_cache[k]
 
 def _preload_segments(manifest_text, base_url, headers):
     """
@@ -2368,6 +2392,10 @@ def _preload_segments(manifest_text, base_url, headers):
             except Exception:
                 pass
 
+        # Solo la ventana de arranque: descargar toda la lista multiplicaba el
+        # trafico sin mejorar el time-to-first-frame.
+        ts_urls = ts_urls[:_PRELOAD_MAX_SEGMENTOS]
+
         for url in ts_urls:
             with _segment_cache_lock:
                 if url in _segment_cache:
@@ -2389,7 +2417,21 @@ def _preload_segments(manifest_text, base_url, headers):
         _clean_segment_cache()
 
     # Lanzar la precarga en segundo plano: no bloquea la respuesta del manifest.
-    _t = threading.Thread(target=_fetch_all, daemon=True)
+    # El cerrojo evita que dos peticiones del mismo manifest (hls.js refresca cada
+    # ~6s) lancen dos descargas de los MISMOS segmentos a la vez.
+    with _preload_lock:
+        if base_url in _preload_en_curso:
+            return
+        _preload_en_curso.add(base_url)
+
+    def _run():
+        try:
+            _fetch_all()
+        finally:
+            with _preload_lock:
+                _preload_en_curso.discard(base_url)
+
+    _t = threading.Thread(target=_run, daemon=True)
     _t.start()
 
 # Cabeceras que no deben retransmitirse al cliente
@@ -2681,8 +2723,16 @@ def cdnlivetv_fresh(name: str, code: str):
     codigos = [code] + [c for c in ("us", "ca", "uk", "mx") if c != code]
     ultimo_motivo = "sin stream"
 
+    # Presupuesto de tiempo: 3 intentos x 4 codigos con probes de 15s podian
+    # tardar minutos, y para entonces el token ya habia expirado. Cortamos el
+    # bucle al pasar el presupuesto y devolvemos lo que haya (o el ultimo
+    # cacheado), que es lo que el player puede usar de verdad.
+    deadline = _time.time() + 25
+
     for attempt in range(3):
         for c in codigos:
+            if _time.time() > deadline:
+                break
             stream = cdnlivetv_resolve(name, c)
             if not stream:
                 ultimo_motivo = "no se encontro URL del canal"
@@ -2708,6 +2758,8 @@ def cdnlivetv_fresh(name: str, code: str):
                     ultimo_motivo = f"HTTP {probe.status_code}"
             except http_requests.RequestException as exc:
                 ultimo_motivo = f"conexion: {exc}"
+        if _time.time() > deadline:
+            break
         _time.sleep(2 * (attempt + 1))
 
     # Ultimo recurso: devolver el viejo aunque pueda estar por expirar
@@ -2982,6 +3034,15 @@ def _canales_por_liga(equipo_local: str, equipo_visita: str, sport: str) -> list
     ]
 
 
+# Cache de la agenda. Antes cada carga de "Partidos de hoy" llamaba a
+# sports.get_sport_games() para 5 deportes y a dlive_buscar_canales() por cada
+# partido: con varios usuarios a la vez eso es una avalancha al upstream y la
+# pantalla se sentia lenta/inestable (y era carga, no video).
+_AGENDA_TTL = 5 * 60
+_agenda_cache = {}  # clave -> {"data": dict, "ts": float}
+_agenda_lock = threading.Lock()
+
+
 @app.get("/tv/agenda")
 def tv_agenda(
     sport: str = None,
@@ -2993,6 +3054,12 @@ def tv_agenda(
     abre el canal que lo emite. Los partidos ya terminados se omiten por
     defecto (no tiene sentido ver un partido acabado).
     """
+    clave = f"{sport or 'todos'}|{bool(solo_pre)}"
+    with _agenda_lock:
+        hit = _agenda_cache.get(clave)
+    if hit and _time.time() - hit["ts"] < _AGENDA_TTL:
+        return hit["data"]
+
     try:
         import sports
     except Exception:
@@ -3065,11 +3132,14 @@ def tv_agenda(
     # Ordenar por hora de inicio.
     agenda.sort(key=lambda a: (a.get("date") or ""))
 
-    return {
+    payload = {
         "total": len(agenda),
         "partidos": agenda,
         "generado": int(_time.time()),
     }
+    with _agenda_lock:
+        _agenda_cache[clave] = {"data": payload, "ts": _time.time()}
+    return payload
 
 
 @app.get("/tv/canales-cdn")

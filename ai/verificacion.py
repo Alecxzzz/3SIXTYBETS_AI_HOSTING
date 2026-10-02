@@ -88,7 +88,7 @@ LIGA_ES = {
 }
 
 _CACHE = {}
-_CACHE_TTL = 900  # 15 min: la plantilla no cambia cada minuto
+_CACHE_TTL = 900 
 
 
 def _norm(texto):
