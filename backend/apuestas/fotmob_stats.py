@@ -302,17 +302,17 @@ def partido_por_equipos(home_name, away_name, fecha=None):
 
 
 def total_estadistica_de_pick(pick, metrica, periodo="All"):
-    """Total de una metrica para el partido de un pick, con respaldo.
+    """Total de una metrica para el partido de un pick, con respaldos.
 
-    CADENA DE FUENTES: primero FotMob (cubre ~75%). Solo si FotMob no devuelve
-    nada se consulta API-Football, que cubre parte del hueco restante.
+    CADENA DE FUENTES:
+        FotMob -> ESPN -> API-Football -> nada (el pick no se publica)
 
-    El orden importa por la cuota: el plan gratis de api-sports son 100
-    requests/dia. Llamarla siempre en paralelo la reventaria al segundo dia, asi
-    que solo se usa cuando FotMob ya ha fallado (~15-20 llamadas/dia).
+    Cada paso solo se ejecuta si el anterior devolvio None. FotMob va primero
+    porque es una sola llamada y ya va cacheado; ESPN cubre las ligas donde
+    FotMob falla (col.1, arg.1, mex.1...) sin aportar dependencias nuevas; y
+    API-Football queda al final porque sin key es un no-op.
 
-    Sin API_FOOTBALL_KEY el segundo paso es un no-op y el resultado es el de
-    FotMob o None.
+    Si ninguna tiene el dato se devuelve None: NUNCA se inventa un numero.
     """
     # 1) FotMob
     info = partido_por_equipos(
@@ -323,7 +323,20 @@ def total_estadistica_de_pick(pick, metrica, periodo="All"):
         if valor is not None:
             return valor
 
-    # 2) Respaldo: API-Football (solo si hay key)
+    # 2) ESPN (misma API que ya usa el sistema para marcadores)
+    try:
+        from backend.apuestas import espn_stats as es
+    except Exception:
+        es = None
+    if es is not None:
+        try:
+            valor = es.total_estadistica_de_pick(pick, metrica, periodo)
+            if valor is not None:
+                return valor
+        except Exception:
+            pass
+
+    # 3) API-Football (solo si hay key)
     try:
         from backend.apuestas import api_football as af
     except Exception:
