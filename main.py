@@ -425,6 +425,21 @@ def contexto_espn(mensaje: str) -> str:
             except Exception:
                 pass
 
+        # PROMEDIOS de corners/tarjetas/faltas por equipo (cadena FotMob ->
+        # ESPN). Antes el contexto de la conversacion solo traia goles y H2H,
+        # asi que la IA razonaba sobre corners de memoria. Con estos numeros
+        # puede contrastar una linea de mercado contra la media real.
+        try:
+            from backend.apuestas.fotmob_stats import contexto_para_ia
+
+            m = re.search(r"(.+?)\s+vs\.?\s+(.+)", mensaje or "", re.I)
+            if m:
+                extra = contexto_para_ia(m.group(1).strip(), m.group(2).strip())
+                if extra:
+                    lineas.append(extra)
+        except Exception:
+            pass
+
         if not lineas:
             return ""
         return "\n".join(lineas)

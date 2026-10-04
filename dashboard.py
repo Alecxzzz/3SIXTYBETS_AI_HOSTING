@@ -621,6 +621,23 @@ MERCADOS_MLB = [
     "Lanzador total hits permitidos incl extra innings",
 ]
 
+MERCADOS_NFL = [
+    "Ganador (incl. prorrroga overtime)",
+    "Handicap (spread)",
+    "Total de puntos del partido",
+    "Total de puntos del equipo A",
+    "Total de puntos del equipo B",
+    "Puntos del pase del jugador (over/under)",
+    "-yard del receptor (receptions + receiving yards)",
+    "Total de receptiones del jugador",
+    "Rushing yards del jugador",
+    "Sacks del jugador",
+    "Intercepciones del jugador",
+    "Field goals del kicker",
+    "Total de touchdowns del jugador (cualquier tipo)",
+    "Minimo de puntos + recepciones del jugador",
+]
+
 MERCADOS_TENIS = [
     "Ganador",
     "Juegos",
@@ -659,6 +676,10 @@ MERCADOS_POR_DEPORTE = {
     "nba": ("NBA", MERCADOS_NBA),
     "mlb": ("MLB", MERCADOS_MLB),
     "tennis": ("Tenis", MERCADOS_TENIS),
+    # NFL: el bookmaker ya lo publica (DEPORTES_EN_BOOKMAERS) pero no estaba
+    # activado. Sus props de jugador se resuelven con el boxscore de ESPN,
+    # igual que MLB con statsapi.mlb.com.
+    "nfl": ("NFL", MERCADOS_NFL),
 }
 
 DEPORTES_DASHBOARD = list(MERCADOS_POR_DEPORTE.keys())
@@ -2049,6 +2070,108 @@ def _mlb_gamepk(pick: dict):
     return None
 
 
+ESPN_NFL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
+
+
+def _nfl_boxscore(event_id):
+    """Boxscore de ESPN: lista de grupos con atletas y sus stats."""
+    try:
+        import requests
+
+        r = requests.get(f"{ESPN_NFL}/summary", params={"event": event_id},
+                         headers={"User-Agent": HLS_USER_AGENT}, timeout=25)
+        if r.status_code != 200:
+            return None
+        return (r.json() or {}).get("boxscore") or {}
+    except Exception:
+        return None
+
+
+# Claves de ESPN -> tipo de mercado que resuelven.
+_NFL_CLAVES = {
+    "passingYards": "pasadas",
+    "passingTouchdowns": "pasadas_td",
+    "interceptions": "intercepciones",
+    "rushingYards": "carrera",
+    "rushingTouchdowns": "carrera_td",
+    "receptions": "receptiones",
+    "receivingYards": "recepcion",
+    "receivingTouchdowns": "recepcion_td",
+    "totalTackles": "entradas",
+    "sacks": "sacks",
+    "totalPoints": "puntos",
+    "fieldGoalsMade/fieldGoalAttempts": "faltos",
+}
+
+
+def _resolver_prop_nfl(pick: dict):
+    """Resuelve props de JUGADOR de NFL con el boxscore real de ESPN.
+
+    MLB usa statsapi.mlb.com/game/{pk}/boxscore; el equivalente publico de NFL
+    es el summary de ESPN, que trae boxscore.players[].statistics[].athletes[]
+    con las claves de cada jugador (passingYards, rushingYards, receptiones,
+    sacks, intercepciones...).
+
+    Devuelve 'ACIERTO'/'FALLO' o None si el dato no esta. Nunca adivina.
+    """
+    if pick.get("sport") != "nfl":
+        return None
+    texto = (f"{pick.get('market') or ''} {pick.get('titulo') or ''} "
+             f"{pick.get('selection') or ''}").lower()
+    if "jugador" not in texto and "kicker" not in texto and "receptor" not in texto:
+        return None
+
+    # Reusa el parser de linea de los props de MLB (soporta 'over 0.5' y '1+').
+    match = re.search(r"(over|under)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto)
+    if match:
+        es_over = match.group(1) == "over"
+        linea = float(match.group(2).replace(",", "."))
+    else:
+        match = re.search(r"\b([0-9]+)\s*\+", texto)
+        if not match:
+            return None
+        es_over = True
+        linea = max(0.0, float(match.group(1)) - 1.0)
+
+    jugador = str(pick.get("titulo") or "").split(":")[0].strip()
+    jugador = re.split(r"\d|\bover\b|\bunder\b|\+", jugador)[0].strip()
+    if not jugador or len(jugador) < 3:
+        return None
+    objetivo = set(_norm_texto(jugador).split())
+
+    # Buscar el partido por la ventana temporal del propio modulo de partidos.
+    candidatos = [p for p in _partidos_hoy() if p.get("sport") == "nfl"]
+    for p in candidatos:
+        box = _nfl_boxscore(p.get("event_id"))
+        if not box:
+            continue
+        encontrado = None
+        for bloque in box.get("players") or []:
+            for grupo in bloque.get("statistics") or []:
+                claves = grupo.get("keys") or []
+                for at in grupo.get("athletes") or []:
+                    nombre = _norm_texto((at.get("athlete") or {}).get("displayName") or "")
+                    if objetivo and objetivo.issubset(set(nombre.split())):
+                        if encontrado is None:
+                            encontrado = {}
+                        for i, k in enumerate(claves):
+                            if i < len(at.get("stats") or []):
+                                encontrado[k] = at["stats"][i]
+        if not encontrado:
+            continue
+
+        for clave, _tipo in _NFL_CLAVES.items():
+            if clave not in encontrado:
+                continue
+            try:
+                valor = float(str(encontrado[clave]).split("/")[0])
+            except (TypeError, ValueError):
+                continue
+            return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
+                   ("ACIERTO" if valor < linea else "FALLO")
+    return None
+
+
 def _resolver_prop_mlb(pick: dict):
     """Resuelve props de JUGADOR de MLB con el boxscore real (statsapi).
 
@@ -3030,10 +3153,12 @@ def resolver_picks_finalizados() -> dict:
 
         # 1.5) Mercados con estadistica real disponible:
         #   - props de jugador MLB -> boxscore oficial (statsapi)
+        #   - props de jugador NFL -> boxscore de ESPN (mismo patron)
         #   - tarjetas/corners futbol -> estadisticas de Sofascore
         # El marcador global NO determina estos mercados (la IA adivinaba).
         try:
-            resultado = _resolver_prop_mlb(pick) or _resolver_stats_sofascore(pick)
+            resultado = (_resolver_prop_mlb(pick) or _resolver_prop_nfl(pick)
+                        or _resolver_stats_sofascore(pick))
         except Exception:
             resultado = None
         if resultado:
