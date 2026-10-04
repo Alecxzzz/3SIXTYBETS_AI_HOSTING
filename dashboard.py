@@ -142,14 +142,15 @@ def _pick_calidad_ok(pick: dict) -> bool:
 
 # ============================================================
 # CUOTAS REALES (odds-api.io)
-# ============================================================
-
+# ---------------------------------------------------------------
+# odds-api.io es la fuente SECUNDARIA: la principal es Doradobet
+# (cuotas_doradobet.py), que es la que manda de verdad. Sin ODDS_API_KEY esta
+# fuente se desactiva sola y el sitio sigue con Doradobet + ESPN.
+#
+# Antes imprimia un [WARN] en cada arranque y hacia una llamada HTTP por ciclo
+# que siempre respondia 401: puro ruido que hacia creer que las cuotas del
+# sistema eran estimadas, cuando NO lo son (Doradobet aporta las reales).
 ODDS_API_KEY = os.getenv("ODDS_API_KEY") or os.getenv("AI36_ODDS_API_KEY") or ""
-if not ODDS_API_KEY:
-    # Sin key, el sitio sigue funcionando: las cuotas caen a ESPN/estimadas.
-    # Configurar ODDS_API_KEY en las variables de entorno del hosting.
-    print("[WARN] ODDS_API_KEY no configurada: cuotas reales de odds-api.io "
-          "deshabilitadas (se usan cuotas de ESPN/estimadas).", flush=True)
 ODDS_API_BASE = "https://api.odds-api.io/v3"
 # Plan free: solo 2 bookmakers permitidos por la cuenta: Bet365 y Winpot MX.
 # (1xbet/Stake daban 403 "Access denied" y por eso faltaban cuotas reales.)
@@ -183,6 +184,10 @@ def _norm_texto(s: str) -> str:
 
 
 def _odds_request(path: str, params: dict):
+    # Sin key no hay nada que pedir: antes se hacia la llamada igual y
+    # respondia 401 en cada ciclo (ruido + un request inútil por ciclo).
+    if not ODDS_API_KEY:
+        return None
     if _odds_bloqueado():
         return None
     try:
@@ -191,9 +196,12 @@ def _odds_request(path: str, params: dict):
         params = {"apiKey": ODDS_API_KEY, **params}
         r = requests.get(f"{ODDS_API_BASE}{path}", params=params, timeout=20)
         if r.status_code != 200:
-            print(f"[Dashboard] odds-api.io {path} -> {r.status_code}: {r.text[:150]}")
-            # 429 (limite diario/horario): pausar 15 min para no quemar cuota
+            # 401 (sin key valida) y 403 de bookmakers ya no se anuncian: son
+            # fallos esperables de la fuente secundaria y solo ensuciaban el log.
+            # El 429 SI se avisa, porque es un limite real de cuota.
             if r.status_code == 429:
+                print(f"[Dashboard] odds-api.io {path} -> 429: limite alcanzado", flush=True)
+                # 429 (limite diario/horario): pausar 15 min para no quemar cuota
                 global _odds_bloqueado_hasta
                 _odds_bloqueado_hasta = time.time() + 900
                 return None
@@ -3407,7 +3415,9 @@ def salud_scheduler() -> dict:
     try:
         import os as _os
         s["integraciones"] = {
-            "odds_api": bool(ODDS_API_KEY),
+            # odds-api.io es la fuente SECUNDARIA (la principal es Doradobet).
+            "doradobet": True,
+            "odds_api_secundaria": bool(ODDS_API_KEY),
             "groq": bool(_os.getenv("GROQ_API_KEY")),
             "you_api": bool(_os.getenv("YOU_API_KEY")),
             "pagadito": bool(
