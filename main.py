@@ -269,10 +269,20 @@ def _variantes_equipo(equipo: dict) -> list:
 
 
 def _coinciden_ambos_equipos(game: dict, tokens: set) -> bool:
-    """True si los DOS equipos pedidos aparecen en el partido.
+    """True si el partido encaja con lo que pidio el usuario.
 
-    Sin esto, "dodgers vs orioles" encontraba el juego Orioles-Yankees (por
+    CASO NORMAL (el que motivo la funcion): el usuario nombra LOS DOS equipos
+    ("dodgers vs orioles"). Sin esto se encontraba el juego Orioles-Yankees (por
     "orioles") y la IA entregaba un pick de un partido inexistente.
+
+    EXCEPCION NFL/NBA: en estos deportes se nombra casi siempre UN solo equipo
+    ("el spread de broncos"), asi que exigir los dos hacia que 365AI pidiera al
+    usuario el rival que el sistema ya tiene. Aqui se acepta el partido si el
+    equipo nombrado aparece Y, en la jornada, no hay otro juego del mismo equipo
+    que sea mas especifico (o sea: no hay ambiguedad real).
+
+    'es_americano' lo activa solo para deportes donde el calendario diario trae
+    un unico juego por equipo; en futbol se mantiene la exigencia estricta.
     """
     local = _variantes_equipo(game.get("home"))
     visita = _variantes_equipo(game.get("away"))
@@ -285,7 +295,16 @@ def _coinciden_ambos_equipos(game: dict, tokens: set) -> bool:
             for variante in equipo_variantes
         )
 
-    return _tiene(local) and _tiene(visita)
+    coincide_local = _tiene(local)
+    coincide_visita = _tiene(visita)
+
+    if coincide_local and coincide_visita:
+        return True
+    # Un solo equipo: solo vale en deportes de partido unico por jornada.
+    # OJO: 'game' es un DICT, asi que la bandera se lee con .get(). Con getattr()
+    # sobre un dict sale siempre el default y la excepcion nunca se aplicaba
+    # (bug real: "el spread de broncos" seguia pidiendo el rival).
+    return bool(game.get("_match_unico") and (coincide_local or coincide_visita))
 
 
 def contexto_espn(mensaje: str) -> str:
@@ -304,18 +323,35 @@ def contexto_espn(mensaje: str) -> str:
             return ""
 
         mejor, mejor_score, mejor_sport = None, 0, None
+        # Deportes con UN solo partido por equipo y jornada. En estos el usuario
+        # nombra un unico equipo ("el spread de broncos") y exigir los dos
+        # provocaba que la IA pidiera un rival que el sistema ya tenia.
+        _UNICO_POR_EQUIPO = ("nfl", "nba", "mlb")
         for sport in sports.SPORTS:
             try:
                 data = sports.get_sport_games(sport)
             except Exception:
                 continue
-            for g in data.get("games", []):
+            juegos = data.get("games", [])
+            for g in juegos:
                 nombre = _norm_txt(g.get("name", ""))
                 if not nombre:
                     continue
                 score = sum(1 for t in tokens if t in nombre)
                 if score > mejor_score:
                     mejor, mejor_score, mejor_sport = g, score, sport
+            # Marca los partidos de estos deportes como "unico por equipo".
+            # Solo si el equipo NO aparece en dos juegos de la misma jornada:
+            # si aparece en dos, hay ambiguedad real y se exige los dos equipos.
+            if sport in _UNICO_POR_EQUIPO and juegos:
+                por_equipo = {}
+                for g in juegos:
+                    for lado in ("home", "away"):
+                        for v in _variantes_equipo(g.get(lado)):
+                            por_equipo.setdefault(v, []).append(g)
+                for g in juegos:
+                    claves = _variantes_equipo(g.get("home")) + _variantes_equipo(g.get("away"))
+                    g["_match_unico"] = all(len(por_equipo.get(k, [])) <= 1 for k in claves)
 
         if not mejor or mejor_score < 1:
             return ""
