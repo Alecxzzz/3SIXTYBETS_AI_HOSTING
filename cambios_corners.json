@@ -1,0 +1,202 @@
+[
+ {
+  "id": "-O86dM6yvNE",
+  "de": "ACIERTO",
+  "a": "FALLO",
+  "total": 1,
+  "linea": 2.5,
+  "titulo": "Total de tarjetas: Over 2.5"
+ },
+ {
+  "id": "0naXlEmhIbk",
+  "de": "ACIERTO",
+  "a": "FALLO",
+  "total": 2,
+  "linea": 3.5,
+  "titulo": "Total de tarjetas del partido: Over 3.5"
+ },
+ {
+  "id": "a7zWd_nlbw8",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 10,
+  "linea": 7.5,
+  "titulo": "Corners totales: Over 7.5"
+ },
+ {
+  "id": "AIGd1_44cYA",
+  "de": "PENDIENTE",
+  "a": "ACIERTO",
+  "total": 12,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "b2BwIWJe2kQ",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 4,
+  "linea": 3.5,
+  "titulo": "Tiros de esquina de la primera mitad: Over 3.5"
+ },
+ {
+  "id": "ER25mwQGaeo",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 10,
+  "linea": 8.5,
+  "titulo": "Total corners del partido: Over 8.5"
+ },
+ {
+  "id": "ImJnrGoZTkI",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 8,
+  "linea": 3.5,
+  "titulo": "Corners de LA Galaxy: Over 3.5"
+ },
+ {
+  "id": "K7PLQyS9cJM",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 13,
+  "linea": 10.5,
+  "titulo": "Total de corners del partido: Over 10.5"
+ },
+ {
+  "id": "Krcr_sO4DK4",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 4,
+  "linea": 3.5,
+  "titulo": "Corners de San Diego FC: Over 3.5"
+ },
+ {
+  "id": "LMER3790ajg",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 8,
+  "linea": 4.5,
+  "titulo": "Total de corners en la primera mitad: Over 4.5"
+ },
+ {
+  "id": "lwzoL6uWqoU",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 5,
+  "linea": 3.5,
+  "titulo": "Total corners de Vissel Kobe: Over 3.5"
+ },
+ {
+  "id": "lX02NzUJBJw",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 6,
+  "linea": 3.5,
+  "titulo": "Corners de Colorado Rapids: Over 3.5"
+ },
+ {
+  "id": "N8NXhPBKS98",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 10,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "o5J3IrdpucY",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 7,
+  "linea": 3.5,
+  "titulo": "Corners de Nottingham Forest: Over 3.5"
+ },
+ {
+  "id": "QTiuIU3dpV0",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 15,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "Qu62pLDC-4g",
+  "de": "PENDIENTE",
+  "a": "ACIERTO",
+  "total": 12,
+  "linea": 3.5,
+  "titulo": "Corners de Hungary: Over 3.5"
+ },
+ {
+  "id": "rDwBAcOXiUg",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 6,
+  "linea": 2.5,
+  "titulo": "Total de tarjetas: Over 2.5"
+ },
+ {
+  "id": "tNx66_U_Iko",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 9,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "ufuZv95JkYk",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 13,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "V5GjwHX6XkI",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 5,
+  "linea": 2.5,
+  "titulo": "Tarjetas de Racing Santander: Over 2.5"
+ },
+ {
+  "id": "wm-bajdq5Og",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 10,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "WNoOFWZFI5c",
+  "de": "PENDIENTE",
+  "a": "FALLO",
+  "total": 7,
+  "linea": 8.5,
+  "titulo": "Corners totales del partido: Over 8.5"
+ },
+ {
+  "id": "wSNeQUJ3l0Y",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 8,
+  "linea": 7.5,
+  "titulo": "Total de corners del partido: Over 7.5"
+ },
+ {
+  "id": "YZHjiFdZuLU",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 8,
+  "linea": 7.5,
+  "titulo": "Corners del partido Sweden vs Poland: Over 7.5"
+ },
+ {
+  "id": "ZeZYba0LLTw",
+  "de": "FALLO",
+  "a": "ACIERTO",
+  "total": 9,
+  "linea": 8.5,
+  "titulo": "Total de corners del partido: Over 8.5"
+ }
+]

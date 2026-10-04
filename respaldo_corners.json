@@ -1,0 +1,485 @@
+[
+ {
+  "id": "-O86dM6yvNE",
+  "result": "ACIERTO",
+  "titulo": "Total de tarjetas: Over 2.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 2.5 tarjetas"
+ },
+ {
+  "id": "-YT5-Cn1gk0",
+  "result": "FALLO",
+  "titulo": "Tarjetas de Bayern Munich: Under 2.5",
+  "market": "Under/Over de tarjetas equipo A o B",
+  "selection": "Bayern Munich Under 2.5 tarjetas"
+ },
+ {
+  "id": "08aLJ2gSAVM",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas del partido: Over 5.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 5.5 tarjetas"
+ },
+ {
+  "id": "0naXlEmhIbk",
+  "result": "ACIERTO",
+  "titulo": "Total de tarjetas del partido: Over 3.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 3.5"
+ },
+ {
+  "id": "0U2HDERPwCo",
+  "result": "FALLO",
+  "titulo": null,
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "8qX3wJP-iZk",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas del partido: Over 4",
+  "market": "Over de tarjetas",
+  "selection": "Over 4 tarjetas"
+ },
+ {
+  "id": "9Fdj8SjZwas",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tarjetas cada uno: SI",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "a7zWd_nlbw8",
+  "result": "FALLO",
+  "titulo": "Corners totales: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "ABlcpAUZSLI",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos reciben al menos 1 tarjeta: SI",
+  "market": "Ambos equipos +1 tarjeta cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "AIGd1_44cYA",
+  "result": "PENDIENTE",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5 corners"
+ },
+ {
+  "id": "b2BwIWJe2kQ",
+  "result": "FALLO",
+  "titulo": "Tiros de esquina de la primera mitad: Over 3.5",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 3.5 corners en la primera mitad"
+ },
+ {
+  "id": "BdAbaN21c7s",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5 corners"
+ },
+ {
+  "id": "cRXDTZWPFWw",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas del partido: Over 5.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 5.5 tarjetas"
+ },
+ {
+  "id": "ebNmGGJJaUE",
+  "result": "ACIERTO",
+  "titulo": "Ambos equipos +2 tarjetas cada uno: SI",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "eI1HEGGr6aM",
+  "result": "FALLO",
+  "titulo": "Corners de Lillestrom: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Lillestrom Over 3.5 corners"
+ },
+ {
+  "id": "ej8eeyJLlFs",
+  "result": "FALLO",
+  "titulo": "Corners de la primera mitad: Over 4",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 4 corners"
+ },
+ {
+  "id": "EqVEZKXdDZU",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +4 tiros de esquina cada uno: NO",
+  "market": "Ambos equipos +4 tiros de esquina cada uno (SI/NO)",
+  "selection": "NO"
+ },
+ {
+  "id": "ER25mwQGaeo",
+  "result": "FALLO",
+  "titulo": "Total corners del partido: Over 8.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 8.5"
+ },
+ {
+  "id": "fCL8mba5ul4",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tarjetas: SI",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "GZVE1tiaAH8",
+  "result": "PENDIENTE",
+  "titulo": "Corners de Barcelona: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Barcelona over 3.5 tiros de esquina"
+ },
+ {
+  "id": "ImJnrGoZTkI",
+  "result": "FALLO",
+  "titulo": "Corners de LA Galaxy: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "LA Galaxy over 3.5 tiros de esquina"
+ },
+ {
+  "id": "iujbMkm4eQc",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tiros de esquina cada uno: SI",
+  "market": "Ambos equipos +2 tiros de esquina cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "j7ALPsVNMws",
+  "result": "FALLO",
+  "titulo": "Total de corners de Jaguares de Córdoba vs Fortaleza CEIF: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "K7PLQyS9cJM",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 10.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 10.5"
+ },
+ {
+  "id": "kK8sPn29b74",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 10.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 10.5"
+ },
+ {
+  "id": "Knl27MVr2Mw",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos superan 2 corners: SI",
+  "market": "Ambos equipos +2 tiros de esquina cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "Krcr_sO4DK4",
+  "result": "FALLO",
+  "titulo": "Corners de San Diego FC: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "San Diego FC over 3.5 corners"
+ },
+ {
+  "id": "l9mXnyNrmNU",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 10",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 10"
+ },
+ {
+  "id": "LMER3790ajg",
+  "result": "FALLO",
+  "titulo": "Total de corners en la primera mitad: Over 4.5",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 4.5"
+ },
+ {
+  "id": "lwzoL6uWqoU",
+  "result": "FALLO",
+  "titulo": "Total corners de Vissel Kobe: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Over 3.5"
+ },
+ {
+  "id": "lX02NzUJBJw",
+  "result": "FALLO",
+  "titulo": "Corners de Colorado Rapids: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Colorado Rapids over 3.5 corners"
+ },
+ {
+  "id": "m8dATmCOLEE",
+  "result": "ACIERTO",
+  "titulo": "Corners de Manchester United: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Manchester United over 3.5 corners"
+ },
+ {
+  "id": "MUN3nmDCmTI",
+  "result": "FALLO",
+  "titulo": "Corners de la primera mitad: Over 4.5",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 4.5"
+ },
+ {
+  "id": "N8NXhPBKS98",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total Tiros De Esquina",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "o05LS7JtXnU",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos marcados por tarjetas: SI",
+  "market": "Ambos equipos +1 tarjeta cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "o5J3IrdpucY",
+  "result": "FALLO",
+  "titulo": "Corners de Nottingham Forest: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Nottingham Forest over 3.5 corners"
+ },
+ {
+  "id": "oE-VSI_qNno",
+  "result": "PENDIENTE",
+  "titulo": "Portugal vs Norway: Ambos equipos recibirán al menos 1 tarjeta (SI)",
+  "market": "Ambos equipos +1 tarjeta cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "ofURz_FxOy4",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas del partido: Over 3.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 3.5"
+ },
+ {
+  "id": "oNnwm51w9-I",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tarjetas cada uno: NO",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "NO"
+ },
+ {
+  "id": "OUqCVXhrL8A",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas del partido: Over 3.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 3.5 tarjetas"
+ },
+ {
+  "id": "PbW9JZG_Eig",
+  "result": "PENDIENTE",
+  "titulo": "Ambos equipos +1 tarjeta cada uno: SI",
+  "market": "Ambos equipos +1 tarjeta cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "PKCpzzLKtZU",
+  "result": "ACIERTO",
+  "titulo": null,
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Club Brugge"
+ },
+ {
+  "id": "q-LGJ3gUT-c",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total Tiros De Esquina",
+  "selection": "Más de 7.5"
+ },
+ {
+  "id": "qhQr8ZHEXqE",
+  "result": "FALLO",
+  "titulo": "Total de corners en la primera mitad: Over 4.0",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 4.0 corners en la primera mitad"
+ },
+ {
+  "id": "QTiuIU3dpV0",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5 corners"
+ },
+ {
+  "id": "Qu62pLDC-4g",
+  "result": "PENDIENTE",
+  "titulo": "Corners de Hungary: Over 3.5",
+  "market": "Total tiros de esquina de equipo A o B, minimo 3.5",
+  "selection": "Over"
+ },
+ {
+  "id": "R_n7PEZG_SQ",
+  "result": "ACIERTO",
+  "titulo": "Primera mitad: Under 4.5 corners",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Under 4.5"
+ },
+ {
+  "id": "rDwBAcOXiUg",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas: Over 2.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 2.5 tarjetas"
+ },
+ {
+  "id": "RVJCbwfHCZk",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total Tiros De Esquina",
+  "selection": "Más de 7.5 corners"
+ },
+ {
+  "id": "sfKP6kV295E",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tarjetas cada uno (Coritiba y Athletico-PR)",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "StILfLc-otQ",
+  "result": "FALLO",
+  "titulo": "Total de corners en la primera mitad: Over 4.5",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Over 4.5 corners en la primera mitad"
+ },
+ {
+  "id": "sytSptynCEY",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 tarjetas cada uno: SI",
+  "market": "Ambos equipos +2 tarjetas cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "TMrARLJ114s",
+  "result": "ACIERTO",
+  "titulo": "Total de corners en la primera mitad: Under 4.5",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Under 4.5"
+ },
+ {
+  "id": "tNx66_U_Iko",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "ufuZv95JkYk",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "V5GjwHX6XkI",
+  "result": "FALLO",
+  "titulo": "Tarjetas de Racing Santander: Over 2.5",
+  "market": "Under/Over de tarjetas equipo A o B",
+  "selection": "Over 2.5 tarjetas Racing Santander"
+ },
+ {
+  "id": "VSKKa3esmak",
+  "result": "FALLO",
+  "titulo": "Corners del partido AS Monaco vs Lens: Over 9.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 9.5"
+ },
+ {
+  "id": "waEEHQAWKSg",
+  "result": "FALLO",
+  "titulo": "Bookings del partido: Over 4",
+  "market": "Over de tarjetas",
+  "selection": "Over 4"
+ },
+ {
+  "id": "WkDWjKkKR-c",
+  "result": "FALLO",
+  "titulo": "Total de tarjetas: Over 3.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 3.5"
+ },
+ {
+  "id": "wm-bajdq5Og",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "WNoOFWZFI5c",
+  "result": "PENDIENTE",
+  "titulo": "Corners totales del partido: Over 8.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 8.5"
+ },
+ {
+  "id": "wSNeQUJ3l0Y",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "x-ejN0mNWV8",
+  "result": "ANULADO",
+  "titulo": "Total de corners de la primera mitad: Under 4.0",
+  "market": "Primera mitad tiros de esquina, minimo 3.5",
+  "selection": "Under 4.0"
+ },
+ {
+  "id": "xhwobWtIIWk",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido Dinamo Zagreb vs Hapoel Be'er: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "xJnr9uomQgE",
+  "result": "FALLO",
+  "titulo": "Corners totales: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "YZHjiFdZuLU",
+  "result": "FALLO",
+  "titulo": "Corners del partido Sweden vs Poland: Over 7.5",
+  "market": "Total tiros de esquina, minimo 7.5 corners, cuota minima 1.25",
+  "selection": "Over 7.5"
+ },
+ {
+  "id": "zCsPnTExJc4",
+  "result": "ANULADO",
+  "titulo": "Ambos equipos +2 corners: SI",
+  "market": "Ambos equipos +2 tiros de esquina cada uno (SI/NO)",
+  "selection": "SI"
+ },
+ {
+  "id": "ZeZYba0LLTw",
+  "result": "FALLO",
+  "titulo": "Total de corners del partido: Over 8.5",
+  "market": "Total Tiros De Esquina",
+  "selection": "Más de 8.5"
+ },
+ {
+  "id": "zz5KV84XAuo",
+  "result": "ACIERTO",
+  "titulo": "Total de tarjetas: Over 3.5",
+  "market": "Over de tarjetas",
+  "selection": "Over 3.5 tarjetas"
+ }
+]
