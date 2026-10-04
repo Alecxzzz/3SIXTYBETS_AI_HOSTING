@@ -237,41 +237,68 @@ def clima(match_id):
 # === Localizar el partido de un pick ======================================
 
 def partido_por_equipos(home_name, away_name, fecha=None):
-    """matchId del partido entre esos dos equipos. int o None.
+    """Info del partido entre esos dos equipos. dict o None.
 
-    'fecha' es la fecha del pick (ISO). FotMob solo da /matches de UN dia, asi
-    que se recorre hacia atras desde esa fecha (y desde hoy si no se sabe).
-    El partido se acepta solo si ambos equipos coinciden por nombre normalizado
-    Y por fecha, para no cruzar un partido equivocado con homonimos.
+    Devuelve {'id', 'home_name', 'away_name', 'home_score', 'away_score',
+              'finished'} con el marcador real.
+
+    ANTES recorria /matches dia a dia desde la fecha del pick. Fallaba: para
+    partidos de hace dias /matches no devolvia esas ligas y el resultado era
+    None (medido: 0 de 12 picks pendientes resueltos). Ahora se usa
+    teams?id= -> fixtures, que ya trae local, visitante, fecha y marcador de
+    golpe, y ademas esta cacheado 24 h por equipo.
     """
     if not home_name or not away_name:
         return None
     h, a = _clave_texto(home_name), _clave_texto(away_name)
 
-    inicio = date.today()
+    # Backoff en dias: si el pick tiene fecha, se priorizan los partidos de esa
+    # vicinity; si no, se mira el historial reciente del equipo.
+    dias_preferidos = []
     if fecha:
         try:
-            inicio = date.fromisoformat(str(fecha)[:10])
+            dias_preferidos = [
+                (date.fromisoformat(str(fecha)[:10]) - timedelta(days=o)).isoformat()
+                for o in range(0, 5)
+            ]
         except ValueError:
-            inicio = date.today()
+            dias_preferidos = []
 
-    for offset in range(0, 4):  # el pick se resuelve horas despues del partido
-        dia = inicio - timedelta(days=offset)
-        datos = _get("matches", {"date": dia.strftime("%Y%m%d")})
-        if not isinstance(datos, dict):
-            continue
-        for liga in datos.get("leagues") or []:
-            for p in liga.get("matches") or []:
-                if str(p.get("statusId")) not in ("5", "6", "7"):
-                    continue  # no terminado todavia
-                hh = _clave_texto((p.get("home") or {}).get("name"))
-                aa = _clave_texto((p.get("away") or {}).get("name"))
-                if hh == h and aa == a:
-                    return p.get("id")
-                # orden invertido: los dos equipos estan pero al reves
-                if hh == a and aa == h:
-                    return p.get("id")
-    return None
+    eq = buscar_equipo(home_name)
+    if not eq or not eq.get("id"):
+        return None
+    datos = _get("teams", {"id": str(eq["id"])})
+    if not isinstance(datos, dict):
+        return None
+    fixtures = (((datos.get("fixtures") or {}).get("allFixtures") or {})
+                .get("fixtures") or [])
+
+    candidatos = []
+    for f in fixtures:
+        hn = _clave_texto((f.get("home") or {}).get("name"))
+        an = _clave_texto((f.get("away") or {}).get("name"))
+        if (hn == h and an == a) or (hn == a and an == h):
+            dia = str((f.get("status") or {}).get("utcTime") or "")[:10]
+            prioritario = dias_preferidos.index(dia) if dia in dias_preferidos else 99
+            candidatos.append((prioritario, f))
+
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda x: x[0])
+    f = candidatos[0][1]
+
+    def _sc(t):
+        return _a_int((t or {}).get("score"))
+
+    return {
+        "id": f.get("id"),
+        "home_name": (f.get("home") or {}).get("name"),
+        "away_name": (f.get("away") or {}).get("name"),
+        "home_score": _sc(f.get("home")),
+        "away_score": _sc(f.get("away")),
+        "finished": bool((f.get("status") or {}).get("finished")),
+        "utc": (f.get("status") or {}).get("utcTime"),
+    }
 
 
 def total_estadistica_de_pick(pick, metrica, periodo="All"):
@@ -280,12 +307,12 @@ def total_estadistica_de_pick(pick, metrica, periodo="All"):
     Atajo usado por el resolver: dado el dict del pick (con home_name,
     away_name y eventDate), devuelve el total de la metrica o None.
     """
-    mid = partido_por_equipos(
+    info = partido_por_equipos(
         pick.get("home_name"), pick.get("away_name"), pick.get("eventDate")
     )
-    if not mid:
+    if not info or not info.get("id"):
         return None
-    return total_estadistica(mid, metrica, periodo)
+    return total_estadistica(info["id"], metrica, periodo)
 
 
 # === Promedios local / visitante ===========================================

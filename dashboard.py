@@ -2832,6 +2832,52 @@ def _marcador_discrepa(d1: dict, d2: dict) -> bool:
     return s1["home"] != s2["home"] or s1["away"] != s2["away"]
 
 
+def _detalle_desde_fotmob(pick: dict):
+    """Marcador final desde FotMob, en el MISMO formato que ESPN.
+
+    ESPN es la fuente principal de resultados; si el evento ya no aparece alli
+    (deja de estar en el scoreboard del dia a las pocas horas) el pick se queda
+    PENDIENTE para siempre. FotMob cubre ese hueco y no anade dependencias
+    nuevas: ya se usa para corners/tarjetas.
+
+    odds-api.io hacia ese mismo papel pero lleva semanas con 401, con lo que en
+    la practica nunca llego a resolver nada.
+
+    Devuelve {'state','teams':[{name,score,homeAway}...]} o None.
+    """
+    try:
+        from backend.apuestas import fotmob_stats as fstats
+    except Exception:
+        return None
+
+    home = pick.get("home_name") or ""
+    away = pick.get("away_name") or ""
+    if not home or not away:
+        return None
+
+    info = fstats.partido_por_equipos(home, away, pick.get("eventDate"))
+    if not info or not info.get("finished"):
+        return None
+    if info.get("home_score") is None or info.get("away_score") is None:
+        return None
+
+    # Reorientar al orden del pick: FotMob puede tener los equipos al reves.
+    # _coincide_nombres espera dicts de equipo; aqui tengo nombres sueltos,
+    # asi que se comparan con la misma normalizacion de texto.
+    local_en_fotmob = (
+        _norm_texto(home) == _norm_texto(info.get("home_name") or "")
+    )
+    home_score = info["home_score"] if local_en_fotmob else info["away_score"]
+    away_score = info["away_score"] if local_en_fotmob else info["home_score"]
+    return {
+        "state": "post",
+        "teams": [
+            {"name": home, "score": home_score, "homeAway": "home"},
+            {"name": away, "score": away_score, "homeAway": "away"},
+        ],
+    }
+
+
 def _detalle_desde_oddsapi(pick: dict):
     """Fallback: marcador final desde odds-api.io (eventos settled incluyen scores).
 
@@ -2930,7 +2976,11 @@ def resolver_picks_finalizados() -> dict:
 
         try:
             detail = _detalle_resolucion(pick)
-            # Fallback: marcador final desde odds-api.io si ESPN no lo tiene
+            # Cadena de fallback del marcador: ESPN (principal) -> FotMob ->
+            # odds-api. FotMob entra antes que odds-api porque funciona hoy
+            # (odds-api lleva semanas con 401 y nunca llego a resolver nada).
+            if not detail or detail.get("state") not in ("post", "in"):
+                detail = _detalle_desde_fotmob(pick) or detail
             if not detail or detail.get("state") not in ("post", "in"):
                 detail = _detalle_desde_oddsapi(pick) or detail
         except Exception:
