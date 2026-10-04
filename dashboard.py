@@ -1469,18 +1469,16 @@ def _partidos_hoy():
 def _es_error_ia(texto) -> bool:
     """True si el 'texto' es en realidad un mensaje de error del proveedor.
 
-    Sin este filtro, un 'Error de You.com (402): ... prepaid credit depleted'
-    se colaba como si fuera la respuesta del modelo: no se parseaba como pick
-    y el partido se descartaba como si la IA hubiera dicho 'sin datos'.
+    Delega en ai.proveedor_fallos, que es la lista unica de marcas. Antes esta
+    logica estaba copiada aqui y en main.py, y cada copia se quedaba vieja: al
+    expirar el plan de prueba de You.com su texto paso a 'Your platform trial
+    has ended' y NINGUNA copia lo reconocia. El mensaje se colaba como si fuera
+    la respuesta del modelo y el partido se descartaba como 'sin datos' (6 h de
+    bloqueo) cuando en realidad no habia cuota.
     """
-    t = str(texto or "")
-    if not t:
-        return False
-    bajo = t.lower()
-    return bajo.startswith((
-        "error", "error:", "error de you.com", "error leyendo",
-        "demian tipster no pudo", "no se pudo",
-    )) or "payment_required" in bajo or "add credits" in bajo
+    from ai.proveedor_fallos import respuesta_nula
+
+    return respuesta_nula(texto)
 
 
 
@@ -1732,6 +1730,20 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 "'Marco en los ultimos 3 partidos', '2 de 3 con BTTS'.\n"
             )
 
+        # PROMEDIOS REALES local/visitante (corners, tarjetas, faltas, tiros)
+        # por partido. Antes la IA solo recibia "gano 2-1": razonaba sobre
+        # intuicion y por eso los corners salian con 0 de aciertos. Con estos
+        # numeros puede contrastar la linea del mercado contra la proyeccion.
+        if p["sport"] == "soccer":
+            try:
+                from backend.apuestas import fotmob_stats as _fstats
+
+                _ctx = _fstats.contexto_para_ia(p["home_name"], p["away_name"])
+                if _ctx:
+                    mensaje += _ctx
+            except Exception:
+                pass  # sin datos: la IA sigue con lo que tenia
+
         mensaje += (
             f"\nElige UN solo mercado del catalogo de {label} (que NO sea uno de estos ya "
             f"usados hoy: {', '.join(list(mercados_usados)[:15]) or 'ninguno'}). "
@@ -1794,8 +1806,26 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             # {"error": "sin datos"} es una respuesta valida de la IA: ese
             # partido no tiene datos, no se reintenta cada ciclo. Un fallo
             # transitorio (respuesta vacia/cortada) SI se reintenta.
+            #
+            # IMPORTANTE: un fallo de PROVEEDOR (cuota/saldo) NO se guarda como
+            # 'sin_datos'. Antes si: si el proveedor devolvia su mensaje de error
+            # dentro de un 200 OK, '_es_error_ia' lo reconocia tarde y el partido
+            # quedaba descartado 6 h con un motivo que mentia. Al reponer el
+            # saldo esos partidos seguian bloqueados. 'sin_datos' debe significar
+            # SOLO 'la IA decidio que no hay datos'.
             if texto and '"error"' in texto.lower() and not _es_error_ia(texto):
                 db.registrar_descarte(p["event_id"], "sin_datos")
+            elif texto:
+                # Caida del proveedor: se contabiliza pero NO se cachea, para
+                # que el siguiente ciclo reintente cuando el proveedor vuelva.
+                from ai.proveedor_fallos import clasificar
+
+                print(
+                    f"[Dashboard] Proveedor fallo ({clasificar(texto)}): "
+                    f"{p['event_name'][:40]} NO se descarta",
+                    flush=True,
+                )
+                errores += 1
             else:
                 errores += 1
             continue
@@ -2115,10 +2145,17 @@ def _resolver_prop_mlb(pick: dict):
 
 
 def _resolver_stats_sofascore(pick: dict):
-    """Resuelve over/under de TARJETAS y CORNERS de futbol con Sofascore.
+    """Resuelve over/under de TARJETAS y CORNERS de futbol.
 
-    El marcador global no determina estos mercados (antes la IA adivinaba);
-    aqui se usa la estadistica real del partido (periodo ALL).
+    El marcador global no determina estos mercados (antes la IA adivinaba).
+
+    ANTES usaba la API de Sofascore, que hoy devuelve 403: la funcion devolvia
+    None SIEMPRE, el pick se quedaba PENDIENTE y a las 72h se marcaba ANULADO.
+    Medido: 16 picks de corners seguidos con 0 aciertos, algo que estadisticamente
+    casi no puede ser real. Ahora usa FotMob (responde 200).
+
+    Si FotMob no trae el dato se devuelve None igual que antes: el pick NO se
+    resuelve. Nunca se inventa un numero.
     """
     if pick.get("sport") != "soccer":
         return None
@@ -2127,13 +2164,15 @@ def _resolver_stats_sofascore(pick: dict):
     texto = f"{market} {titulo} {(pick.get('selection') or '').lower()}"
 
     if "tarjeta" in texto or "card" in texto:
-        claves = ("yellowcards", "redcards")
-    elif "corner" in texto:
-        claves = ("corners",)
+        metricas = ("yellow_cards", "red_cards")
+    elif "corner" in texto or "esquina" in texto:
+        metricas = ("corners",)
     else:
         return None
 
-    match = re.search(r"(over|m[áa]s de|under|menos de)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto)
+    match = re.search(
+        r"(over|m[\u00e1a]s de|under|menos de)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto
+    )
     if not match:
         return None
     es_over = match.group(1).startswith(("over", "m"))
@@ -2142,9 +2181,26 @@ def _resolver_stats_sofascore(pick: dict):
     except ValueError:
         return None
 
-    total = _sofascore_stat_total(pick, claves)
-    if total is None:
+    try:
+        from backend.apuestas import fotmob_stats as fstats
+    except Exception:
         return None
+
+    # "Primera mitad" se pide a Periods.FirstHalf, que FotMob trae aparte.
+    primero = ("primera mitad" in texto or "1\u00aa mitad" in texto
+               or "1a mitad" in texto)
+    periodo = "FirstHalf" if primero else "All"
+
+    total = 0
+    encontrado = False
+    for metrica in metricas:
+        t = fstats.total_estadistica_de_pick(pick, metrica, periodo)
+        if t is not None:
+            total += t
+            encontrado = True
+    if not encontrado:
+        return None
+
     return ("ACIERTO" if total > linea else "FALLO") if es_over else \
            ("ACIERTO" if total < linea else "FALLO")
 

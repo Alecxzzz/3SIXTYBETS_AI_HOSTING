@@ -578,16 +578,9 @@ def _respuesta_you_agotada(respuesta) -> bool:
     """
     if not respuesta:
         return False
-    texto = str(respuesta).lower()
-    marcas = (
-        "payment_required",
-        "prepaid credit balance",
-        "add credits",
-        "depleted",
-        "error de you.com (402",
-        "error de you.com (429",
-    )
-    return any(marca in texto for marca in marcas)
+    from ai.proveedor_fallos import sin_cuota
+
+    return sin_cuota(respuesta)
 
 
 @app.get("/debug/gemini")

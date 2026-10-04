@@ -97,19 +97,9 @@ def _you_fallo_de_creditos(respuesta: str) -> bool:
     You.com responde 402 'payment_required' cuando se acaba el prepaid y
     429 cuando se excede el rate limit. En ambos casos conviene caer a Gemini.
     """
-    if not respuesta:
-        return False
-    texto = str(respuesta).lower()
-    marcas = (
-        "payment_required",
-        "prepaid credit balance",
-        "add credits",
-        "depleted",
-        "error de you.com (402",
-        "error de you.com (429",
-        "no se pudo completar la busqueda en vivo",
-    )
-    return any(marca in texto for marca in marcas)
+    from ai.proveedor_fallos import sin_cuota
+
+    return sin_cuota(respuesta)
 
 
 def generar_respuesta_you(prompt_sistema, prompt_usuario):
