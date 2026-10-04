@@ -302,17 +302,38 @@ def partido_por_equipos(home_name, away_name, fecha=None):
 
 
 def total_estadistica_de_pick(pick, metrica, periodo="All"):
-    """Total de una metrica para el partido de un pick. int o None.
+    """Total de una metrica para el partido de un pick, con respaldo.
 
-    Atajo usado por el resolver: dado el dict del pick (con home_name,
-    away_name y eventDate), devuelve el total de la metrica o None.
+    CADENA DE FUENTES: primero FotMob (cubre ~75%). Solo si FotMob no devuelve
+    nada se consulta API-Football, que cubre parte del hueco restante.
+
+    El orden importa por la cuota: el plan gratis de api-sports son 100
+    requests/dia. Llamarla siempre en paralelo la reventaria al segundo dia, asi
+    que solo se usa cuando FotMob ya ha fallado (~15-20 llamadas/dia).
+
+    Sin API_FOOTBALL_KEY el segundo paso es un no-op y el resultado es el de
+    FotMob o None.
     """
+    # 1) FotMob
     info = partido_por_equipos(
         pick.get("home_name"), pick.get("away_name"), pick.get("eventDate")
     )
-    if not info or not info.get("id"):
+    if info and info.get("id"):
+        valor = total_estadistica(info["id"], metrica, periodo)
+        if valor is not None:
+            return valor
+
+    # 2) Respaldo: API-Football (solo si hay key)
+    try:
+        from backend.apuestas import api_football as af
+    except Exception:
         return None
-    return total_estadistica(info["id"], metrica, periodo)
+    if not af.disponible():
+        return None
+    try:
+        return af.total_estadistica_de_pick(pick, metrica, periodo)
+    except Exception:
+        return None
 
 
 # === Promedios local / visitante ===========================================
