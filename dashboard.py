@@ -3534,6 +3534,14 @@ def _archivo_diario():
 def salud_scheduler() -> dict:
     """Idea 20: estado del scheduler para monitoreo (endpoint /dashboard/salud)."""
     s = dict(_salud)
+    # Si el hilo de generacion esta vivo. Cuando es False, NADA se esta
+    # generando sin importar la cuota ni los filtros (caso tipico de
+    # "la IA no analiza": el hilo murio o nunca arranco).
+    try:
+        s["scheduler_hilo_vivo"] = scheduler_activo()
+    except Exception:
+        s["scheduler_hilo_vivo"] = None
+    s["scheduler_intervalo_min"] = round(INTERVALO_SEGUNDOS / 60, 1)
     s["ventana_analisis"] = (
         f"desde {HORA_INICIO_ANALISIS}:00 Nicaragua, "
         f"partidos dentro de {VENTANA_ANALISIS_H}h"
@@ -3624,12 +3632,58 @@ def salud_scheduler() -> dict:
 def _loop():
     time.sleep(20)  # dejar arrancar la app primero
     while True:
-        _ciclo()
+        try:
+            _ciclo()
+        except Exception:
+            # Un fallo inesperado NO debe matar el hilo: si muere, deja de
+            # haber picks hasta el proximo reinicio de Northflank y nadie se
+            # entera (un thread daemon muere en silencio). Se loguea y el
+            # siguiente ciclo reintenta a los INTERVALO_SEGUNDOS.
+            print("[Dashboard] Error en ciclo (el hilo sigue vivo):\n"
+                  + traceback.format_exc(), flush=True)
         time.sleep(INTERVALO_SEGUNDOS)
 
 
+# Hilo vivo del scheduler (visibilizable en /dashboard/salud)
+_hilo_scheduler = None
+_scheduler_lock = threading.Lock()
+
+
 def iniciar_scheduler():
-    """Arranca el hilo daemon que genera y resuelve picks automaticamente."""
-    hilo = threading.Thread(target=_loop, daemon=True, name="dashboard-picks")
-    hilo.start()
-    print("[Dashboard] Scheduler de picks automaticos iniciado", flush=True)
+    """Arranca el hilo daemon que genera y resuelve picks automaticos.
+
+    Idempotente: si el hilo ya corre no crea otro. Un watchdog lo vigila y
+    lo reinicia si muriera (defensa en profundidad del try/except de _loop).
+    """
+    global _hilo_scheduler
+    with _scheduler_lock:
+        if _hilo_scheduler is not None and _hilo_scheduler.is_alive():
+            print("[Dashboard] Scheduler ya corriendo; no se duplica", flush=True)
+            return
+        _hilo_scheduler = threading.Thread(
+            target=_loop, daemon=True, name="dashboard-picks"
+        )
+        _hilo_scheduler.start()
+        print("[Dashboard] Scheduler de picks automaticos iniciado", flush=True)
+    threading.Thread(
+        target=_watchdog_scheduler, daemon=True, name="dashboard-watchdog"
+    ).start()
+
+
+def _watchdog_scheduler():
+    """Revisa cada 5 min que el hilo del scheduler siga vivo; lo reinicia."""
+    while True:
+        time.sleep(300)
+        with _scheduler_lock:
+            vivo = _hilo_scheduler is not None and _hilo_scheduler.is_alive()
+        if not vivo:
+            print("[Dashboard] WATCHDOG: hilo del scheduler caido; reiniciando",
+                  flush=True)
+            iniciar_scheduler()
+            return  # el watchdog que cree el nuevo arranque se encarga
+
+
+def scheduler_activo() -> bool:
+    """True si el hilo de generacion de picks esta vivo."""
+    with _scheduler_lock:
+        return _hilo_scheduler is not None and _hilo_scheduler.is_alive()

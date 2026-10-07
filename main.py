@@ -1141,6 +1141,9 @@ def _init_database():
     """
     import time
 
+    # True si la BD conecto en el primer intento. Si no, los hilos de fondo
+    # se arrancan igual y un hilo aparte reintenta la BD hasta que conecte.
+    db_ok = False
     for attempt in range(1, 4):
         try:
             db.init_db()  # crea tablas + admin user (ensure_admin_user internamente)
@@ -1168,6 +1171,7 @@ def _init_database():
                 print(f"[startup] DB ready, {count} available key(s)", flush=True)
 
             print("[startup] Database initialized successfully", flush=True)
+            db_ok = True
 
             # Limpieza de legado: picks guardados con mercados prohibidos
             # (ej. "apuesta sin empate" = DNB). Se anulan para que no salgan
@@ -1179,37 +1183,6 @@ def _init_database():
             except Exception as exc:
                 print(f"[startup] Purga de picks prohibidos fallo: {exc}", flush=True)
 
-            # Dashboard: arrancar generacion automatica de picks en background
-            try:
-                dashboard.iniciar_scheduler()
-            except Exception as exc:
-                print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
-
-            # Dashboard: cache caliente desde el arranque (asi el primer
-            # usuario que entra no espera los ~30s del armado del payload).
-            try:
-                _refrescar_dashboard_async()
-            except Exception as exc:
-                print(f"[startup] Cache del dashboard no precalentado: {exc}", flush=True)
-
-            # Partidos del dia: refrescador automatico (agenda la18hd.su).
-            # Cada 30 min re-scrapea la agenda y actualiza la TV; si la fuente
-            # falla, conserva la lista anterior.
-            try:
-                import event_scheduler
-
-                event_scheduler.iniciar_scheduler()
-            except Exception as exc:
-                print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
-
-            # Estadisticas: calentador de cache (scoreboards frescos y
-            # respuestas instantaneas; el trafico a ESPN queda centralizado).
-            if sports_warming:
-                try:
-                    sports_warming.iniciar_calentador()
-                except Exception as exc:
-                    print(f"[startup] Calentador de stats no iniciado: {exc}", flush=True)
-
             break
 
         except Exception as exc:
@@ -1218,6 +1191,75 @@ def _init_database():
                 time.sleep(5)
             else:
                 print("[startup] DB not available — app continues without DB", flush=True)
+
+    # ------------------------------------------------------------------
+    # HILOS DE FONDO: se arrancan SIEMPRE, con BD o sin ella.
+    # Antes vivian dentro del try del loop de la BD: si Aiven tardaba en
+    # estar ready al arrancar Northflank, el scheduler de picks NO se
+    # creaba nunca y el dashboard se quedaba mudo hasta el proximo
+    # reinicio ("la IA no analiza"). Los hilos toleran fallos de BD (cada
+    # ciclo reintenta y los errores quedan en _salud), asi que arrancarlos
+    # sin BD es inocuo y se recuperan solos cuando la BD vuelva.
+    # ------------------------------------------------------------------
+    try:
+        dashboard.iniciar_scheduler()
+    except Exception as exc:
+        print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
+
+    if db_ok:
+        # Cache caliente desde el arranque (asi el primer usuario que entra
+        # no espera los ~30s del armado del payload).
+        try:
+            _refrescar_dashboard_async()
+        except Exception as exc:
+            print(f"[startup] Cache del dashboard no precalentado: {exc}", flush=True)
+    else:
+        # La BD no conecto: un hilo aparte reintenta hasta que conecte y
+        # entonces precachear el dashboard. Sin esto el panel podria quedar
+        # vacio para siempre aunque la BD se recupere a los 30s.
+        threading.Thread(
+            target=_reintentar_db_y_precachear,
+            daemon=True,
+            name="startup-db-retry",
+        ).start()
+
+    # Partidos del dia: refrescador automatico (agenda la18hd.su).
+    # Cada 30 min re-scrapea la agenda y actualiza la TV; si la fuente
+    # falla, conserva la lista anterior. No depende de la BD para arrancar.
+    try:
+        import event_scheduler
+
+        event_scheduler.iniciar_scheduler()
+    except Exception as exc:
+        print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
+
+    # Estadisticas: calentador de cache (scoreboards frescos y
+    # respuestas instantaneas; el trafico a ESPN queda centralizado).
+    if sports_warming:
+        try:
+            sports_warming.iniciar_calentador()
+        except Exception as exc:
+            print(f"[startup] Calentador de stats no iniciado: {exc}", flush=True)
+
+
+def _reintentar_db_y_precachear():
+    """Reintenta la BD en background y precachea el dashboard al conectar."""
+    import time
+
+    for intento in range(1, 31):  # hasta ~5 min (10 s entre intentos)
+        time.sleep(10)
+        try:
+            ok = db.run_query("SELECT 1 AS ok", fetchone=True)
+            if not ok:
+                raise Exception("DB query returned None")
+            print(f"[startup] BD disponible tras {intento} intento(s); "
+                  "precalentando dashboard", flush=True)
+            _refrescar_dashboard_async()
+            return
+        except Exception as exc:
+            print(f"[startup] Reintento de BD {intento}/30 fallo: {exc}", flush=True)
+    print("[startup] BD no disponible tras 30 reintentos; los endpoints "
+          "seguiran reintentando por su cuenta", flush=True)
 
 # ---- Freemium ----
 PICKS_GRATIS = 2  # picks completos que ve un usuario sin premium
