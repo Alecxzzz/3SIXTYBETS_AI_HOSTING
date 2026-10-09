@@ -108,7 +108,16 @@ _FRASES_SIN_DATOS = (
 
 _NOMBRES_INVALIDOS = {"", "?", "n/a", "na", "jugador a", "jugador b",
                       "equipo a", "equipo b", "local", "visitante",
-                      "team a", "team b", "home", "away", "jugador 1", "jugador 2"}
+                      "team a", "team b", "home", "away", "jugador 1", "jugador 2",
+                      # Placeholders de ESPN cuando el oponente aun no esta
+                      # definido en el cuadro (tenis/MMA). Un handicap asiatico
+                      # o un H2H sin saber el rival NO se puede analizar ni
+                      # resolver: se publicaba 'Carlos Alcaraz -1.25' con el
+                      # rival en 'TBD'. Ahora se rechaza al generar
+                      # (_motivo_rechazo_pick -> 'calidad') y nunca se muestra
+                      # (_pick_calidad_ok), tambien para los picks ya guardados.
+                      "tbd", "tba", "to be determined", "to be announced",
+                      "por definir", "a definir", "sin definir"}
 
 
 def _nombre_valido(nombre) -> bool:
