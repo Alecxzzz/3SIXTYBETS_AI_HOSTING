@@ -3507,7 +3507,7 @@ def _ciclo():
 
 
 def _ciclo_revision():
-    """Ciclo de REVISION: revisa y resuelve los picks ya generados, en orden."""
+    """Ciclo de REVISION: resuelve y revisa los picks ya generados, en orden."""
     with _revisando:
         _salud["ultima_revision"] = datetime.now(timezone.utc).isoformat()
         try:
@@ -3516,18 +3516,22 @@ def _ciclo_revision():
                 print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
         except Exception:
             print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
-        try:
-            rev = revisar_picks_generados()
-            if rev.get("anulados") or rev.get("confirmados_ia") or rev.get("ia_usadas"):
-                print(f"[Dashboard-Revision] {rev}", flush=True)
-        except Exception:
-            print("[Dashboard] Error revisando picks:\n" + traceback.format_exc(), flush=True)
+        # El resolver va PRIMERO: un partido terminado se decide con su
+        # marcador real (ACIERTO/FALLO). Si la revision corriera antes podria
+        # ANULAR un pick que ya se jugo... y ese "anulado" seria un acierto
+        # real que nunca cuenta (nada de nada en la pestaña de acertados).
         try:
             res = resolver_picks_finalizados()
             if res.get("resueltos"):
                 print(f"[Dashboard] Picks resueltos: {res}", flush=True)
         except Exception:
             print("[Dashboard] Error resolviendo picks:\n" + traceback.format_exc(), flush=True)
+        try:
+            rev = revisar_picks_generados()
+            if rev.get("anulados") or rev.get("confirmados_ia") or rev.get("ia_usadas"):
+                print(f"[Dashboard-Revision] {rev}", flush=True)
+        except Exception:
+            print("[Dashboard] Error revisando picks:\n" + traceback.format_exc(), flush=True)
         _archivo_diario()
 
 
@@ -3641,10 +3645,29 @@ def _reverificar_pick_ia(pick: dict):
     return bool(data["confirma"])
 
 
+def _evento_empezado(pick: dict) -> bool:
+    """True si el partido del pick ya empezo (o su fecha no es fiable).
+
+    Ese pick NO se toca en la revision: su verdad la da el marcador final
+    (resolver_picks_finalizados -> ACIERTO/FALLO). Anularlo o re-verificarlo
+    aqui borraria aciertos reales del historico. Sin fecha confiable tambien
+    se salta (conservador): manos fuera, que decida el resolver.
+    """
+    try:
+        ev = datetime.fromisoformat(str(pick.get("eventDate") or "").replace("Z", "+00:00"))
+        if ev.tzinfo is None:
+            ev = ev.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    return ev <= datetime.now(timezone.utc)
+
+
 def revisar_picks_generados() -> dict:
     """Revisa los picks YA generados, del mas antiguo al mas nuevo (orden).
 
-    Por cada pendiente, en orden cronologico:
+    Solo picks cuyo partido AUN NO ha empezado (los empezados los resuelve
+    el marcador real, nunca esta revision). Por cada pendiente, en orden
+    cronologico:
       1) Puerta de calidad (_pick_calidad_ok): lo que no pasaria el filtro del
          dashboard se ANULA ya; antes seguia en la cola ocupando tiempo de
          resolucion sin nunca mostrarse.
@@ -3667,6 +3690,10 @@ def revisar_picks_generados() -> dict:
     ia_activa = os.getenv("DASHBOARD_REVISION_IA", "true").lower() == "true"
 
     for pick in pendientes:
+        # Partidos ya empezados/terminados: solo los resuelve el marcador.
+        # La revision (calidad ni IA) no decide sobre lo que ya se jugo.
+        if _evento_empezado(pick):
+            continue
         revisados += 1
         pid = pick.get("id")
         # 1) Calidad: rival TBD, cuota fuera de rango, mercado prohibido,
