@@ -1183,16 +1183,20 @@ def public_ai_pick(row):
     }
 
 
-def list_picks_aciertos():
-    """Todos los picks ACIERTO, del mas reciente al mas antiguo.
+def list_picks_aciertos_24h():
+    """Picks ACIERTO generados en las ultimas 24 horas (ventana corrida).
 
-    Alimenta la cadena continua de acertados del dashboard: NO hay corte
-    por fecha (antes solo hoy + ayer hasta las 23:00 Nicaragua).
+    Alimenta la pestana Acertados del dashboard: rota cada 24h y el flujo
+    generar -> revisar -> resolver repone picks frescos (antes era hoy+ayer
+    con corte a las 23:00 Nicaragua). created_at se guarda en UTC
+    (now_utc()), igual que aqui.
     """
+    desde = now_utc() - timedelta(hours=24)
     rows = run_query(
         "select * from ai_picks "
-        "where result = 'ACIERTO' "
-        "order by created_at desc"
+        "where result = 'ACIERTO' and created_at >= %s "
+        "order by created_at desc",
+        (desde,),
     )
     return [public_ai_pick(r) for r in (rows or [])]
 

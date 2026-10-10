@@ -267,7 +267,7 @@ KB_DEFAULT = {
         "P: Pague y no se activaron mis dias R: Los pagos tardan 1-3 minutos en confirmarse; si tras 5 minutos no se activaron, es un caso para WhatsApp.",
         "P: ¿Cada cuanto se generan los picks? R: La IA genera picks del dia automaticamente cada ciclo del scheduler y los resuelve con el marcador real al terminar cada partido.",
         "P: ¿Por que no veo todos los picks? R: Los picks con cuota menor a 1.20 o datos incompletos se descartan automaticamente por calidad.",
-        "P: ¿Puedo ver el historial de aciertos? R: Si, la pestana Acertados muestra la cadena completa de aciertos (hoy, ayer y los anteriores, sin corte) y el track record completo en /track.",
+        "P: ¿Puedo ver el historial de aciertos? R: Si, la pestana Acertados muestra los aciertos de las ultimas 24 horas y el track record completo en /track.",
         "P: ¿Los picks garantizan ganar? R: No. Es analisis estadistico con ~67% de efectividad historica; apuesta con responsabilidad.",
     ],
     "reglas": "Nunca prometas resultados de apuestas. Nunca des picks de apuestas en el soporte (para eso esta la IA principal).",

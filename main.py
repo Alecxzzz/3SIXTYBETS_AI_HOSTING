@@ -1533,7 +1533,7 @@ def dashboard_picks(user=Depends(get_current_user)):
 
 @app.get("/dashboard/acertados")
 def dashboard_acertados(user=Depends(get_current_user)):
-    """Cadena continua de aciertos (hoy, ayer y anteriores), sin cuotas bajas."""
+    """Aciertos de las ultimas 24h (ventana corrida), sin cuotas bajas."""
     return {"acertados": dashboard.aciertos_visibles()}
 
 

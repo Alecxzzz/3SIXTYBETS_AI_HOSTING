@@ -39,10 +39,10 @@ MIN_JUEGOS_MANANA = 15
 # Doble verificacion antes de publicar: 2 pasadas independientes de la IA
 # contra fuentes externas; AMBAS deben coincidir.
 VERIFICACIONES_PUBLICAR = 2
-# ACERTADOS SIN CORTE (regla cambiada): la pestana Acertados es una cadena
-# continua que solo crece — hoy, ayer y todos los anteriores. La vieja regla
-# que escondia los de ayer a las 23:00 Nicaragua dejaba el panel vacio a
-# medianoche, asi que se elimino HORA_CORTE_ACERTADOS.
+# ACERTADOS = ULTIMAS 24 HORAS (regla cambiada): la pestana Acertados muestra
+# los picks generados en las ultimas 24h, en ventana corrida. Sin corte a las
+# 23:00 ni vacio a medianoche: el flujo generar -> revisar -> resolver repone
+# el panel solo. Se elimino HORA_CORTE_ACERTADOS (vieja regla de las 23:00).
 # La IA analiza/genera picks a cualquier hora (antes solo desde las 21:00).
 # Se mantiene la constante por compatibilidad pero ya no bloquea.
 HORA_INICIO_ANALISIS = 0
@@ -3257,19 +3257,18 @@ def _fecha_pick_nic(p: dict):
 
 
 def aciertos_visibles() -> list:
-    """Aciertos del dashboard: cadena continua SIN corte horario.
+    """Aciertos del dashboard: ultimas 24 horas (ventana corrida).
 
-    - Muestra TODOS los picks con resultado ACIERTO (hoy, ayer y los
-      anteriores). Cada pick nuevo entra por el inicio y los viejos siguen
-      ahi: la pestana Acertados solo crece (antes se cortaba a las 23:00
-      y a medianoche quedaba vacia).
-    - Solo la jornada de AYER conserva la etiqueta de confusion del
-      usuario; los mas antiguos usan su fechaLabel real ('DD mmm HH:MM').
+    - Muestra los picks ACIERTO generados en las ultimas 24h, del mas
+      reciente al mas viejo. Sin corte a las 23:00 ni vacio a medianoche:
+      el flujo generar -> revisar -> resolver repone el panel solo.
+    - La jornada de AYER conserva la etiqueta de confusion del usuario;
+      los demas usan su fechaLabel real ('DD mmm HH:MM').
     - Nunca muestra picks con cuota <= ODDS_MINIMA.
-    - Cada pick lleva el flag esAyer para que los KPIs distingan "ayer"
-      del resto de la historia.
+    - Cada pick lleva el flag esAyer para que el KPI "Aciertos de ayer"
+      cuente solo la jornada de ayer (no toda la ventana).
     """
-    aciertos = db.list_picks_aciertos() or []
+    aciertos = db.list_picks_aciertos_24h() or []
     ayer = (_hora_nicaragua() - timedelta(days=1)).date()
     visibles = []
     for p in aciertos:
@@ -3436,9 +3435,9 @@ def resumen_dashboard(username: str) -> dict:
         p["golden"] = (p.get("tier") or "") == TIER_GOLDEN
     pendientes.sort(key=lambda p: 0 if p.get("golden") else 1)
 
-    # Aciertos visibles: cadena continua (hoy + ayer + historico), sin
-    # corte horario ni cuotas bajas. "Ayer" se distingue por el flag esAyer
-    # para que el KPI no se lleve toda la historia.
+    # Aciertos visibles: ultimas 24h (ventana corrida), sin corte horario
+    # ni cuotas bajas. "Ayer" se distingue por el flag esAyer para que el
+    # KPI no se lleve toda la ventana.
     aciertos_visibles_lista = aciertos_visibles()
     aciertos_de_ayer = [p for p in aciertos_visibles_lista if p.get("esAyer")]
 
