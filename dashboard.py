@@ -69,6 +69,13 @@ _salud = {
     "sofascore_estado": "sin usar",
     "marcadores_discrepantes": 0,
     "archivo_ultimo_dia": None,
+    # Revision de picks ya generados (hilo dashboard-revision, independiente
+    # del generador para que revisar nunca bloquee generar).
+    "ultima_revision": None,
+    "revisiones": 0,
+    "revision_anulados": 0,
+    "revision_ia_confirmados": 0,
+    "revision_ia_sin_presupuesto": 0,
 }
 
 
@@ -3457,22 +3464,29 @@ def resumen_dashboard(username: str) -> dict:
 
 
 # ============================================================
-# SCHEDULER AUTOMATICO
+# SCHEDULER AUTOMATICO (DOS HILOS: generacion + revision)
 # ============================================================
+# Antes TODO pasaba en _ciclo() bajo UN lock: generar, revisar y resolver se
+# bloqueaban entre si (mientras la IA analizaba ~90 partidos, nadie revisaba
+# los picks ya publicados). Ahora son dos hilos con locks SEPARADOS:
+#   * generador (dashboard-picks): analiza y crea picks NUEVOS.
+#   * revisor  (dashboard-revision): revisa los YA generados y resuelve.
+# El orden se mantiene porque cada hilo procesa su cola en orden cronologico
+# (list_picks_pendientes: order by created_at asc) y el lock de cada hilo
+# evita ciclos duplicados sin cruzarse con el otro.
 
 INTERVALO_SEGUNDOS = max(300, int(os.getenv("DASHBOARD_PICKS_INTERVAL", "1800")))
 _generando = threading.Lock()
 
 
 def _ciclo():
+    """Ciclo de GENERACION: analiza partidos y crea picks nuevos.
+
+    No revisa ni resuelve nada: eso es _ciclo_revision() (otro hilo), para
+    que revisar jamas bloquee generar.
+    """
     with _generando:
         _salud["ultimo_ciclo"] = datetime.now(timezone.utc).isoformat()
-        try:
-            reparados = backfill_picks_metadata()
-            if reparados:
-                print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
-        except Exception:
-            print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
         try:
             stats = generar_picks_dia()
             _salud["generaciones_fallidas"] = 0
@@ -3489,13 +3503,31 @@ def _ciclo():
                     flush=True,
                 )
             print("[Dashboard] Error en ciclo de picks:\n" + traceback.format_exc(), flush=True)
+        _vigilante()
+
+
+def _ciclo_revision():
+    """Ciclo de REVISION: revisa y resuelve los picks ya generados, en orden."""
+    with _revisando:
+        _salud["ultima_revision"] = datetime.now(timezone.utc).isoformat()
+        try:
+            reparados = backfill_picks_metadata()
+            if reparados:
+                print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
+        except Exception:
+            print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
+        try:
+            rev = revisar_picks_generados()
+            if rev.get("anulados") or rev.get("confirmados_ia") or rev.get("ia_usadas"):
+                print(f"[Dashboard-Revision] {rev}", flush=True)
+        except Exception:
+            print("[Dashboard] Error revisando picks:\n" + traceback.format_exc(), flush=True)
         try:
             res = resolver_picks_finalizados()
             if res.get("resueltos"):
                 print(f"[Dashboard] Picks resueltos: {res}", flush=True)
         except Exception:
             print("[Dashboard] Error resolviendo picks:\n" + traceback.format_exc(), flush=True)
-        _vigilante()
         _archivo_diario()
 
 
@@ -3540,6 +3572,178 @@ def _archivo_diario():
         print("[Dashboard] Error archivando picks:\n" + traceback.format_exc(), flush=True)
 
 
+# ============================================================
+# REVISION DE PICKS YA GENERADOS (hilo dashboard-revision)
+# ============================================================
+# Este es el "agente revisor": recorre los picks YA creados mientras el
+# generador sigue analizando otros partidos en paralelo. La cola se procesa
+# SIEMPRE del mas antiguo al mas nuevo (list_picks_pendientes: created_at
+# asc), asi el orden de revision coincide con el orden de creacion.
+REVISION_INTERVALO_SEGUNDOS = max(60, int(os.getenv("DASHBOARD_REVISION_INTERVAL", "300")))
+# La cuota TPD de la IA es prioridad del GENERADOR: la revision solo usa lo
+# que sobre, con tope de llamadas por ciclo y un minimo de presupuesto.
+REVISION_IA_MAX = max(0, int(os.getenv("DASHBOARD_REVISION_IA_MAX", "4")))
+REVISION_IA_MIN_PRESUPUESTO = int(os.getenv("DASHBOARD_REVISION_IA_MIN_TOK", "30000"))
+_revisando = threading.Lock()
+_revisados: dict = {}  # pick_id -> ts de su ultima pasada de IA
+_REVISION_IA_TTL = 4 * 3600  # no repetir la misma reverificacion antes de 4h
+
+
+def _pick_debil(pick: dict) -> bool:
+    """True si el pick merece segunda opinion de IA (los mas debiles):
+    generado SIN IA (fallback cuantitativo) o con confianza BAJA."""
+    if "cuantitativo" in str(pick.get("model") or "").lower():
+        return True
+    if str(pick.get("confidence") or "").upper() == "BAJA":
+        return True
+    # Razon cuantitativa aunque el modelo no lo diga (filas viejas).
+    return "criterio cuantitativo" in str(pick.get("rationale") or "").lower()
+
+
+def _reverificar_pick_ia(pick: dict):
+    """Pide a la IA revisar un pick YA publicado contra datos actuales.
+
+    Devuelve True (confirmado), False (contradicho por los datos actuales) o
+    None (sin respuesta/ambiguo: el pick no se toca y se reintenta luego).
+    """
+    pregunta = (
+        "REVISION POST-PUBLICACION: este pick YA esta en el dashboard. "
+        "No propongas otro; solo confirma o rechaza ESTE con datos actuales.\n"
+        f"Partido: {pick.get('awayName') or '?'} (visitante) vs "
+        f"{pick.get('homeName') or '?'} (local)\n"
+        f"Liga: {pick.get('league') or '?'} · Fecha: {pick.get('eventDate') or '?'}\n"
+        f"Pick: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}' "
+        f"· cuota {pick.get('odds')} · confianza {pick.get('confidence')}\n"
+        f"Razon original: {str(pick.get('rationale') or '')[:400]}\n"
+        "Busca en la web los datos ACTUALES (forma, bajas, H2H) y responde SOLO "
+        "JSON: {\"confirma\": true|false, \"motivo\": \"...\"}. confirma=false SOLO "
+        "si los datos contradicen el pick; si lo apoyan o no hay noticia nueva, "
+        "confirma=true."
+    )
+    texto, _modelo = _preguntar_ia(
+        pregunta,
+        sport=pick.get("sport"),
+        system_prompt=PROMPT_VERIFICACION,
+        buscar_web=False,
+    )
+    if not texto or _es_error_ia(texto):
+        return None
+    limpio = re.sub(r"```(?:json)?|```", "", texto).strip()
+    match = re.search(r"\{.*\}", limpio, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("confirma"), bool):
+        return None
+    return bool(data["confirma"])
+
+
+def revisar_picks_generados() -> dict:
+    """Revisa los picks YA generados, del mas antiguo al mas nuevo (orden).
+
+    Por cada pendiente, en orden cronologico:
+      1) Puerta de calidad (_pick_calidad_ok): lo que no pasaria el filtro del
+         dashboard se ANULA ya; antes seguia en la cola ocupando tiempo de
+         resolucion sin nunca mostrarse.
+      2) Picks debiles (fallback cuantitativo o confianza BAJA): UNA pasada de
+         IA de segunda opinion, con tope por ciclo y solo si queda presupuesto
+         TPD (la cuota es prioridad del generador). Confirmado => verificado
+         +1 persistente; contradicho => ANULADO. Sin respuesta => se reintenta
+         en el proximo ciclo (no se marca, para no repetir gastando cuota).
+    """
+    pendientes = db.list_picks_pendientes() or []  # created_at asc = orden cronologico
+    revisados = anulados = confirmados = ia_usadas = sin_presupuesto = 0
+    try:
+        from ai.dashboard_ia import presupuesto_disponible
+        disponible = presupuesto_disponible()
+    except Exception:
+        disponible = 0
+    ahora = time.time()
+    for k in [k for k, ts in _revisados.items() if ahora - ts > _REVISION_IA_TTL]:
+        del _revisados[k]
+    ia_activa = os.getenv("DASHBOARD_REVISION_IA", "true").lower() == "true"
+
+    for pick in pendientes:
+        revisados += 1
+        pid = pick.get("id")
+        # 1) Calidad: rival TBD, cuota fuera de rango, mercado prohibido,
+        #    textos con frases de 'sin datos', equipos genericos...
+        if not _pick_calidad_ok(pick):
+            try:
+                if db.update_pick_result(pid, "ANULADO"):
+                    anulados += 1
+                    _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
+                    print(
+                        f"[Dashboard-Revision] Pick {pid} ({pick.get('market')}) "
+                        f"ANULADO por calidad",
+                        flush=True,
+                    )
+            except Exception:
+                print(f"[Dashboard-Revision] Error anulando pick {pid}:\n"
+                      + traceback.format_exc(), flush=True)
+            continue
+        # Segunda opinion IA: solo picks debiles, con tope y presupuesto.
+        if not (ia_activa and _pick_debil(pick)) or pid in _revisados:
+            continue
+        if ia_usadas >= REVISION_IA_MAX:
+            continue
+        if disponible < REVISION_IA_MIN_PRESUPUESTO:
+            sin_presupuesto += 1
+            continue
+        try:
+            confirma = _reverificar_pick_ia(pick)
+        except Exception:
+            print(f"[Dashboard-Revision] Error re-verificando pick {pid}:\n"
+                  + traceback.format_exc(), flush=True)
+            confirma = None
+        ia_usadas += 1
+        disponible -= 1500  # coste estimado de una pasada corta
+        if confirma is None:
+            continue  # sin respuesta: se reintenta en el proximo ciclo
+        _revisados[pid] = ahora
+        try:
+            if confirma:
+                confirmados += 1
+                _salud["revision_ia_confirmados"] = (
+                    _salud.get("revision_ia_confirmados", 0) + 1
+                )
+                db.marcar_pick_verificado(pid)
+            elif db.update_pick_result(pid, "ANULADO"):
+                anulados += 1
+                _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
+                print(
+                    f"[Dashboard-Revision] Pick {pid} ANULADO: la IA lo contradice "
+                    f"con datos actuales",
+                    flush=True,
+                )
+        except Exception:
+            print(f"[Dashboard-Revision] Error guardando revision de {pid}:\n"
+                  + traceback.format_exc(), flush=True)
+
+    _salud["revisiones"] = _salud.get("revisiones", 0) + 1
+    if sin_presupuesto:
+        _salud["revision_ia_sin_presupuesto"] = (
+            _salud.get("revision_ia_sin_presupuesto", 0) + sin_presupuesto
+        )
+    return {
+        "revisados": revisados,
+        "anulados": anulados,
+        "confirmados_ia": confirmados,
+        "ia_usadas": ia_usadas,
+        "sin_presupuesto": sin_presupuesto,
+    }
+
+
+# Cache del resumen de avance ("partidos hoy") para que /dashboard/salud
+# responda rapido aunque el cache este frio: (ts, datos). Sin esta inicializacion
+# a nivel de modulo, la primera lectura con `global _avance_cache` lanzaba
+# NameError y el endpoint de salud respondia 500.
+_avance_cache = None
+
+
 def salud_scheduler() -> dict:
     """Idea 20: estado del scheduler para monitoreo (endpoint /dashboard/salud)."""
     s = dict(_salud)
@@ -3551,6 +3755,13 @@ def salud_scheduler() -> dict:
     except Exception:
         s["scheduler_hilo_vivo"] = None
     s["scheduler_intervalo_min"] = round(INTERVALO_SEGUNDOS / 60, 1)
+    # Hilo del revisor: si esta caido, nadie esta revisando/resolviendo los
+    # picks ya generados aunque el generador siga vivo.
+    try:
+        s["revision_hilo_vivo"] = revision_activa()
+    except Exception:
+        s["revision_hilo_vivo"] = None
+    s["revision_intervalo_min"] = round(REVISION_INTERVALO_SEGUNDOS / 60, 1)
     s["ventana_analisis"] = (
         f"desde {HORA_INICIO_ANALISIS}:00 Nicaragua, "
         f"partidos dentro de {VENTANA_ANALISIS_H}h"
@@ -3653,46 +3864,96 @@ def _loop():
         time.sleep(INTERVALO_SEGUNDOS)
 
 
-# Hilo vivo del scheduler (visibilizable en /dashboard/salud)
+def _loop_revision():
+    """Hilo revisor: pasa la cola de picks YA generados, en orden, mientras el
+    generador sigue analizando otros partidos (locks separados: no se bloquean)."""
+    time.sleep(60)  # dejar arrancar la app y al generador primero
+    while True:
+        try:
+            _ciclo_revision()
+        except Exception:
+            print("[Dashboard] Error en ciclo de revision (el hilo sigue vivo):\n"
+                  + traceback.format_exc(), flush=True)
+        time.sleep(REVISION_INTERVALO_SEGUNDOS)
+
+
+# Hilos vivos del scheduler (visibilizables en /dashboard/salud)
 _hilo_scheduler = None
+_hilo_revision = None
+_hilo_watchdog = None
 _scheduler_lock = threading.Lock()
 
 
 def iniciar_scheduler():
-    """Arranca el hilo daemon que genera y resuelve picks automaticos.
+    """Arranca los dos hilos daemon: generador de picks y revisor.
 
-    Idempotente: si el hilo ya corre no crea otro. Un watchdog lo vigila y
-    lo reinicia si muriera (defensa en profundidad del try/except de _loop).
+    Idempotente: si un hilo ya corre no lo duplica (arranca solo el que
+    falte). Un watchdog vigila ambos y los reinicia si murieran.
     """
-    global _hilo_scheduler
+    global _hilo_scheduler, _hilo_revision, _hilo_watchdog
+    arrancados = []
     with _scheduler_lock:
-        if _hilo_scheduler is not None and _hilo_scheduler.is_alive():
-            print("[Dashboard] Scheduler ya corriendo; no se duplica", flush=True)
-            return
-        _hilo_scheduler = threading.Thread(
-            target=_loop, daemon=True, name="dashboard-picks"
-        )
-        _hilo_scheduler.start()
-        print("[Dashboard] Scheduler de picks automaticos iniciado", flush=True)
-    threading.Thread(
-        target=_watchdog_scheduler, daemon=True, name="dashboard-watchdog"
-    ).start()
+        if _hilo_scheduler is None or not _hilo_scheduler.is_alive():
+            _hilo_scheduler = threading.Thread(
+                target=_loop, daemon=True, name="dashboard-picks"
+            )
+            _hilo_scheduler.start()
+            arrancados.append("generacion (dashboard-picks)")
+        if _hilo_revision is None or not _hilo_revision.is_alive():
+            _hilo_revision = threading.Thread(
+                target=_loop_revision, daemon=True, name="dashboard-revision"
+            )
+            _hilo_revision.start()
+            arrancados.append("revision (dashboard-revision)")
+        if _hilo_watchdog is None or not _hilo_watchdog.is_alive():
+            _hilo_watchdog = threading.Thread(
+                target=_watchdog_scheduler, daemon=True, name="dashboard-watchdog"
+            )
+            _hilo_watchdog.start()
+            arrancados.append("watchdog (dashboard-watchdog)")
+    if arrancados:
+        print(f"[Dashboard] Schedulers iniciados: {', '.join(arrancados)}", flush=True)
+    else:
+        print("[Dashboard] Schedulers ya corriendo; no se duplica", flush=True)
 
 
 def _watchdog_scheduler():
-    """Revisa cada 5 min que el hilo del scheduler siga vivo; lo reinicia."""
+    """Revisa cada 5 min que los dos hilos sigan vivos; reinicia los caidos.
+
+    A diferencia de la version anterior (que moria tras un reinicio), este
+    bucle es permanente: si ambos hilos estan vivos sigue vigilando, y si
+    alguno cae lo levanta el mismo sin depender de otra llamada.
+    """
+    global _hilo_scheduler, _hilo_revision
     while True:
         time.sleep(300)
-        with _scheduler_lock:
-            vivo = _hilo_scheduler is not None and _hilo_scheduler.is_alive()
-        if not vivo:
-            print("[Dashboard] WATCHDOG: hilo del scheduler caido; reiniciando",
-                  flush=True)
-            iniciar_scheduler()
-            return  # el watchdog que cree el nuevo arranque se encarga
+        try:
+            with _scheduler_lock:
+                if _hilo_scheduler is None or not _hilo_scheduler.is_alive():
+                    print("[Dashboard] WATCHDOG: hilo de generacion caido; reiniciando",
+                          flush=True)
+                    _hilo_scheduler = threading.Thread(
+                        target=_loop, daemon=True, name="dashboard-picks"
+                    )
+                    _hilo_scheduler.start()
+                if _hilo_revision is None or not _hilo_revision.is_alive():
+                    print("[Dashboard] WATCHDOG: hilo de revision caido; reiniciando",
+                          flush=True)
+                    _hilo_revision = threading.Thread(
+                        target=_loop_revision, daemon=True, name="dashboard-revision"
+                    )
+                    _hilo_revision.start()
+        except Exception:
+            print("[Dashboard] WATCHDOG error:\n" + traceback.format_exc(), flush=True)
 
 
 def scheduler_activo() -> bool:
     """True si el hilo de generacion de picks esta vivo."""
     with _scheduler_lock:
         return _hilo_scheduler is not None and _hilo_scheduler.is_alive()
+
+
+def revision_activa() -> bool:
+    """True si el hilo de revision de picks esta vivo."""
+    with _scheduler_lock:
+        return _hilo_revision is not None and _hilo_revision.is_alive()

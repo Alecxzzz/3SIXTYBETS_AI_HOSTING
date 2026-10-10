@@ -1338,6 +1338,20 @@ def update_pick_metadata(pick_id, home_name, away_name, home_logo, away_logo, le
     ))
 
 
+def marcar_pick_verificado(pick_id):
+    """Suma una verificacion IA al pick (tope 2) tras revision post-publicacion.
+
+    Persistente (columna verificado, ya migrada en instalaciones previas): el
+    frontend muestra el badge 'x2 verificado' con verificado >= 2, y al estar
+    en la BD sobrevive reinicios del backend.
+    """
+    return bool(run_query(
+        "update ai_picks set verificado = least(verificado + 1, 2), updated_at = %s "
+        "where id = %s",
+        (now_utc(), pick_id),
+    ))
+
+
 def count_user_messages(user_id: str) -> int:
     """Mensajes del usuario (role='user') en el chat, todos los tiempos."""
     row = run_query(
