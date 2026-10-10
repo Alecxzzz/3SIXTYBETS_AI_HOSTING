@@ -3434,6 +3434,16 @@ def resumen_dashboard(username: str) -> dict:
     for p in pendientes:
         p["golden"] = (p.get("tier") or "") == TIER_GOLDEN
     pendientes.sort(key=lambda p: 0 if p.get("golden") else 1)
+    # Reconstruir hoy/manana ya ordenados (golden primero).
+    pronosticos_hoy = [p for p in pendientes if not _es_manana(p)]
+    pronosticos_manana = [p for p in pendientes if _es_manana(p)]
+
+    # Ventana principal: hoy; si hoy ya no tiene picks vigentes (todos
+    # resueltos o aun sin generar), caemos a los de mas tarde/manana para que
+    # la ventana NUNCA quede vacia mientras haya picks pendientes vigentes.
+    # El flujo generar -> revisar -> resolver repone la jornada de hoy sola;
+    # mientras tanto se ven los proximos partidos en lugar del mensaje vacio.
+    pronosticos_principal = pronosticos_hoy or pronosticos_manana
 
     # Aciertos visibles: ultimas 24h (ventana corrida), sin corte horario
     # ni cuotas bajas. "Ayer" se distingue por el flag esAyer para que el
@@ -3456,7 +3466,7 @@ def resumen_dashboard(username: str) -> dict:
     return {
         "welcome": f"Bienvenido, {username}",
         "stats": {
-            "pronosticos_del_dia": len(pronosticos_hoy),
+            "pronosticos_del_dia": len(pronosticos_principal),
             "pronosticos_manana": len(pronosticos_manana),
             "pronosticos_acertados_por_la_ia": len(aciertos_visibles_lista),
             "aciertos_ayer": len(aciertos_de_ayer),
@@ -3467,7 +3477,7 @@ def resumen_dashboard(username: str) -> dict:
             "historico_aciertos": historial.get("aciertos", 0),
             "historico_resueltos": historial.get("resueltos", 0),
         },
-        "pronosticos_del_dia": pronosticos_hoy,
+        "pronosticos_del_dia": pronosticos_principal,
         "pronosticos_manana": pronosticos_manana,
         "pronosticos_acertados": aciertos_visibles_lista,
         "updated_at": datetime.now(timezone.utc).isoformat(),
