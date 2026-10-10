@@ -39,10 +39,10 @@ MIN_JUEGOS_MANANA = 15
 # Doble verificacion antes de publicar: 2 pasadas independientes de la IA
 # contra fuentes externas; AMBAS deben coincidir.
 VERIFICACIONES_PUBLICAR = 2
-# Los acertados del dia anterior se muestran hasta las 23:00 Nicaragua
-# (la docstring de aciertos_visibles() ya decia 23:00; la constante estaba en
-# 20 y ocultaba 3 horas extra de aciertos, dejando el panel casi vacio).
-HORA_CORTE_ACERTADOS = 23
+# ACERTADOS SIN CORTE (regla cambiada): la pestana Acertados es una cadena
+# continua que solo crece — hoy, ayer y todos los anteriores. La vieja regla
+# que escondia los de ayer a las 23:00 Nicaragua dejaba el panel vacio a
+# medianoche, asi que se elimino HORA_CORTE_ACERTADOS.
 # La IA analiza/genera picks a cualquier hora (antes solo desde las 21:00).
 # Se mantiene la constante por compatibilidad pero ya no bloquea.
 HORA_INICIO_ANALISIS = 0
@@ -3233,42 +3233,52 @@ def _label_ayer_confusion(pick: dict) -> str | None:
         return "AYER LA GENTE SE ESTÁ CONFUNDIENDO"
 
 
-def aciertos_visibles() -> list:
-    """Aciertos que se muestran en el dashboard.
+def _fecha_pick_nic(p: dict):
+    """Fecha de la jornada del pick en hora Nicaragua (date) o None.
 
-    - Los de HOY siempre.
-    - Los de AYER solo hasta las 23:00 hora Nicaragua (con etiqueta 'Ayer').
-    - Nunca muestra picks con cuota <= ODDS_MINIMA.
+    Usa la fecha del EVENTO; si falta, la de creacion; si falta, pickDate.
     """
-    aciertos = db.list_picks_aciertos_hoy_ayer() or []
-    ahora_local = _hora_nicaragua()
-    mostrar_ayer = ahora_local.hour < HORA_CORTE_ACERTADOS
+    for raw in (p.get("eventDate"), p.get("createdAt")):
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(TZ_NICARAGUA).date()
+        except (ValueError, TypeError):
+            continue
+    if p.get("pickDate"):
+        try:
+            return datetime.fromisoformat(str(p["pickDate"])[:10]).date()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def aciertos_visibles() -> list:
+    """Aciertos del dashboard: cadena continua SIN corte horario.
+
+    - Muestra TODOS los picks con resultado ACIERTO (hoy, ayer y los
+      anteriores). Cada pick nuevo entra por el inicio y los viejos siguen
+      ahi: la pestana Acertados solo crece (antes se cortaba a las 23:00
+      y a medianoche quedaba vacia).
+    - Solo la jornada de AYER conserva la etiqueta de confusion del
+      usuario; los mas antiguos usan su fechaLabel real ('DD mmm HH:MM').
+    - Nunca muestra picks con cuota <= ODDS_MINIMA.
+    - Cada pick lleva el flag esAyer para que los KPIs distingan "ayer"
+      del resto de la historia.
+    """
+    aciertos = db.list_picks_aciertos() or []
+    ayer = (_hora_nicaragua() - timedelta(days=1)).date()
     visibles = []
     for p in aciertos:
         if not _pick_calidad_ok(p):
             continue
-        # "De ayer" se decide por la fecha en que SE JUGO el evento y tambien
-        # por cuando se creo el pick (regla del usuario: al pasar las 12:00,
-        # todo lo del dia anterior debe decir AYER).
-        es_ayer = False
-        try:
-            dt_ev = datetime.fromisoformat(
-                str(p.get("eventDate") or "").replace("Z", "+00:00")
-            )
-            es_ayer = dt_ev.astimezone(TZ_NICARAGUA).date() < ahora_local.date()
-        except (ValueError, TypeError):
-            pass
-        if not es_ayer:
-            try:
-                dt_cr = datetime.fromisoformat(p.get("createdAt") or "")
-                es_ayer = (
-                    dt_cr.replace(tzinfo=timezone.utc).astimezone(TZ_NICARAGUA).date()
-                    < ahora_local.date()
-                )
-            except (ValueError, TypeError):
-                es_ayer = (p.get("pickDate") or "") < ahora_local.date().isoformat()
-        if es_ayer and not mostrar_ayer:
-            continue
+        # "De ayer" se decide por la fecha en que SE JUGO el evento (o por
+        # cuando se creo el pick si falta el evento), en hora Nicaragua.
+        es_ayer = _fecha_pick_nic(p) == ayer
+        p["esAyer"] = es_ayer
         if es_ayer:
             p["fechaLabel"] = _label_ayer_confusion(p)
         visibles.append(p)
@@ -3377,9 +3387,10 @@ def resumen_dashboard(username: str) -> dict:
       moviendo a la seccion de acertados; los fallados nunca se muestran).
       Rango publicable 1.20-2.50; GOLDEN PICK (1.35-1.40, doble verificados)
       son 1-2 destacados, no todos.
-    - acertados: picks de HOY y de AYER con resultado ACIERTO (los de ayer solo
-      hasta las 23:00 Nicaragua). Cada pick trae fechaLabel ('Hoy HH:MM' /
-      'Ayer HH:MM') en hora Nicaragua.
+    - acertados: TODOS los picks con ACIERTO (cadena continua: hoy, ayer y
+      los anteriores; SIN corte de las 23:00). Cada pick trae fechaLabel
+      ('Hoy HH:MM' / 'Ayer HH:MM' / 'DD mmm HH:MM') en hora Nicaragua y el
+      flag esAyer.
     - efectividad_hoy: aciertos / resueltos de HOY (coherente con los KPIs).
     - historico: acumulado de todos los dias (se muestra aparte). Se limpia
       automaticamente cuando se borran todos los picks (/dashboard/reset).
@@ -3425,10 +3436,11 @@ def resumen_dashboard(username: str) -> dict:
         p["golden"] = (p.get("tier") or "") == TIER_GOLDEN
     pendientes.sort(key=lambda p: 0 if p.get("golden") else 1)
 
-    # Aciertos visibles: hoy + ayer (hasta 23:00 Nicaragua), sin cuotas bajas
+    # Aciertos visibles: cadena continua (hoy + ayer + historico), sin
+    # corte horario ni cuotas bajas. "Ayer" se distingue por el flag esAyer
+    # para que el KPI no se lleve toda la historia.
     aciertos_visibles_lista = aciertos_visibles()
-    ids_hoy = {p["id"] for p in aciertos_hoy}
-    aciertos_de_ayer = [p for p in aciertos_visibles_lista if p["id"] not in ids_hoy]
+    aciertos_de_ayer = [p for p in aciertos_visibles_lista if p.get("esAyer")]
 
     historial = db.count_aciertos_historico() or {}
 

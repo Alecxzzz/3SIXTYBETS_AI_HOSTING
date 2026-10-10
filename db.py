@@ -1112,17 +1112,27 @@ def replace_events(events: list) -> int:
 TZ_NICARAGUA = timezone(timedelta(hours=-6), "America/Managua")
 
 
+_MESES_CORTOS = (
+    "ene", "feb", "mar", "abr", "may", "jun",
+    "jul", "ago", "sep", "oct", "nov", "dic",
+)
+
+
 def _fecha_label_nic(created_at):
-    """Etiqueta legible en hora Nicaragua: 'Hoy 13:00' o 'Ayer 10:45'."""
+    """Etiqueta legible en hora Nicaragua: 'Hoy 13:00', 'Ayer 10:45' o
+    '08 oct 14:30' cuando el pick es mas antiguo (cadena continua sin corte)."""
     if not created_at:
         return None
     try:
         dt = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(str(created_at))
         local = dt.replace(tzinfo=timezone.utc).astimezone(TZ_NICARAGUA)
         ahora_local = datetime.now(timezone.utc).astimezone(TZ_NICARAGUA)
-        prefijo = "Hoy" if local.date() == ahora_local.date() else "Ayer"
-        return f"{prefijo} {local.strftime('%H:%M')}"
-    except (ValueError, TypeError):
+        if local.date() == ahora_local.date():
+            return f"Hoy {local.strftime('%H:%M')}"
+        if local.date() == (ahora_local - timedelta(days=1)).date():
+            return f"Ayer {local.strftime('%H:%M')}"
+        return f"{local.day:02d} {_MESES_CORTOS[local.month - 1]} {local.strftime('%H:%M')}"
+    except (ValueError, TypeError, IndexError):
         return None
 
 
@@ -1173,15 +1183,16 @@ def public_ai_pick(row):
     }
 
 
-def list_picks_aciertos_hoy_ayer():
-    """Picks ACIERTO de hoy y ayer (para mostrarlos hasta las 11pm Nicaragua)."""
-    hoy = now_utc().date()
-    ayer = hoy - timedelta(days=1)
+def list_picks_aciertos():
+    """Todos los picks ACIERTO, del mas reciente al mas antiguo.
+
+    Alimenta la cadena continua de acertados del dashboard: NO hay corte
+    por fecha (antes solo hoy + ayer hasta las 23:00 Nicaragua).
+    """
     rows = run_query(
         "select * from ai_picks "
-        "where result = 'ACIERTO' and pick_date in (%s, %s) "
-        "order by created_at desc",
-        (hoy, ayer),
+        "where result = 'ACIERTO' "
+        "order by created_at desc"
     )
     return [public_ai_pick(r) for r in (rows or [])]
 

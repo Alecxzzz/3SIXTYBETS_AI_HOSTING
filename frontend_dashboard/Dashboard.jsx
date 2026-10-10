@@ -264,7 +264,7 @@ export default function Dashboard() {
               ? "La IA aún no generó pronósticos para hoy. Vuelve en unos minutos."
               : vista === "manana"
                 ? "La IA está analizando los partidos de mañana. El resultado aparecerá aquí automáticamente."
-                : "Aún no hay pronósticos acertados hoy."}
+                : "Aún no hay pronósticos acertados."}
           </p>
         )}
         {picks.map((p) => (

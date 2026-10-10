@@ -1533,7 +1533,7 @@ def dashboard_picks(user=Depends(get_current_user)):
 
 @app.get("/dashboard/acertados")
 def dashboard_acertados(user=Depends(get_current_user)):
-    """Aciertos de HOY y de AYER (hasta las 23:00 Nicaragua), sin cuotas bajas."""
+    """Cadena continua de aciertos (hoy, ayer y anteriores), sin cuotas bajas."""
     return {"acertados": dashboard.aciertos_visibles()}
 
 
