@@ -1821,8 +1821,20 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # solo se daba forma de equipo, y los props de jugador se elegian a ciegas.
         mensaje += _form_jugadores_props(markets_reales)
 
-        texto, modelo = _preguntar_ia(mensaje, p["sport"])
-        pick = _parsear_pick_json(texto)
+        # Si la IA ya agoto su cuota en ESTE ciclo (modelos en pausa por
+        # rate-limit por minuto), no reintentarla partido a partido: perderia
+        # minutos en timeouts de red. Se pasa directo al criterio cuantitativo
+        # sobre los mercados reales (cuota verdadera del bookmaker, 0 tokens).
+        # Asi el ciclo recorre TODA la ventana en lugar de abortarse en el
+        # primer partido sin respuesta de IA.
+        if sin_cuota:
+            pick = _pick_deterministico(p, markets_reales, label)
+            modelo = "cuantitativo (sin IA)"
+            if not pick:
+                continue  # sin mercados resolubles: sigue con el siguiente partido
+        else:
+            texto, modelo = _preguntar_ia(mensaje, p["sport"])
+            pick = _parsear_pick_json(texto)
 
         if not pick and modelo == "SIN_CUOTA":
             # SIN_CUOTA: la IA no respondio (TPD/ITPM de Groq agotado, 402 de
@@ -1841,13 +1853,17 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             pick = _pick_deterministico(p, markets_reales, label)
             modelo = "cuantitativo (sin IA)"
             if not pick:
-                break
+                # Un partido sin mercados publicables NO aborta el ciclo: con
+                # sin_cuota activo, los siguientes partidos entran por la rama
+                # cuantitativa de arriba y siguen generando aunque la IA no
+                # responda. Antes aqui habia un 'break' que dejaba el dia en 0.
+                continue
 
         if not pick:
             if modelo == "SIN_CUOTA":
                 errores += 1
                 sin_cuota = True
-                break
+                continue  # no abortar: seguir con los demas partidos
             # {"error": "sin datos"} es una respuesta valida de la IA: ese
             # partido no tiene datos, no se reintenta cada ciclo. Un fallo
             # transitorio (respuesta vacia/cortada) SI se reintenta.
