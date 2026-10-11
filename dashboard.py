@@ -2553,18 +2553,42 @@ def _resolver_deterministico(pick: dict, detail: dict):
         return "ACIERTO" if elegido.get("name") == ganador.get("name") else "FALLO"
 
     # ---- Doble oportunidad ----
+    # La seleccion llega en lenguaje natural ("Mainz 05 o Bayer Leverkusen",
+    # "Empate o Atlético de Madrid"), NO como el código 1x/x2/12. Se deduce el
+    # código mirando QUÉ se menciona en la seleccion (cada equipo y/o empate):
+    #   12 = los dos equipos (NO cubre empate)
+    #   1X = local o empate
+    #   X2 = empate o visitante
+    # Antes esto solo entendia el código literal: los picks reales caian a la
+    # IA y acababan PENDIENTE para siempre (y los empates se marcaban FALLO).
     if "doble oportunidad" in texto or "doble oport" in texto:
-        codigo = sel.replace(" ", "")
+        # Un pick de PRIMERA MITAD no se decide con el marcador final: lo
+        # resuelve _resolver_por_mitades con el marcador por periodo.
+        if "primera mitad" in texto or "1a mitad" in texto or "1er tiempo" in texto:
+            return None
+        sel_norm = _norm_texto(f"{sel} {titulo}")
+        home_norm = _norm_texto(home.get("name"))
+        away_norm = _norm_texto(away.get("name"))
+        menciona_local = bool(home_norm) and home_norm in sel_norm
+        menciona_visitante = bool(away_norm) and away_norm in sel_norm
+        menciona_empate = "empate" in sel_norm
+        # Codigo explicito (compatibilidad con picks viejos 1x/x2/12).
+        codigo = sel.replace(" ", "").lower()
+        if codigo in ("1x", "x2", "12"):
+            if hs == as_:
+                return "ACIERTO" if codigo in ("1x", "x2") else "FALLO"
+            if codigo == "1x":
+                return "ACIERTO" if hs > as_ else "FALLO"
+            if codigo == "x2":
+                return "ACIERTO" if hs < as_ else "FALLO"
+            return "ACIERTO"  # 12 sin empate: gano uno de los dos
+        # Lenguaje natural: se deduce por equipos/empate mencionados.
+        if not (menciona_local or menciona_visitante or menciona_empate):
+            return None
         if hs == as_:
-            return "ACIERTO" if codigo in ("1x", "x2") else "FALLO"
-        gana_local = hs > as_
-        if codigo == "1x":
-            return "ACIERTO" if gana_local else "FALLO"
-        if codigo == "x2":
-            return "ACIERTO" if not gana_local else "FALLO"
-        if codigo == "12":
-            return "ACIERTO"
-        return None
+            return "ACIERTO" if menciona_empate else "FALLO"
+        cubre = menciona_local if hs > as_ else menciona_visitante
+        return "ACIERTO" if cubre else "FALLO"
 
     # ---- Over/Under de goles/puntos/corners (total o de un equipo) ----
     match = re.search(
