@@ -981,7 +981,14 @@ def list_channels(active_only=False):
         )
     else:
         rows = run_query("select * from channels order by name asc")
-    return [public_channel(r) for r in (rows or [])]
+    canales = [public_channel(r) for r in (rows or [])]
+    # CDN FUERA (pedido del usuario): nunca se sirven canales cuyo stream apunte
+    # al proveedor cdnlivetv.tv, aunque existan filas en la BD. Blindaje en la
+    # fuente que alimenta /channels para que no reaparezcan por la BD.
+    return [
+        c for c in canales
+        if "/tv/cdnlivetv/" not in str(c.get("stream") or "")
+    ]
 
 
 def create_channel(name, stream, ctype="m3u8", ads=False, use_proxy=False, geo_restriction="NONE"):
