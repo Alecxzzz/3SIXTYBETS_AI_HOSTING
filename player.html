@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HLS Player</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #0b0d10; color: #e6e8eb; font: 14px/1.4 system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; width: 100%; max-width: 960px; align-items: center; }
+  input[type=text], select { padding: 10px; border-radius: 8px; border: 1px solid #2a2f36; background: #14181d; color: inherit; }
+  input[type=text] { flex: 1; min-width: 260px; }
+  button { padding: 10px 16px; border-radius: 8px; border: 0; background: #2563eb; color: #fff; cursor: pointer; }
+  button.alt { background: #2a2f36; }
+  video { width: 100%; max-width: 960px; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; }
+  #st { width: 100%; max-width: 960px; font-size: 12px; color: #9aa4b2; }
+  pre { width: 100%; max-width: 960px; max-height: 240px; overflow: auto; margin: 0; padding: 10px;
+        background: #14181d; border-radius: 8px; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <input id="url" type="text" value="http://85.237.89.160:9590/usa-s/FOX-SPORTS-1/index.m3u8">
+  <select id="mode" title="Modo de reproducción">
+    <option value="proxy">Proxy (hls.js)</option>
+    <option value="remux">Remux ffmpeg (copia video)</option>
+    <option value="transcode">Transcode ffmpeg (H.264)</option>
+    <option value="direct">Directo (sin proxy)</option>
+  </select>
+  <button id="go">Reproducir</button>
+  <button id="copy" class="alt">Copiar diagnóstico</button>
+</div>
+<video id="v" controls autoplay muted playsinline></video>
+<div id="st"></div>
+<pre id="log"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('v');
+const modeSel = $('mode');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const httpOk = location.protocol.startsWith('http');
+const mode = () => modeSel.value;
+
+// Cadena de escalado automático: se prueba proxy (hls.js) y, si no arranca,
+// se sube a remux y finalmente a transcode con ffmpeg.
+const CHAIN = ['proxy', 'remux', 'transcode'];
+const STABLE_MS = 8000;   // tiempo reproduciendo sin errores para "fijar" el modo
+
+// ---------------------------------------------------------------- log (agrupa repetidos)
+const lines = [];
+const fmt = l => `${l.t} ${l.msg}${l.n > 1 ? ` ×${l.n}` : ''}`;
+function log(msg, key = msg) {
+  const t = new Date().toLocaleTimeString('es', { hour12: false });
+  const last = lines[lines.length - 1];
+  if (last && last.key === key) { last.n++; last.msg = msg; last.t = t; }
+  else { lines.push({ t, key, msg, n: 1 }); if (lines.length > 300) lines.shift(); }
+  const el = $('log');
+  el.textContent = lines.map(fmt).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---------------------------------------------------------------- configuración de hls.js
+// Quita CODECS del manifest: hls.js detecta los códecs reales desde los segmentos.
+function noCodecsLoader() {
+  return class extends Hls.DefaultConfig.loader {
+    constructor(cfg) {
+      super(cfg);
+      const load = this.load.bind(this);
+      this.load = (ctx, conf, cb) => {
+        if (ctx.type === 'manifest' || ctx.type === 'level') {
+          const ok = cb.onSuccess;
+          cb.onSuccess = (res, stats, c, net) => {
+            if (typeof res.data === 'string') {
+              res.data = res.data.replace(/,CODECS="[^"]*"/g, '').replace(/CODECS="[^"]*",?/g, '');
+            }
+            ok(res, stats, c, net);
+          };
+        }
+        load(ctx, conf, cb);
+      };
+    }
+  };
+}
+
+const BASE = {
+  lowLatencyMode: false,
+  liveSyncDurationCount: 4,
+  liveMaxLatencyDurationCount: 12,
+  maxBufferHole: 0.6,      // tolera huecos entre segmentos
+  nudgeMaxRetry: 8,
+  nudgeOffset: 0.2,
+  maxBufferLength: 30,
+  backBufferLength: 30,
+  fragLoadPolicy: { default: {
+    maxTimeToFirstByteMs: 12000, maxLoadTimeMs: 60000,
+    timeoutRetry: { maxNumRetry: 4, retryDelayMs: 500, maxRetryDelayMs: 4000 },
+    errorRetry:   { maxNumRetry: 6, retryDelayMs: 500, maxRetryDelayMs: 4000 },
+  } },
+};
+
+// Estrategias de códec: solo se ciclan en modo proxy/direct. ffmpeg ya entrega
+// H.264 + AAC-LC estándar, así que en remux/transcode no hacen falta.
+const STRATEGIES = [
+  { name: 'automático',              cfg: () => ({}) },
+  { name: 'sin CODECS del manifest', cfg: () => ({ loader: noCodecsLoader() }) },
+  { name: 'sin CODECS + AAC-LC',     cfg: () => ({ loader: noCodecsLoader(), defaultAudioCodec: 'mp4a.40.2' }) },
+  { name: 'sin CODECS + HE-AAC',     cfg: () => ({ loader: noCodecsLoader(), defaultAudioCodec: 'mp4a.40.5' }) },
+];
+
+const MEDIA_STORM = new Set(['fragParsingError', 'bufferAppendError', 'bufferAppendNoProgress',
+                             'bufferStalledError', 'bufferSeekOverHole', 'bufferNudgeOnStall']);
+
+// ---------------------------------------------------------------- estado
+let hls = null, runId = 0, step = 0, netRetries = 0, mediaRetries = 0;
+let lastT = -1, lastProgress = 0, lastRecover = 0, fails = 0, reconnects = 0, reconnectTimer = 0, active = false;
+let errTimes = [], resetTimes = [];
+// modo "sticky": cuando un modo se mantiene estable STABLE_MS se fija y ya no
+// se escala ni se reconecta en bucle (evita el tira-y-afloja del log original).
+let locked = false, stableSince = 0;
+let caps = { loaded: false, available: false };
+
+const getJson = async p => (await fetch(p)).json();
+async function loadCaps() {
+  if (!caps.loaded) {
+    try { caps = { ...(await getJson('/remux/status')), loaded: true }; }
+    catch { caps = { loaded: true, available: false }; }
+  }
+  return caps;
+}
+
+// ---------------------------------------------------------------- origen según modo
+async function startRemux(u, m, force, my) {
+  const s0 = await loadCaps();
+  if (!s0.available) throw new Error('ffmpeg no está instalado (Windows: winget install Gyan.FFmpeg, abre una terminal nueva y reinicia server.py)');
+  const r = await fetch(`/remux/start?url=${encodeURIComponent(u)}&mode=${m}&force=${force ? 1 : 0}`);
+  if (!r.ok) throw new Error('remux/start: ' + (await r.text()));
+  log(`ffmpeg (${m}): preparando segmentos...`);
+  for (let i = 0; i < 45; i++) {
+    await sleep(1000);
+    if (my !== runId) throw new Error('cancelado');
+    const s = await getJson('/remux/status');
+    if (s.ready) { log(`ffmpeg: listo (${s.segments} segmentos)`); return; }
+    if (!s.running) throw new Error('ffmpeg se detuvo: ' + (s.log || '').trim().slice(-300));
+  }
+  throw new Error('ffmpeg no produjo segmentos en 45 s (¿stream caído?)');
+}
+
+async function srcUrl(force, my) {
+  const u = $('url').value.trim();
+  const m = mode();
+  if (m === 'direct' || !httpOk) return u;
+  if (m === 'proxy') return `/proxy?url=${encodeURIComponent(u)}`;
+  await startRemux(u, m, force, my);
+  return '/remux/index.m3u8';
+}
+
+// ---------------------------------------------------------------- reproducción
+function stop() { if (hls) { hls.destroy(); hls = null; } }
+
+async function play(i = 0, force = false) {
+  const my = ++runId;
+  clearTimeout(reconnectTimer);
+  stop();
+  active = false;
+  step = i; netRetries = 0; mediaRetries = 0; errTimes = []; resetTimes = [];
+  stableSince = 0;   // cada (re)inicio vuelve a evaluar estabilidad
+
+  if (!Hls.isSupported()) return nativeOrFail('MSE no disponible', my);
+
+  let src;
+  try { src = await srcUrl(force, my); }
+  catch (e) {
+    if (my !== runId) return;
+    log('✖ ' + e.message);
+    return scheduleReconnect('no se pudo preparar el stream');
+  }
+  if (my !== runId) return;
+
+  log(`▶ ${mode()} · intento ${i + 1}/${STRATEGIES.length}: ${STRATEGIES[i].name}`);
+  const inst = new Hls({ ...BASE, ...STRATEGIES[i].cfg() });
+  hls = inst;
+  inst.on(Hls.Events.MANIFEST_PARSED, (_, d) => { log(`Manifest OK (${d.levels.length} nivel/es)`); video.play().catch(() => {}); });
+  inst.on(Hls.Events.BUFFER_CODECS, (_, d) => log(`Códecs: audio=${d.audio?.codec ?? '-'} video=${d.video?.codec ?? '-'}`));
+  inst.on(Hls.Events.ERROR, (_, d) => { if (inst === hls) onError(d); });
+
+  lastProgress = Date.now(); lastT = -1; active = true;
+  inst.loadSource(src);
+  inst.attachMedia(video);
+}
+
+
+function onError(d) {
+  const key = `${d.type}/${d.details}`;
+  const extra = [d.frag && d.frag.sn !== undefined ? `sn=${d.frag.sn}` : '',
+                 d.response && d.response.code ? `http=${d.response.code}` : '',
+                 d.mimeType || ''].filter(Boolean).join(' ');
+  log(`⚠ ${key}${d.fatal ? ' (FATAL)' : ''} ${extra}`.trim(), key + d.fatal);
+  const now = Date.now();
+
+  // bufferAddCodecError llega como NO fatal: se revisa antes de mirar d.fatal
+  if (d.details === Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR) return next('bufferAddCodecError');
+
+  // Ciclo de reinicios del MediaSource: el stream cambia de pistas (p. ej. aparece
+  // el audio a mitad). hls.js no lo arregla solo; hay que normalizar con ffmpeg.
+  if (d.details === 'mediaSourceRequiresReset') {
+    resetTimes = resetTimes.filter(t => now - t < 20000); resetTimes.push(now);
+    if (resetTimes.length >= 3) { resetTimes = []; return recover('ciclo de reinicios del buffer (las pistas del stream cambian)', true); }
+    return;
+  }
+
+  if (MEDIA_STORM.has(d.details)) {
+    errTimes = errTimes.filter(t => now - t < 20000); errTimes.push(now);
+    if (errTimes.length >= 12 && now - lastProgress > 5000) { errTimes = []; return recover('tormenta de errores sin avance', true); }
+  }
+  if (!d.fatal) return;
+
+  // Modo fijado (sticky): solo recuperación suave, nunca escalar ni reconectar
+  // en bucle. Si el modo ya demostró ser estable, se respeta.
+  if (locked) {
+    if (d.type === Hls.ErrorTypes.NETWORK_ERROR) { if (netRetries++ < 3) { hls.startLoad(); return; } return; }
+    if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      if (mediaRetries === 0) hls.recoverMediaError();
+      else if (mediaRetries === 1) { hls.swapAudioCodec(); hls.recoverMediaError(); }
+      else return;
+      mediaRetries++; return;
+    }
+    return;
+  }
+
+  if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+    if (netRetries++ < 3) { hls.startLoad(); return; }
+    return recover('red: ' + d.details);
+  }
+  if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+    if (mediaRetries === 0) hls.recoverMediaError();
+    else if (mediaRetries === 1) { hls.swapAudioCodec(); hls.recoverMediaError(); }
+    else return recover('error de media fatal: ' + d.details, true);
+    mediaRetries++;
+    return;
+  }
+  recover(d.details);
+}
+
+function next(reason) {
+  if (locked) return;   // modo fijado: no se ciclan estrategias
+  log(`↻ ${reason}`);
+  // Las estrategias de códec solo sirven con el stream original; ffmpeg ya entrega H.264 + AAC-LC estándar.
+  const original = mode() === 'proxy' || mode() === 'direct';
+  if (original && step + 1 < STRATEGIES.length) return play(step + 1);
+  escalate(reason);
+}
+
+// ---------------------------------------------------------------- recuperación
+function setMode(m, why) { modeSel.value = m; log(`↗ modo → ${m} (${why})`); }
+
+async function escalate(reason) {
+  if (locked) return;   // modo fijado: no se escala
+  const nextMode = CHAIN[CHAIN.indexOf(mode()) + 1];
+  if (nextMode) { stableSince = 0; setMode(nextMode, reason); return play(0); }
+  // Se agotó la cadena proxy→remux→transcode.
+  if (reason === 'bufferAddCodecError') {
+    return log('✖ Este navegador no puede decodificar ni el stream normalizado (H.264 + AAC). Usa Chrome o Edge normales, no un Chromium sin códecs.');
+  }
+  scheduleReconnect(reason);
+}
+
+function recover(reason, escalateNow = false) {
+  const now = Date.now();
+  if (now - lastRecover < 3000) return;
+  lastRecover = now;
+  fails++;
+  stableSince = 0;
+  log(`↻ recuperando: ${reason}`);
+  if (locked) { if (hls) hls.startLoad(); return; }   // reintento suave sin cambiar de modo
+  if (escalateNow || fails >= 2) { fails = 0; return escalate(reason); }
+  play(step);
+}
+
+function scheduleReconnect(reason) {
+  if (locked) return;   // modo fijado: no se reconecta en bucle
+  runId++; stop(); active = false;
+  const wait = Math.min(2000 * 2 ** reconnects, 15000);
+  reconnects++;
+  log(`⏳ reconectando en ${wait / 1000}s (${reason})`);
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => play(0, true), wait);
+}
+
+async function nativeOrFail(reason, my) {
+  stop();
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    log(`↻ ${reason}; probando reproducción nativa`);
+    try { video.src = await srcUrl(false, my); video.play().catch(() => {}); }
+    catch (e) { log('✖ ' + e.message); }
+    return;
+  }
+  log(`✖ ${reason}. El navegador no puede reproducir este stream.`);
+}
+
+
+// ---------------------------------------------------------------- vigilante + estado
+// Si el modo se mantiene estable STABLE_MS reproduciendo, se "fija" (locked) y
+// deja de escalar ni reconectar en bucle: es la estabilidad que pedías.
+setInterval(() => {
+  const now = Date.now();
+  if (active && hls && !video.paused && !video.ended) {
+    if (Math.abs(video.currentTime - lastT) > 0.1) {
+      lastT = video.currentTime;
+      lastProgress = now;
+      if (!locked) {
+        if (!stableSince) stableSince = now;
+        else if (now - stableSince > STABLE_MS) {
+          locked = true;
+          log(`🔒 estable ${STABLE_MS / 1000}s en ${mode()}: modo fijado (no escalará ni reconectará)`);
+        }
+      }
+    }
+    if (now - lastProgress > 15000) {
+      lastProgress = now;
+      if (locked) { if (hls) hls.startLoad(); }        // reintento suave, sin cambiar de modo
+      else recover('sin avance durante 15 s');
+    }
+    else if (now - lastProgress < 3000 && now - lastRecover > 30000) {
+      fails = 0; reconnects = 0; mediaRetries = 0; netRetries = 0;
+    }
+  } else if (active) lastProgress = now;   // en pausa no cuenta como estancado
+  status();
+}, 2000);
+
+function status() {
+  const b = video.buffered;
+  const ahead = b.length ? Math.max(0, b.end(b.length - 1) - video.currentTime) : 0;
+  $('st').textContent = `modo: ${mode()}${locked ? ' 🔒' : ''} · estrategia ${step + 1}/${STRATEGIES.length} · buffer ${ahead.toFixed(1)}s · ` +
+                        `t=${video.currentTime.toFixed(1)}s · ${video.paused ? 'pausado' : 'reproduciendo'}`;
+}
+
+// ---------------------------------------------------------------- UI
+$('go').onclick = () => { lines.length = 0; fails = 0; reconnects = 0; locked = false; stableSince = 0; play(0, true); };
+modeSel.onchange = () => { locked = false; $('go').click(); };
+$('copy').onclick = async () => {
+  let extra = '';
+  try { extra = '\n--- proxy\n' + JSON.stringify(await getJson('/stats')) + '\n--- ffmpeg\n' + JSON.stringify(await getJson('/remux/status')); } catch {}
+  const txt = `hls.js ${Hls.version} · ${navigator.userAgent}\nurl: ${$('url').value}\n` + lines.map(fmt).join('\n') + extra;
+  try { await navigator.clipboard.writeText(txt); $('copy').textContent = '✔ Copiado'; }
+  catch { log('No se pudo copiar automáticamente: selecciona el texto del log'); }
+  setTimeout(() => { $('copy').textContent = 'Copiar diagnóstico'; }, 2000);
+};
+
+(async () => {
+  if (typeof Hls === 'undefined') return log('✖ No se pudo cargar hls.js (¿sin internet?)');
+  log(`hls.js ${Hls.version}`);
+  if (!httpOk) { modeSel.value = 'direct'; log('⚠ Abre http://127.0.0.1:8000 con server.py corriendo (no el archivo directamente).'); }
+  else {
+    await loadCaps();
+    if (!caps.available) {
+      for (const o of modeSel.options) if (o.value === 'remux' || o.value === 'transcode') { o.disabled = true; o.textContent += ' (requiere ffmpeg)'; }
+      log('ℹ ffmpeg no encontrado: modos Remux/Transcode desactivados. Instálalo con: winget install Gyan.FFmpeg');
+    }
+  }
+  $('go').click();
+})();
+</script>
+</body>
+</html>
+
