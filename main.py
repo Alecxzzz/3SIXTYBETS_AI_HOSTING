@@ -2490,6 +2490,10 @@ def _preload_segments(manifest_text, base_url, headers):
                 resp = http_requests.get(url, headers=headers, stream=True, timeout=(5, 30))
                 if resp.ok:
                     buffer = resp.content
+                    # No cachear .ts corruptos/HTML: envenenarian el buffer y
+                    # provocarian fragParsingError en el cliente. (server.py)
+                    if url.lower().endswith(".ts") and not _ts_valido(buffer):
+                        continue
                     content_type = resp.headers.get("content-type", "video/mp2t")
                     with _segment_cache_lock:
                         _segment_cache[url] = {
@@ -2519,6 +2523,29 @@ def _preload_segments(manifest_text, base_url, headers):
 
     _t = threading.Thread(target=_run, daemon=True)
     _t.start()
+
+def _ts_valido(body: bytes) -> bool:
+    """Valida que 'body' sea MPEG-TS real, no HTML/error/paquete corrupto.
+
+    Portado de server.py: un segmento puede empezar con 0x47 y aun estar
+    corrupto por dentro (fragParsingError en hls.js). Ademas, cuando la fuente
+    falla a veces devuelve HTML o texto con status 200, que hls.js intenta
+    decodificar como video y revienta. Verificando VARIOS sync-bytes (0x47)
+    descartamos eso antes de servir o cachear el segmento.
+    """
+    if not body:
+        return False
+    if body[:1] == b"<":  # HTML en vez de video
+        return False
+    if len(body) < 188 or body[0] != 0x47:
+        return False
+    n = len(body) // 188
+    for i in range(min(n, 8)):  # hasta 8 paquetes consecutivos bien formados
+        if body[i * 188] != 0x47:
+            return False
+    return True
+
+
 
 # Cabeceras que no deben retransmitirse al cliente
 _HOP = {
@@ -2711,10 +2738,44 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     if not content_type:
         out_headers["Content-Type"] = "video/mp2t"
 
-    def _stream():
-        for chunk in resp.iter_content(chunk_size=8192):
-            if chunk:
-                yield chunk
+    # --- Segmentos .ts: validar cabecera MPEG-TS antes de transmitir ---
+    # Portado de server.py. Si la fuente devuelve HTML/texto o un .ts corrupto
+    # con status 200, hls.js intenta decodificarlo y revienta (fragParsingError
+    # / bufferAppendError -> "Problema tecnico"). Leyendo los primeros bytes y
+    # comprobando VARIOS sync-bytes 0x47 lo detectamos y devolvemos 502 para que
+    # el reproductor reintente o escale, en vez de envenenar su buffer.
+    es_ts = target.split("?")[0].lower().endswith(".ts")
+    head = b""
+    it = None
+    if es_ts:
+        it = resp.iter_content(chunk_size=8192)
+        try:
+            while len(head) < 8 * 188:  # ~8 paquetes para validar varios sync-bytes
+                chunk = next(it)
+                if not chunk:
+                    break
+                head += chunk
+        except StopIteration:
+            pass
+        if not _ts_valido(head):
+            return PlainTextResponse(
+                "Segmento TS corrupto aguas arriba",
+                status_code=502,
+                media_type="text/plain",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        def _stream():
+            if head:
+                yield head
+            for chunk in it:
+                if chunk:
+                    yield chunk
+    else:
+        def _stream():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
 
     return StreamingResponse(
         _stream(),
