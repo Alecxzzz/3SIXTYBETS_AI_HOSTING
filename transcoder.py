@@ -147,8 +147,17 @@ def _spawn(key: str):
         cmd = [
             FFMPEG_BIN,
             "-hide_banner", "-loglevel", "error", "-nostdin",
-            # Reparar timestamps del origen (discontinuities, gaps, pts raros)
+            # Reparar timestamps del origen (discontinuities, gaps, pts raros) y
+            # DESCARTAR paquetes corruptos en vez de abortar. Sin -err_detect
+            # ignore_err, un audio AAC corrupto del origen ("Invalid data found")
+            # tumbaba el transcode y el frontend mostraba "Problema técnico".
             "-fflags", "+genpts+discardcorrupt+igndts",
+            "-err_detect", "ignore_err",
+            # Analizar más profundo: algunas fuentes declaran el audio tarde y
+            # sin esto ffmpeg arranca sin pista y el m3u8 sale con saltos.
+            "-analyzeduration", "10000000", "-probesize", "10000000",
+            # Protocolos permitidos (HLS con crypto, TLS, etc.).
+            "-protocol_whitelist", "http,https,tcp,tls,crypto",
             "-user_agent", USER_AGENT,
         ]
         if referer:
@@ -161,8 +170,15 @@ def _spawn(key: str):
             "-maxrate", "2500k", "-bufsize", "3500k",
             "-pix_fmt", "yuv420p",
             "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
-            # Audio: AAC estereo
+            # Audio: AAC estereo. aresample con async rellena huecos de tiempo y
+            # first_pts=0 normaliza el arranque: sin esto, el audio corrupto del
+            # origen provocaba saltos de timestamp y bucles de recuperacion.
             "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+            "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+            # Evita PTS negativos y desbordes de la cola de muxing (errores
+            # "Too many packets buffered" que cortaban el segmento a mitad).
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "9999",
             # HLS local: segmentos de 2s, ventana corta, auto-limpieza
             "-f", "hls",
             "-hls_time", "2",
