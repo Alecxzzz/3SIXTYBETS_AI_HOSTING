@@ -520,7 +520,10 @@ def cuota_doradobet(sport: str, home_name: str, away_name: str,
 
     Devuelve float o None si Doradobet no tiene ese mercado/linea.
     """
-    texto = f"{market} {titulo} {selection}".lower()
+    # _norm (no solo .lower): las claves de matching incluyen 'mas de' sin
+    # acento y el pick puede llegar escrito 'Más de...'; ademas el handicap del
+    # catalogo se escribe 'hándicap' y con .lower() crudo nunca matcheaba.
+    texto = _norm(f"{market} {titulo} {selection}")
     nh, na = _norm(home_name), _norm(away_name)
     lado_txt = _norm(f"{titulo} {selection}")
 
@@ -648,11 +651,20 @@ def cuota_doradobet(sport: str, home_name: str, away_name: str,
             return True
 
         mercados = _markets_de_evento(data, ev, _filtro)
-        # team total del equipo mencionado tiene prioridad
+        # team total: si el mercado es de EQUIPO ('equipo' en el texto) y el
+        # texto nombra al equipo, SOLO se buscan lineas de ESE equipo. Antes,
+        # si la linea del equipo no existia, seguia con los totales del
+        # PARTIDO y devolvia el precio de otra apuesta (caso real: 'Total de
+        # puntos Cleveland Cavaliers Under 225.5' cobraba una linea que era de
+        # partido, no del equipo).
+        es_mercado_equipo = "equipo" in texto
         if nombre_equipo:
             team_markets = [m for m in mercados if nombre_equipo in (m.get("name") or "").lower()]
-            otros = [m for m in mercados if m not in team_markets]
-            mercados = team_markets + otros
+            if es_mercado_equipo:
+                mercados = team_markets
+            else:
+                otros = [m for m in mercados if m not in team_markets]
+                mercados = team_markets + otros
         for m in mercados:
             for o in _odds_de_market(m, odds_idx):
                 nombre_odd = _odd_name(o)
@@ -681,6 +693,10 @@ def cuota_doradobet(sport: str, home_name: str, away_name: str,
         detalle_idx = _odds_index(detalle)
         for m in detalle.get("markets") or []:
             nm = (m.get("name") or "").lower()
+            # Mismo criterio de equipo que arriba: si el mercado es del equipo,
+            # el detalle tampoco puede caer a los totales del partido.
+            if es_mercado_equipo and nombre_equipo and nombre_equipo not in nm:
+                continue
             if not any(k in nm for k in ("total", "goles", "carrera", "corner", "tarjeta", "mas", "menos")):
                 continue
             if es_corner and "corner" not in nm:

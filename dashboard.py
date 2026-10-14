@@ -76,6 +76,11 @@ _salud = {
     "revision_anulados": 0,
     "revision_ia_confirmados": 0,
     "revision_ia_sin_presupuesto": 0,
+    # Picks borrados por el resolutor automatico por no ser verificables con
+    # datos reales (mercados como handicap de juegos, aces, sets exactos).
+    # Antes se marcaban ANULADO y se acumulaban en el historial sin contar como
+    # acierto ni como fallo.
+    "resolver_borrados": 0,
 }
 
 
@@ -366,12 +371,12 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
     handicap->Spread, over/under->Totals/Goals O/U (incl. corners y
     tarjetas), ambos marcan->BTTS. Devuelve float o None si no existe.
     """
-    _, mercados, local_en_odds = _evento_oddsapi_con_mercados(
-        sport, home_name, away_name
-    )
-    if not mercados:
-        return None
     # DORADOBET (Altenar) tiene prioridad: es la casa donde apuesta la gente.
+    # OJO: antes el orden estaba INVERTIDO. odds-api se consultaba primero y,
+    # si no tenia el evento (lleva semanas en 401 o sin key), se hacia
+    # 'return None' AQUI, sin llegar nunca a Doradobet. Consecuencia real
+    # medida: el pick se publicaba con la cuota que la IA habia estimado
+    # (ej. NBA 'team total Under 225.5 @ 1.42', precio que nadie publica).
     try:
         from cuotas_doradobet import cuota_doradobet
 
@@ -380,6 +385,13 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
             return cuota_dorado
     except Exception as exc:
         print(f"[Dashboard] Error cuotas Doradobet: {exc}", flush=True)
+
+    # Fallback: odds-api.io (Bet365) para el mapeo mercado -> precio.
+    _, mercados, local_en_odds = _evento_oddsapi_con_mercados(
+        sport, home_name, away_name
+    )
+    if not mercados:
+        return None
 
     texto = f"{market} {titulo} {selection}".lower()
     nh, na = _norm_texto(home_name), _norm_texto(away_name)
@@ -849,8 +861,8 @@ def mercado_resoluble(market: str) -> bool:
     return any(x in t for x in _MARC_RESOLUBLE_MARCADOR + _MARC_RESOLUBLE_STATS)
 
 
-def peso_mercado(market: str) -> int:
-    """Prioridad de un mercado para el generador (mayor = mejor).
+def _peso_base_mercado(market: str) -> int:
+    """Prioridad BASE de un mercado para el generador (mayor = mejor).
 
     Se apoya en la efectividad REAL medida en produccion (30 dias):
       * Ganador y total        100% (5/5)
@@ -908,6 +920,63 @@ def peso_mercado(market: str) -> int:
     return 60
 
 
+# ---- APRENDIZAJE DINAMICO DESDE LA BD ----
+# El peso de cada mercado ya no es solo la tabla fija de arriba: se ajusta con
+# la efectividad REAL que lleva ese mercado en los picks ya resueltos. Regla
+# pedida por el usuario:
+#   * lo que mas acierta -> se usa MAS;
+#   * lo menos acertado -> sigue usandose pero POCO (no se elimina);
+#   * si un mercado flojo empieza a acertar -> sube solo.
+# La lectura se cachea 15 min para no golpear la BD en cada llamada.
+_EFECT_FAMILIA_CACHE = {"ts": 0.0, "data": {}}
+
+
+def _efectividad_familias() -> dict:
+    """{familia: efectividad %} cacheada (15 min). Vacio si la BD falla."""
+    import time as _time
+    ahora = _time.time()
+    if ahora - _EFECT_FAMILIA_CACHE["ts"] < 900 and _EFECT_FAMILIA_CACHE["data"]:
+        return _EFECT_FAMILIA_CACHE["data"]
+    try:
+        data = {f: d.get("efectividad")
+                for f, d in (db.efectividad_por_familia() or {}).items()}
+    except Exception:
+        data = {}
+    _EFECT_FAMILIA_CACHE["ts"] = ahora
+    _EFECT_FAMILIA_CACHE["data"] = data
+    return data
+
+
+def peso_mercado(market: str) -> int:
+    """Prioridad del mercado = base + aprendizaje desde picks resueltos.
+
+    _peso_base_mercado() aplica la tabla historica fija; aqui se ajusta con la
+    efectividad real de la familia en la BD (cacheada). Si la familia no tiene
+    muestra todavia, se devuelve el peso base sin tocar nada.
+    """
+    base = _peso_base_mercado(market)
+    if base <= 0:
+        return 0
+    try:
+        familia = db._categoria_mercado(market, "")
+        efectividad = _efectividad_familias().get(familia)
+    except Exception:
+        efectividad = None
+    if efectividad is None:
+        return base
+    if efectividad >= 75:
+        factor = 1.12      # probada: se usa mas
+    elif efectividad >= 60:
+        factor = 1.05
+    elif efectividad >= 45:
+        factor = 1.0       # neutra
+    elif efectividad >= 30:
+        factor = 0.85      # floja: se usa, pero poco
+    else:
+        factor = 0.72      # muy floja: solo de vez en cuando
+    return max(1, min(100, int(round(base * factor))))
+
+
 # Palabras que identifican un pick de un deporte CONCRETO. Si un pick llega
 # con una palabra que pertenece a OTRO deporte ('Aces' es de tenis, 'Rebotes'
 # de NBA, 'extra innings' de MLB), es que la IA se cruzo de catalogo: se
@@ -943,6 +1012,16 @@ def mercado_de_otro_deporte(market: str, sport: str) -> bool:
 # a perder el partido entero.
 REINTENTOS_REANALISIS = int(os.getenv("DASHBOARD_REINTENTOS_REANALISIS", "3"))
 
+# Deportes que analiza PRIMERO el motor determinista (cuota real de Doradobet +
+# ultimos partidos reales de ESPN) y solo consultan a la IA si el motor no
+# encuentra ningun mercado resoluble. Prioriza no saturar la IA (el futbol
+# se mantiene con IA porque su golden lleva analisis con FotMob).
+MOTOR_PRIMERO_DEPORTES = {
+    s.strip() for s in os.getenv(
+        "DASHBOARD_MOTOR_PRIMERO", "tennis,nfl,nba,mlb"
+    ).split(",") if s.strip()
+}
+
 # PROBABILIDAD MINIMA exigida por el usuario: el % de acierto medido en los
 # ultimos N partidos tiene que ser 70 o mas. Por debajo se RE-ANALIZA.
 PROBABILIDAD_MINIMA = int(os.getenv("DASHBOARD_PROB_MINIMA", "70"))
@@ -958,7 +1037,159 @@ except Exception:  # sin el modulo, el filtro queda inactivo (no rompe el panel)
         return None, 0
 
 
-def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: str):
+def _linea_pick(texto: str):
+    """Linea numerica de un pick Over/Under u handicap ('Under 225.5' -> 225.5)."""
+    m = re.search(
+        r"(?:over|under|o/u|m[áa]s de|menos de|mas de|handicap|spread)"
+        r"\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)",
+        texto or "",
+        re.I,
+    )
+    if not m:
+        m = re.search(r"([+-][0-9]+(?:[.,][0-9]+)?)\s*$", (texto or "").strip(), re.I)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _familias_pick(texto: str) -> set:
+    """Familias de mercado presentes en un texto (pick o entrada real).
+
+    Claves genericas ('total') conviven con especificas ('corners'): si el pick
+    es de una familia especifica, la entrada real tiene que compartir ESA, no
+    basta con ser un total de otra estadistica.
+    """
+    t = _norm_texto(texto or "")
+    fams = set()
+    if "corner" in t or "esquina" in t:
+        fams.add("corners")
+    if "tarjeta" in t or "card" in t:
+        fams.add("tarjetas")
+    if "falta" in t or "foul" in t:
+        fams.add("faltas")
+    if "fueras de juego" in t or "offside" in t:
+        fams.add("offside")
+    if "tiro" in t or "remate" in t or "shot" in t:
+        fams.add("tiros")
+    if "doble oportunidad" in t or "doble oport" in t:
+        fams.add("doble_oportunidad")
+    if "1x2" in t or "ganador" in t or "cualquier equipo gana" in t or "moneyline" in t:
+        fams.add("ganador")
+    if "ambos" in t or "btts" in t:
+        fams.add("btts")
+    if "handicap" in t or "spread" in t:
+        fams.add("handicap")
+    if "mitad" in t:
+        fams.add("mitad")
+    if "total" in t or "over" in t or "under" in t or "mas de" in t or "menos de" in t:
+        fams.add("total")
+    return fams
+
+
+def _equipos_del_pick(partido: dict, texto: str) -> list:
+    """Nombres normalizados de los equipos del partido que aparecen en el texto."""
+    t = _norm_texto(texto or "")
+    salidas = []
+    for nombre in (partido.get("home_name"), partido.get("away_name")):
+        n = _norm_texto(nombre or "")
+        if n and n in t:
+            salidas.append(n)
+    return salidas
+
+
+def _linea_coincide(linea: float, entrada: dict) -> bool:
+    """True si la entrada real contiene la MISMA linea que el pick."""
+    for campo in (entrada.get("titulo"), entrada.get("selection"), entrada.get("linea")):
+        if campo is None:
+            continue
+        if isinstance(campo, (int, float)):
+            if abs(float(campo) - linea) <= 0.01:
+                return True
+            continue
+        for m in re.finditer(r"[+-]?[0-9]+(?:[.,][0-9]+)?", str(campo)):
+            try:
+                if abs(float(m.group(0).replace(",", ".")) - linea) <= 0.01:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+# Con menos mercados que esto se asume que el DETALLE del evento fallo
+# (GetEvents solo trae 3-6 mercados principales) y no se valida nada: sin
+# lista completa, rechazaria picks buenos por 'no publicado'.
+_MIN_MERCADOS_PARA_VALIDAR = 8
+
+
+def _entrada_real_pick(pick: dict, partido: dict, entradas: list):
+    """Cruza el pick contra la lista PUBLICADA de mercados del bookmaker.
+
+    Devuelve (estado, entrada):
+      "ok"   -> la entrada coincide (mercado/linea publicados); la entrada
+                trae la cuota real que se puede usar como precio.
+      "no"   -> el libro cubre el evento pero NO publica ese mercado/linea:
+                publicar exigiria inventar la cuota (caso real: NBA team
+                total 225.5 cuando los team totals publicados eran otros).
+      "skip" -> no se puede validar (lista corta, texto sin familia
+                reconocible, o mercados de equipo inexistentes en el libro).
+    """
+    if not entradas or len(entradas) < _MIN_MERCADOS_PARA_VALIDAR:
+        return "skip", None
+    texto = (
+        f"{pick.get('market') or ''} {pick.get('titulo') or ''} "
+        f"{pick.get('selection') or ''}"
+    )
+    fams = _familias_pick(texto)
+    if not fams:
+        return "skip", None
+
+    especificas = fams - {"total"}
+
+    def _cuadra(e: dict) -> bool:
+        ef = _familias_pick(
+            f"{e.get('market') or ''} {e.get('titulo') or ''} "
+            f"{e.get('selection') or ''}"
+        )
+        if not ef:
+            return False
+        return bool(ef & especificas) if especificas else bool(ef & fams)
+
+    candidatos = [e for e in entradas if _cuadra(e)]
+    if not candidatos:
+        return "no", None
+
+    # Picks de EQUIPO ('Total de puntos del equipo A', 'corners de X'): la
+    # linea tiene que existir en los mercados DE ESE EQUIPO, no en los del
+    # partido. Si el libro no publica mercados de equipo, no se valida (y la
+    # cuota quedara etiquetada como estimada).
+    equipos = _equipos_del_pick(partido, texto)
+    if equipos and "equipo" in texto.lower():
+        con_equipo = [
+            e for e in candidatos
+            if any(
+                eq in _norm_texto(f"{e.get('market') or ''} {e.get('titulo') or ''}")
+                for eq in equipos
+            )
+        ]
+        if con_equipo:
+            candidatos = con_equipo
+        else:
+            return "skip", None
+
+    linea = _linea_pick(texto)
+    if linea is None:
+        return "ok", candidatos[0]
+    for e in candidatos:
+        if _linea_coincide(linea, e):
+            return "ok", e
+    return "no", None
+
+
+def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: str,
+                         mercados_reales: list = None):
     """Devuelve el motivo por el que el pick no es publicable, o None si lo es.
 
     Centraliza los filtros para poder REINTENTAR con la misma regla en vez de
@@ -1001,6 +1232,17 @@ def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: s
         odds = 0
     if not odds or not (ODDS_MINIMA <= odds <= ODDS_MAXIMA):
         return "cuota"
+
+    # CUOTA REAL: si el bookmaker CUBRE el evento (lista mercados_reales con
+    # precios publicados), el mercado/linea del pick tiene que estar ahi.
+    # Publicar una linea que nadie ofrece obliga a inventar la cuota (caso
+    # real: NBA 'Total de puntos Cleveland Cavaliers: Under 225.5' cuando los
+    # team totals publicados eran de otro orden de magnitud). Si la lista no
+    # permite validar (detalle fallo, sin familia reconocible), no bloquea.
+    if mercados_reales:
+        estado, _entrada = _entrada_real_pick(pick, partido, mercados_reales)
+        if estado == "no":
+            return "cuota_no_real"
 
     rationale_txt = f"{pick.get('rationale') or ''} {titulo}"
     if (
@@ -1054,6 +1296,11 @@ def _mensaje_reanalisis(partido: dict, label: str, mercados_reales: list,
             "acierto o fallo al final del partido), asi que no sirve"
         ),
         "cuota": f"su cuota no estaba entre {ODDS_MINIMA} y {ODDS_MAXIMA}",
+        "cuota_no_real": (
+            "ese mercado/linea no esta publicado con precio real en el "
+            "bookmaker para este partido: sin precio real no se publica, "
+            "elige OTRA linea o mercado de la lista"
+        ),
         "no_publicado": "ese mercado no lo publica el bookmaker para este partido",
         "prohibido": "ese tipo de apuesta esta prohibido en la plataforma",
         "baja_probabilidad": (
@@ -1223,7 +1470,9 @@ def _form_jugadores_props(mercados_reales: list, limite: int = 4) -> str:
     )
 
 
-def _pick_deterministico(partido: dict, mercados_reales: list, label: str):
+def _pick_deterministico(partido: dict, mercados_reales: list, label: str,
+                         extra_stats: list | None = None,
+                         evitar_mercados: set | None = None):
     """Elige el mejor pick SIN llamar a la IA.
 
     Por que existe: la cuota de Groq es por dia y, cuando se agota, el ciclo
@@ -1245,6 +1494,15 @@ def _pick_deterministico(partido: dict, mercados_reales: list, label: str):
     candidatos = [m for m in mercados_reales if mercado_resoluble(m.get("market") or "")]
     if not candidatos:
         return None
+    # Variedad: si un mercado ya se uso hoy se evita mientras quede otra
+    # opcion publicable. Sin esto el mismo patron (ej. doble oportunidad) se
+    # repetia partida tras partida. Se compara con _market_norm, la misma
+    # normalizacion de mercados_usados.
+    if evitar_mercados:
+        libres = [m for m in candidatos
+                  if _market_norm(m.get("market") or "") not in evitar_mercados]
+        if libres:
+            candidatos = libres
 
     def _clave(m):
         return (-peso_mercado(m.get("market") or ""), float(m.get("odds") or 9.9))
@@ -1277,7 +1535,7 @@ def _pick_deterministico(partido: dict, mercados_reales: list, label: str):
             f"Cuota real: {cuota} (menor = mas probable)",
             f"Mercado: {mejor.get('market')}",
             f"Seleccion: {mejor.get('selection')}",
-        ],
+        ] + list(extra_stats or []),
     }
 
 
@@ -1714,6 +1972,23 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
 
     sin_cuota = False
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
+
+    # Patron 'doble oportunidad' demasiado repetido: se borran sus picks
+    # PENDIENTE para que esos partidos vuelvan a analizarse YA en este ciclo y
+    # elijan otro mercado (mercados_usados de arriba ya incluye 'doble
+    # oportunidad', asi que no se repetira hoy). Los resueltos (ACIERTO/FALLO)
+    # se conservan: son la fuente del aprendizaje de peso_mercado().
+    try:
+        borrados = db.purgar_picks_pendientes_mercado("doble oportunidad")
+        if borrados:
+            print(
+                f"[Dashboard] {borrados} picks PENDIENTE de doble oportunidad "
+                "borrados para re-analizar",
+                flush=True,
+            )
+    except Exception:
+        pass
+
     con_pick = db.eventos_con_pick()
 
     for p in partidos[:max_partidos]:
@@ -1827,11 +2102,31 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # sobre los mercados reales (cuota verdadera del bookmaker, 0 tokens).
         # Asi el ciclo recorre TODA la ventana en lugar de abortarse en el
         # primer partido sin respuesta de IA.
-        if sin_cuota:
-            pick = _pick_deterministico(p, markets_reales, label)
-            modelo = "cuantitativo (sin IA)"
+        # Contexto del MOTOR (ESPN) que acompana al pick cuantitativo: aporta
+        # analisis real (ultimos partidos) sin gastar un token de IA.
+        stats_motor = [
+            f"Motor ESPN (ultimos 5) {p['away_name']}: "
+            f"{'; '.join(recientes.get('away') or ['sin datos'])}",
+            f"Motor ESPN (ultimos 5) {p['home_name']}: "
+            f"{'; '.join(recientes.get('home') or ['sin datos'])}",
+        ]
+
+        # MOTOR PRIMERO (prioridad: no saturar la IA): tenis/NFL/NBA/MLB
+        # eligen con los mercados REALES de Doradobet + los ultimos partidos
+        # reales de ESPN, sin gastar un token. La IA solo interviene si el
+        # motor no encuentra ningun mercado resoluble publicable.
+        if sin_cuota or p["sport"] in MOTOR_PRIMERO_DEPORTES:
+            pick = _pick_deterministico(p, markets_reales, label,
+                                        extra_stats=stats_motor,
+                                        evitar_mercados=mercados_usados)
+            modelo = "motor fotmob/espn (sin IA)"
+            if not pick and sin_cuota:
+                continue  # sin IA y sin mercados: sigue con el siguiente partido
             if not pick:
-                continue  # sin mercados resolubles: sigue con el siguiente partido
+                # El motor no vio mercado publicable para este partido:
+                # unico caso en que estos deportes gastan un token de IA.
+                texto, modelo = _preguntar_ia(mensaje, p["sport"])
+                pick = _parsear_pick_json(texto)
         else:
             texto, modelo = _preguntar_ia(mensaje, p["sport"])
             pick = _parsear_pick_json(texto)
@@ -1850,7 +2145,9 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 )
             sin_cuota = True
             errores += 1
-            pick = _pick_deterministico(p, markets_reales, label)
+            pick = _pick_deterministico(p, markets_reales, label,
+                                        extra_stats=stats_motor,
+                                        evitar_mercados=mercados_usados)
             modelo = "cuantitativo (sin IA)"
             if not pick:
                 # Un partido sin mercados publicables NO aborta el ciclo: con
@@ -1902,7 +2199,9 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         intentos = 0
         while intentos < REINTENTOS_REANALISIS:
             intentos += 1
-            motivo = _motivo_rechazo_pick(pick, p, disponibles, market)
+            motivo = _motivo_rechazo_pick(
+                pick, p, disponibles, market, mercados_reales=markets_reales
+            )
             if not motivo:
                 break
             if intentos >= REINTENTOS_REANALISIS:
@@ -1931,7 +2230,9 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             pass
 
         # Ultimo filtro: si sigue sin ser publicable, se descarta.
-        motivo_final = _motivo_rechazo_pick(pick, p, disponibles, market)
+        motivo_final = _motivo_rechazo_pick(
+            pick, p, disponibles, market, mercados_reales=markets_reales
+        )
         if motivo_final:
             if motivo_final == "no_resoluble":
                 rechazados_no_resoluble += 1
@@ -1939,7 +2240,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 rechazados_baja_prob += 1
             elif motivo_final == "prohibido":
                 rechazados_prohibido += 1
-            elif motivo_final == "cuota":
+            elif motivo_final in ("cuota", "cuota_no_real"):
                 rechazados_cuota += 1
             elif motivo_final == "calidad":
                 rechazados_calidad += 1
@@ -1950,13 +2251,21 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             continue
 
 
-        # Cuota REAL (Bet365 via odds-api.io) para el mercado/seleccion elegido.
-        # Debe caer en el rango general 1.20-2.50; si no hay cuota real se
-        # usa la estimada (que ya paso el filtro de rango).
+        # Cuota REAL del bookmaker (Doradobet primero, odds-api.io como
+        # fallback). Si ningun buscador la encuentra pero la lista publicada
+        # del evento si la tiene, se usa esa: es el mismo precio que ya
+        # valido _motivo_rechazo_pick.
         cuota_real = _cuota_real_pick(
             p["sport"], p["home_name"], p["away_name"], market,
             str(pick.get("selection", "")), str(pick.get("titulo") or ""),
         )
+        if cuota_real is None and markets_reales:
+            estado, entrada_real = _entrada_real_pick(pick, p, markets_reales)
+            if estado == "ok" and entrada_real and entrada_real.get("odds"):
+                try:
+                    cuota_real = float(entrada_real["odds"])
+                except (TypeError, ValueError):
+                    cuota_real = None
         if cuota_real is not None:
             if not (ODDS_MINIMA <= cuota_real <= ODDS_MAXIMA):
                 rechazados_cuota += 1
@@ -1964,22 +2273,33 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 continue
             odds_final = round(cuota_real, 3)
         else:
-            odds_final = pick.get("odds")
-            # Props de jugador: las cuotas de la IA suelen ser absurdas (ej.
-            # 9.25 por un over 8.5 de ponches). Sin cuota real de Bet365 se
-            # rechaza cualquier prop con cuota mayor a 4.00.
-            es_prop_jugador = (
-                "jugador" in (market or "").lower()
-                or "jugador" in str(pick.get("titulo") or "").lower()
+            # SIN CUOTA REAL del bookmaker. Regla del usuario: NUNCA se
+            # publica una cuota ESTIMADA/inventada por la IA (el "cuota
+            # estimada" que el usuario rechaza explicitamente). Antes aqui se
+            # hacia  odds_final = pick.get("odds")  que, en la ruta IA, es una
+            # estimacion del modelo y no el precio real de Doradobet.
+            #   * pick CUANTITATIVO ("sin IA"): su odds salio ya de la lista
+            #     REAL de mercados de Doradobet, asi que es real y se acepta si
+            #     cae en el rango publicable.
+            #   * cualquier otro pick (el que devuelve la IA): se descarta.
+            odds_pick = None
+            try:
+                odds_pick = float(pick.get("odds"))
+            except (TypeError, ValueError):
+                odds_pick = None
+            odds_real_heredada = (
+                modelo == "cuantitativo (sin IA)" and odds_pick is not None
             )
-            if es_prop_jugador:
-                try:
-                    if float(odds_final or 0) > 4.0:
-                        rechazados_cuota += 1
-                        db.registrar_descarte(p["event_id"], "prop_cuota")
-                        continue
-                except (TypeError, ValueError):
-                    pass
+            if odds_real_heredada:
+                if not (ODDS_MINIMA <= odds_pick <= ODDS_MAXIMA):
+                    rechazados_cuota += 1
+                    db.registrar_descarte(p["event_id"], "cuota_fuera_rango")
+                    continue
+                odds_final = round(odds_pick, 3)
+            else:
+                rechazados_cuota += 1
+                db.registrar_descarte(p["event_id"], "sin_cuota_real")
+                continue
 
         # DOBLE VERIFICACION solo para candidatos GOLDEN (cuota 1.35-1.40):
         # 2 pasadas independientes de la IA; AMBAS deben coincidir. Los
@@ -1999,6 +2319,26 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 db.registrar_descarte(p["event_id"], "sin_verificar")
                 continue
 
+        # Procedencia de la cuota visible DENTRO del pick: el usuario tiene
+        # que poder distinguir el precio REAL del bookmaker de una estimacion
+        # de la IA. Los picks de IA salian sin esta linea (y con la cuota
+        # inventada); los cuantitativos ya la traian, hence el startswith.
+        stats_lista = (
+            [str(s) for s in (pick.get("stats") or [])[:5]]
+            if isinstance(pick.get("stats"), list)
+            else []
+        )
+        if not any(
+            s.lower().startswith(("cuota real", "cuota estimada"))
+            for s in stats_lista
+        ):
+            stats_lista.insert(
+                0,
+                f"Cuota real: {odds_final}"
+                if cuota_real is not None
+                else f"Cuota estimada: {odds_final} (sin precio del bookmaker)",
+            )
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -2017,10 +2357,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             away_logo=p["away_logo"],
             titulo=str(pick.get("titulo") or "").strip() or str(pick.get("selection", "")),
             league=p.get("league"),
-            stats=json.dumps(
-                [str(s) for s in (pick.get("stats") or [])[:5]],
-                ensure_ascii=False,
-            ) if isinstance(pick.get("stats"), list) and pick.get("stats") else None,
+            stats=json.dumps(stats_lista, ensure_ascii=False) if stats_lista else None,
             tier=TIER_GOLDEN if es_golden else TIER_STANDARD,
             verificado=verificado,
         )
@@ -2373,94 +2710,6 @@ MESES_ES = {
     7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre",
     12: "diciembre",
 }
-
-
-def _verificar_acierto_con_fuentes(pick: dict, marcador: str):
-    """Verificacion ESTRICTA del resultado: N pasadas independientes de la IA.
-
-    Cada pasada pide verificar el resultado en sitios externos
-    (sofascore.com / flashscore.com / fotmob.com) con la consulta del tipo
-    'STATS {local} VS {visitante} HOY (dia) DE (mes)'. Solo devuelve ACIERTO o
-    FALLO si TODAS las pasadas coinciden; si alguna discrepa devuelve None
-    (el pick queda PENDIENTE para re-verificar en el proximo ciclo).
-    """
-    ahora = _hora_nicaragua()
-    equipos = pick.get("eventName") or ""
-    local = pick.get("homeName") or ""
-    visitante = pick.get("awayName") or ""
-
-    mensaje = (
-        f"TIPO: STATS {local} VS {visitante} HOY ({ahora.day}) DE "
-        f"{MESES_ES.get(ahora.month, ahora.month)}.\n"
-        f"Partido: {equipos} (deporte {pick.get('sportLabel', '')}).\n"
-        f"Pick: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
-        f"Marcador final que tenemos registrado: {marcador}.\n\n"
-        "Verifica el resultado FINAL de ese partido en sitios externos como "
-        "sofascore.com, flashscore.com y fotmob.com. Comprueba si TODAS las "
-        "fuentes coinciden con el marcador registrado y si el pick resulto "
-        "ganador. Responde SOLO una palabra: ACIERTO o FALLO. Si el marcador "
-        "no coincide con las fuentes externas, responde DISCREPANTE."
-    )
-
-    votos = []
-    for i in range(VERIFICACIONES_ACIERTO):
-        texto, _ = _preguntar_ia(mensaje, system_prompt=PROMPT_VERIFICACION, buscar_web=False)
-        upper = (texto or "").upper()
-        if "ACIERTO" in upper:
-            votos.append("ACIERTO")
-        elif "FALLO" in upper:
-            votos.append("FALLO")
-        else:
-            votos.append(None)
-        if len(set(v for v in votos if v)) > 1:
-            print(
-                f"[Dashboard] Verificacion {i + 1}/{VERIFICACIONES_ACIERTO} "
-                f"discrepante para pick {pick.get('id')}: {votos}",
-                flush=True,
-            )
-            return None  # fuentes no coinciden: no marcar nada
-
-    if any(v is None for v in votos):
-        return None  # alguna pasada no fue concluyente
-    return votos[0]
-
-
-def _resolver_pick_con_ia(pick: dict):
-    """Pregunta a la IA si el pick fue ACIERTO o FALLO con el resultado final."""
-    import sports
-
-    try:
-        detail = sports.get_game_detail(pick["sport"], pick["eventId"])
-    except Exception:
-        return None
-
-    teams = detail.get("teams", [])
-    if len(teams) < 2 or detail.get("state") != "post":
-        return None
-
-    marcador = " vs ".join(
-        f"{t.get('name', '?')} {t.get('score', '-')}" for t in teams
-    )
-    mensaje = (
-        f"Pick realizado: mercado '{pick.get('market')}' - seleccion '{pick.get('selection')}'.\n"
-        f"Partido: {pick.get('eventName')} (deporte {pick.get('sportLabel', '')}).\n"
-        f"Resultado final: {marcador}.\n\n"
-        f"Con ese resultado final, Â¿el pick fue ACIERTO o FALLO?\n"
-        f"Responde SOLO una palabra: ACIERTO o FALLO. Si el mercado no se puede "
-        f"determinar con ese marcador, responde INDETERMINADO."
-    )
-
-    texto, _ = _preguntar_ia(mensaje, system_prompt=PROMPT_VERIFICACION, buscar_web=False)
-    if not texto:
-        return None
-    upper = texto.upper()
-    if "INDETERMINADO" in upper:
-        return None
-    if "ACIERTO" in upper:
-        return "ACIERTO"
-    if "FALLO" in upper:
-        return "FALLO"
-    return None
 
 
 def backfill_picks_metadata() -> int:
@@ -3222,34 +3471,26 @@ def resolver_picks_finalizados() -> dict:
             resueltos += 1
             continue
 
-        # 2) IA solo si el mercado no es determinable con el marcador.
-        #    El resultado de la IA SOLO se acepta si la verificacion estricta
-        #    multi-fuente (Sofascore/Flashscore/Fotmob, 6 pasadas) coincide
-        #    con el mismo veredicto; si no, el pick queda PENDIENTE.
-        ia_resultado = _resolver_pick_con_ia(pick)
-        if ia_resultado is None:
-            # Hay marcador final pero el mercado no se puede decidir con el
-            # (props sin boxscore, mercados sin fuente). A partir de 72h el
-            # pick ya no va a mejorar: se anula para no dejarlo eternamente
-            # PENDIENTE. Antes este anulado no existia y todos estos picks
-            # se acumulaban en PENDIENTE sin llegar nunca a resolverse.
-            if horas > 72:
-                db.update_pick_result(pick["id"], "ANULADO")
-            continue
-        marcador = " vs ".join(
-            f"{t.get('name', '?')} {t.get('score', '-')}"
-            for t in (detail.get("teams") or [])
-        )
-        verificado = _verificar_acierto_con_fuentes(pick, marcador)
-        if verificado is None or verificado != ia_resultado:
-            print(
-                f"[Dashboard] Pick {pick.get('id')} queda PENDIENTE: "
-                f"IA={ia_resultado} verificacion={verificado}",
-                flush=True,
-            )
-            continue
-        db.update_pick_result(pick["id"], verificado)
-        resueltos += 1
+        # 2) Fin de la cadena DETERMINISTA. El partido TERMINO (state=post) pero
+        #    el mercado NO se pudo decidir con datos reales: ni el marcador
+        #    (_resolver_deterministico), ni las mitades, ni boxscore/stats. La
+        #    IA YA NO decide ACIERTO/FALLO: esos mercados no son verificables de
+        #    forma fiable y antes se quedaban PENDIENTE eternos (la verificacion
+        #    de 6 pasadas nunca coincidia) o acababan ANULADO acumulandose en el
+        #    historial sin contar como acierto ni como fallo. Ahora se BORRAN
+        #    para que el historial solo tenga picks resueltos con datos reales.
+        #
+        #    Se esperan 72h antes de borrar: da margen a que la fuente de stats
+        #    (Sofascore/boxscore) este temporalmente caida (403) y el pick SI se
+        #    resuelva en un ciclo posterior. Pasado ese plazo ya no va a mejorar.
+        if horas > 72:
+            if db.delete_ai_pick(pick["id"]):
+                _salud["resolver_borrados"] = _salud.get("resolver_borrados", 0) + 1
+                print(
+                    f"[Dashboard] Pick {pick.get('id')} ({pick.get('market')}) "
+                    f"BORRADO: mercado no verificable con datos reales tras 72h",
+                    flush=True,
+                )
     return {"pendientes": len(pendientes), "resueltos": resueltos}
 
 
@@ -3730,13 +3971,17 @@ def revisar_picks_generados() -> dict:
     el marcador real, nunca esta revision). Por cada pendiente, en orden
     cronologico:
       1) Puerta de calidad (_pick_calidad_ok): lo que no pasaria el filtro del
-         dashboard se ANULA ya; antes seguia en la cola ocupando tiempo de
-         resolucion sin nunca mostrarse.
+         dashboard se BORRA ya; antes se ANULABA y se acumulaba en el historial
+         como fantasma sin contar como acierto ni fallo.
       2) Picks debiles (fallback cuantitativo o confianza BAJA): UNA pasada de
          IA de segunda opinion, con tope por ciclo y solo si queda presupuesto
          TPD (la cuota es prioridad del generador). Confirmado => verificado
-         +1 persistente; contradicho => ANULADO. Sin respuesta => se reintenta
-         en el proximo ciclo (no se marca, para no repetir gastando cuota).
+         +1 persistente; contradicho => BORRADO. Sin respuesta => se reintenta
+         en el proximo ciclo (no se toca, para no repetir gastando cuota).
+
+    NOTA: la IA aqui SOLO da una segunda opinion ANTES de que empiece el
+    partido. Nunca decide si un pick ya jugado fue ACIERTO o FALLO: eso lo
+    resuelve el marcador real en resolver_picks_finalizados().
     """
     pendientes = db.list_picks_pendientes() or []  # created_at asc = orden cronologico
     revisados = anulados = confirmados = ia_usadas = sin_presupuesto = 0
@@ -3748,7 +3993,13 @@ def revisar_picks_generados() -> dict:
     ahora = time.time()
     for k in [k for k, ts in _revisados.items() if ahora - ts > _REVISION_IA_TTL]:
         del _revisados[k]
-    ia_activa = os.getenv("DASHBOARD_REVISION_IA", "true").lower() == "true"
+    # DESACTIVADA POR DEFECTO: la segunda opinion IA borraba picks antes de
+    # jugarse por opinion del modelo, no por datos reales. Eso hacia desaparecer
+    # del historial apuestas que iban a ser ACIERTO real. Queda solo la puerta de
+    # calidad DETERMINISTA (rival TBD, cuota fuera de rango, mercado prohibido).
+    # El ACIERTO/FALLO lo decide unicamente el marcador real en el resolver.
+    # Para reactivarla de forma explicita: DASHBOARD_REVISION_IA=true
+    ia_activa = os.getenv("DASHBOARD_REVISION_IA", "false").lower() == "true"
 
     for pick in pendientes:
         # Partidos ya empezados/terminados: solo los resuelve el marcador.
@@ -3761,12 +4012,12 @@ def revisar_picks_generados() -> dict:
         #    textos con frases de 'sin datos', equipos genericos...
         if not _pick_calidad_ok(pick):
             try:
-                if db.update_pick_result(pid, "ANULADO"):
+                if db.delete_ai_pick(pid):
                     anulados += 1
                     _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
                     print(
                         f"[Dashboard-Revision] Pick {pid} ({pick.get('market')}) "
-                        f"ANULADO por calidad",
+                        f"BORRADO por calidad (no pasaba el filtro)",
                         flush=True,
                     )
             except Exception:
@@ -3799,11 +4050,11 @@ def revisar_picks_generados() -> dict:
                     _salud.get("revision_ia_confirmados", 0) + 1
                 )
                 db.marcar_pick_verificado(pid)
-            elif db.update_pick_result(pid, "ANULADO"):
+            elif db.delete_ai_pick(pid):
                 anulados += 1
                 _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
                 print(
-                    f"[Dashboard-Revision] Pick {pid} ANULADO: la IA lo contradice "
+                    f"[Dashboard-Revision] Pick {pid} BORRADO: la IA lo contradice "
                     f"con datos actuales",
                     flush=True,
                 )

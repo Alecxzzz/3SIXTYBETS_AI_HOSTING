@@ -1179,7 +1179,7 @@ def _init_database():
             try:
                 n = db.purgar_picks_prohibidos()
                 if n:
-                    print(f"[startup] {n} pick(s) anulados por mercado prohibido", flush=True)
+                    print(f"[startup] {n} pick(s) borrados por mercado prohibido", flush=True)
             except Exception as exc:
                 print(f"[startup] Purga de picks prohibidos fallo: {exc}", flush=True)
 

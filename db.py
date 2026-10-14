@@ -1191,17 +1191,18 @@ def public_ai_pick(row):
 
 
 def list_picks_aciertos_24h():
-    """Picks ACIERTO generados en las ultimas 24 horas (ventana corrida).
+    """Picks ACIERTO resueltos en las ultimas 24 horas (ventana corrida).
 
-    Alimenta la pestana Acertados del dashboard: rota cada 24h y el flujo
-    generar -> revisar -> resolver repone picks frescos (antes era hoy+ayer
-    con corte a las 23:00 Nicaragua). created_at se guarda en UTC
-    (now_utc()), igual que aqui.
+    Alimenta la pestana Acertados del dashboard. El corte es por updated_at
+    (el momento en que el resolver marco ACIERTO), con fallback a created_at
+    para filas viejas sin resolver marca. Antes se cortaba por created_at y
+    eso ocultaba aciertos reales: el generador analiza hasta 32 h antes del
+    partido, asi que un pick creado ayer y resuelto HOY no aparecia nunca.
     """
     desde = now_utc() - timedelta(hours=24)
     rows = run_query(
         "select * from ai_picks "
-        "where result = 'ACIERTO' and created_at >= %s "
+        "where result = 'ACIERTO' and coalesce(updated_at, created_at) >= %s "
         "order by created_at desc",
         (desde,),
     )
@@ -1335,6 +1336,17 @@ def update_pick_result(pick_id, result):
         "update ai_picks set result = %s, updated_at = %s where id = %s",
         (result, now_utc(), pick_id),
     ))
+
+
+def delete_ai_pick(pick_id):
+    """Borra UN pick del historial por id. Devuelve True si borro una fila.
+
+    Se usa cuando el partido termino pero el mercado NO es verificable con
+    datos reales (handicap de juegos, aces, sets exactos, props sin boxscore).
+    Antes esos picks se marcaban ANULADO y se acumulaban en el historial; ahora
+    se borran para no dejar basura ni picks fantasma en PENDIENTE eterno.
+    """
+    return bool(run_query("delete from ai_picks where id = %s", (pick_id,)))
 
 
 def set_closing_odds(pick_id, snapshot):
@@ -1483,6 +1495,62 @@ def _subcategoria_deporte(sport: str, familia: str) -> str:
         "hockey": " (goles)",
         "tennis": " (juegos)",
     }.get(sport, "")
+
+
+def efectividad_por_familia(min_resueltos: int = 1):
+    """Efectividad REAL por familia de mercado (solo picks ACIERTO/FALLO).
+
+    Fuente del APRENDIZAJE del generador: {familia: {resueltos, aciertos,
+    efectividad(%)}}. El generador sube el peso de las familias que mas
+    aciertan y baja el de las que mas fallan, en vez de usar una tabla fija.
+    """
+    rows = run_query(
+        "select market, titulo, result from ai_picks "
+        "where result in ('ACIERTO', 'FALLO')"
+    )
+    agg = {}
+    for r in rows or []:
+        fam = _categoria_mercado(r.get("market"), r.get("titulo"))
+        d = agg.setdefault(fam, {"resueltos": 0, "aciertos": 0})
+        d["resueltos"] += 1
+        if r.get("result") == "ACIERTO":
+            d["aciertos"] += 1
+    salida = {}
+    for fam, d in agg.items():
+        if d["resueltos"] < max(1, min_resueltos):
+            continue
+        salida[fam] = {
+            "resueltos": d["resueltos"],
+            "aciertos": d["aciertos"],
+            "efectividad": round(100.0 * d["aciertos"] / d["resueltos"]),
+        }
+    return salida
+
+
+def purgar_picks_pendientes_mercado(mercado: str) -> int:
+    """Borra los picks PENDIENTE de un mercado concreto (patron repetido).
+
+    Sirve para que el generador vuelva a analizar esos partidos YA. Solo se
+    borran los PENDIENTE: los resueltos (ACIERTO/FALLO) se conservan porque
+    son la fuente del aprendizaje de peso_mercado(). Devuelve cuantas filas
+    borro (0 si nada que borrar o si la BD falla).
+    """
+    m = (mercado or "").lower().replace("'", "").strip()
+    if not m:
+        return 0
+    where = (
+        "result = 'PENDIENTE' and "
+        f"(lower(market) like '%{m}%' or lower(titulo) like '%{m}%')"
+    )
+    try:
+        rows = run_query(f"select count(*) as n from ai_picks where {where}")
+        n = int(rows[0].get("n") or 0) if rows else 0
+        if not n:
+            return 0
+        run_query(f"delete from ai_picks where {where}")
+        return n
+    except Exception:
+        return 0
 
 
 def track_record(min_resueltos: int = 3):
@@ -1768,11 +1836,13 @@ _FRASES_MERCADO_PROHIBIDO = (
 
 
 def purgar_picks_prohibidos() -> int:
-    """Anula picks ya guardados con mercados prohibidos (legado).
+    """Borra del historial los picks guardados con mercados prohibidos (legado).
 
-    Los marca ANULADO (no los borra: conserva el historico) para que
-    desaparezcan del dashboard de inmediato y para que pick_existe() permita
-    regenerar el partido con un mercado valido. Devuelve cuantas filas anulo.
+    Los BORRA (no los marca ANULADO) para que desaparezcan del dashboard de
+    inmediato y no dejen basura en el historial. Al no quedar ninguna fila del
+    evento, pick_existe() sigue permitiendo regenerar el partido con un mercado
+    valido (mismo efecto que el ANULADO anterior, pero sin acumular picks
+    fantasma). Devuelve cuantas filas borro.
     """
     condiciones = " or ".join(
         "(lower(coalesce(titulo, '')) like %s"
@@ -1785,19 +1855,17 @@ def purgar_picks_prohibidos() -> int:
         patron = f"%{frase}%"
         params.extend([patron, patron, patron])
 
-    sql = (
-        "update ai_picks set result = 'ANULADO', updated_at = now() "
-        "where result != 'ANULADO' and (" + condiciones + ")"
-    )
+    where = "where (" + condiciones + ")"
     try:
-        run_query(sql, tuple(params))
         filas = run_query(
-            "select count(*) as cnt from ai_picks where result = 'ANULADO'"
-            " and updated_at >= %s",
-            (now_utc() - timedelta(minutes=2),),
+            "select count(*) as cnt from ai_picks " + where,
+            tuple(params),
             fetchone=True,
         )
-        return int((filas or {}).get("cnt") or 0)
+        total = int((filas or {}).get("cnt") or 0)
+        if total:
+            run_query("delete from ai_picks " + where, tuple(params))
+        return total
     except Exception as exc:
         print(f"[db] purgar_picks_prohibidos fallo: {exc}", flush=True)
         return 0
