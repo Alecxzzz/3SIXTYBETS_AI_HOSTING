@@ -3666,6 +3666,15 @@ def revisar_picks_hoy(corregir: bool = False) -> dict:
             recalculado = _resolver_deterministico(pick, detail)
         except Exception:
             recalculado = None
+        if recalculado is None:
+            # Mercados de stats (tarjetas/corners): el deterministico devuelve
+            # None a proposit (el marcador no los determina). Antes el revisor
+            # tampoco podia corregirlos; ahora pasan por el resolutor de
+            # FotMob/ESPN con los datos reales del partido.
+            try:
+                recalculado = _resolver_stats_sofascore(pick)
+            except Exception:
+                recalculado = None
         item["resultado_recalculado"] = recalculado
 
         if estado == "PENDIENTE":
