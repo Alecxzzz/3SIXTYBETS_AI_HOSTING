@@ -2691,9 +2691,31 @@ def _resolver_stats_sofascore(pick: dict):
                or "1a mitad" in texto)
     periodo = "FirstHalf" if primero else "All"
 
+    # Lado del pick: si el mercado es de UN equipo concreto se usa SU valor;
+    # el total del partido mezcla las stats del rival y podria dar un falso
+    # acierto (ej. 'Corners de X Over 3.5' resuelto con los corners globales).
+    lado = None
+    info = fstats.partido_por_equipos(
+        pick.get("home_name"), pick.get("away_name"), pick.get("eventDate")
+    )
+    if info and info.get("id") and info.get("finished"):
+        hn = _norm_texto(pick.get("home_name") or "")
+        an = _norm_texto(pick.get("away_name") or "")
+        nombre = _norm_texto(f"{titulo} {pick.get('selection') or ''}")
+        es_local = bool(hn) and hn in nombre
+        es_visitante = bool(an) and an in nombre
+        if es_local != es_visitante:
+            lado = 0 if es_local else 1
+
     total = 0
     encontrado = False
     for metrica in metricas:
+        if lado is not None and info and info.get("id"):
+            bd = fstats.breakdown_equipo(info["id"], metrica, periodo=periodo)
+            if bd and bd[lado] is not None:
+                total += bd[lado]
+                encontrado = True
+                continue
         t = fstats.total_estadistica_de_pick(pick, metrica, periodo)
         if t is not None:
             total += t
@@ -2766,6 +2788,19 @@ def _resolver_deterministico(pick: dict, detail: dict):
     texto = f"{market} {titulo} {sel}"
 
     home_name, away_name = (home.get("name") or "").lower(), (away.get("name") or "").lower()
+
+    # ---- Mercados que NO son de goles: el marcador NO los determina ----
+    # Tarjetas, corners, faltas, tiros, fuera de juego... dependen de las stats
+    # del partido, no del marcador. Sin esta guardia, la rama over/under de
+    # abajo comparaba las TARJETAS contra el total de GOLES (bug real:
+    # 'Tarjetas totales Over 2.5' con solo 2 tarjetas salio ACIERTO porque el
+    # partido tuvo 3+ goles). Los resuelve _resolver_stats_sofascore con los
+    # datos reales de FotMob/ESPN.
+    if any(k in texto for k in (
+        "tarjeta", "card", "corner", "esquina", "falta", "foul",
+        "offside", "fuera de juego", "remate", "tiro", "shot",
+    )):
+        return None
 
     def _equipo_de(sel_txt: str):
         if home_name and home_name in sel_txt:
