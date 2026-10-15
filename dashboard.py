@@ -977,6 +977,36 @@ def peso_mercado(market: str) -> int:
     return max(1, min(100, int(round(base * factor))))
 
 
+# ---- FILTRO DE LIGAS CON TRACK RECORD NEGATIVO ----
+# El aprendizaje de peso_mercado ajusta los MERCADOS; esto evita generar en
+# LIGAS que ya demuestran fallar (medido en produccion: ned.1 25%, col.1 44%,
+# fra.1 50% con ROI -32...). Si una liga floja empieza a acertar, sube sola y
+# se reincorpora. Se refresca al inicio de cada ciclo del generador.
+_LIGAS_FLOJAS_CACHE = {"ts": 0.0, "set": set()}
+LIGAS_FLOJA_MIN_RESUELTOS = int(os.getenv("DASHBOARD_LIGA_MIN_RESUELTOS", "15"))
+LIGAS_FLOJA_MAX_EFECTIVIDAD = int(os.getenv("DASHBOARD_LIGA_MAX_EFECTIVIDAD", "45"))
+
+
+def refrescar_ligas_flojas():
+    """Refresca el cache de ligas a evitar (al inicio de cada ciclo)."""
+    try:
+        datos = db.efectividad_por_liga(LIGAS_FLOJA_MIN_RESUELTOS) or {}
+        flojas = {
+            liga for liga, d in datos.items()
+            if (d.get("efectividad") or 100) < LIGAS_FLOJA_MAX_EFECTIVIDAD
+        }
+    except Exception:
+        flojas = set()  # sin BD: no se filtra nada
+    _LIGAS_FLOJAS_CACHE["ts"] = time.time()
+    _LIGAS_FLOJAS_CACHE["set"] = flojas
+    return flojas
+
+
+def liga_floja(league: str) -> bool:
+    """True si esa liga tiene track record negativo comprobado."""
+    return (league or "").strip() in _LIGAS_FLOJAS_CACHE["set"]
+
+
 # Palabras que identifican un pick de un deporte CONCRETO. Si un pick llega
 # con una palabra que pertenece a OTRO deporte ('Aces' es de tenis, 'Rebotes'
 # de NBA, 'extra innings' de MLB), es que la IA se cruzo de catalogo: se
@@ -1961,6 +1991,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     rechazados_sin_verificar = 0
     rechazados_no_resoluble = 0
     rechazados_baja_prob = 0
+    omitidos_liga = 0
 
     # Partidos ya analizados y descartados hace poco (cuota baja, sin datos,
     # mercado prohibido...): no se vuelven a gastar llamadas de IA en ellos.
@@ -1989,6 +2020,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     except Exception:
         pass
 
+    refrescar_ligas_flojas()
+
     con_pick = db.eventos_con_pick()
 
     for p in partidos[:max_partidos]:
@@ -1997,6 +2030,11 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             continue
         if p["event_id"] in descartes:
             omitidos_descartados += 1
+            continue
+        # Liga con track record negativo comprobado: no se genera mas hasta
+        # que mejore (refrescar_ligas_flojas la reincorpora sola si sube).
+        if liga_floja(p.get("league")):
+            omitidos_liga += 1
             continue
 
         label, mercados = MERCADOS_POR_DEPORTE[p["sport"]]
@@ -2372,6 +2410,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         "meta_min_juegos": MIN_JUEGOS_MANANA,
         "omitidos_ya_con_pick": omitidos,
         "omitidos_descartados": omitidos_descartados,
+        "omitidos_liga": omitidos_liga,
         "errores": errores,
         "rechazados_cuota": rechazados_cuota,
         "rechazados_calidad": rechazados_calidad,

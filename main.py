@@ -1183,6 +1183,16 @@ def _init_database():
             except Exception as exc:
                 print(f"[startup] Purga de picks prohibidos fallo: {exc}", flush=True)
 
+            # Historial legacy: picks ANULADO (fantasmas que no cuentan ni como
+            # acierto ni como fallo). La politica actual es BORRARlos; se
+            # limpian los viejos al arrancar.
+            try:
+                n_anul = db.borrar_anulados_legacy()
+                if n_anul:
+                    print(f"[startup] {n_anul} pick(s) ANULADO legacy borrados", flush=True)
+            except Exception as exc:
+                print(f"[startup] Borrado de ANULADO legacy fallo: {exc}", flush=True)
+
             break
 
         except Exception as exc:

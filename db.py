@@ -1553,6 +1553,54 @@ def purgar_picks_pendientes_mercado(mercado: str) -> int:
         return 0
 
 
+def borrar_anulados_legacy() -> int:
+    """Borra los picks ANULADO guardados antes del cambio de politica.
+
+    El usuario pidio que lo anulable se BORRE del historial en vez de
+    acumularse como fantasma que no cuenta ni como acierto ni como fallo.
+    Los nuevos ya no se marcan ANULADO; esta funcion limpia los viejos.
+    """
+    try:
+        rows = run_query("select count(*) as n from ai_picks where result = 'ANULADO'")
+        n = int(rows[0].get("n") or 0) if rows else 0
+        if not n:
+            return 0
+        run_query("delete from ai_picks where result = 'ANULADO'")
+        return n
+    except Exception:
+        return 0
+
+
+def efectividad_por_liga(min_resueltos: int = 15):
+    """Efectividad REAL por liga (solo picks ACIERTO/FALLO, minimo de muestras).
+
+    Fuente del filtro de ligas del generador: una liga con track record
+    negativo comprobado deja de generar picks hasta que mejore; si mejora,
+    el filtro la reincorpora solo.
+    """
+    rows = run_query(
+        "select league, result from ai_picks "
+        "where result in ('ACIERTO', 'FALLO') "
+        "and league is not null and league <> ''"
+    )
+    agg = {}
+    for r in rows or []:
+        d = agg.setdefault(r.get("league"), {"resueltos": 0, "aciertos": 0})
+        d["resueltos"] += 1
+        if r.get("result") == "ACIERTO":
+            d["aciertos"] += 1
+    salida = {}
+    for liga, d in agg.items():
+        if d["resueltos"] < max(1, min_resueltos):
+            continue
+        salida[liga] = {
+            "resueltos": d["resueltos"],
+            "aciertos": d["aciertos"],
+            "efectividad": round(100.0 * d["aciertos"] / d["resueltos"]),
+        }
+    return salida
+
+
 def track_record(min_resueltos: int = 3):
     """Track record agrupado por familia de mercado, deporte y liga.
 
