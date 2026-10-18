@@ -76,6 +76,18 @@ app.add_middleware(
 )
 
 # ==============================
+# MOTOR DE DATOS REALES + VERIFICACION (data_engine)
+# ==============================
+# Endpoints: /data/partido, /data/contexto-ia, /search/match, /search/prop
+# Envuelto en try/except: si algo falla, el backend arranca igual.
+try:
+    from data_engine import router as data_engine_router
+    app.include_router(data_engine_router)
+    print("[data_engine] router montado OK")
+except Exception as _de_err:
+    print(f"[WARN] data_engine no disponible: {_de_err}")
+
+# ==============================
 # SEGURIDAD: rate limit y anti-SSRF
 # ==============================
 

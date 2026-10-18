@@ -1,0 +1,198 @@
+"""
+MOTOR DE VERIFICACION: decide ACIERTO/FALLO para cualquier mercado
+usando los datos completos del partido (ESPN).
+"""
+from typing import Dict, Any, Optional
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+def _f(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+def _ok(acierto: bool, value, conf: float) -> Dict[str, Any]:
+    return {"result": "ACIERTO" if acierto else "FALLO",
+            "value_real": _f(value),
+            "confidence": conf}
+
+def _no() -> Dict[str, Any]:
+    return {"result": "NO_RESOLUBLE", "value_real": None, "confidence": 0}
+
+def _over_under(sel: str, valor: Optional[float], linea: Optional[float]) -> Optional[bool]:
+    if valor is None or linea is None:
+        return None
+    if sel in ("over", "mas de", "masde", "+"):
+        return valor > linea
+    if sel in ("under", "menos de", "menosde", "-"):
+        return valor < linea
+    return None
+
+def resolver_mercado(market_type: str, d: Dict, selection: str, line_value=None) -> Dict[str, Any]:
+    mt = _norm(market_type)
+    sel = _norm(selection)
+    lv = _f(line_value)
+    home = _f(d.get("home_score"))
+    away = _f(d.get("away_score"))
+
+    # ---- GANADOR / 1X2 ----
+    if mt in ("winner", "1x2", "ganador", "match_winner", "moneyline"):
+        if home is None or away is None:
+            return _no()
+        real = "home" if home > away else ("away" if away > home else "draw")
+        acierto = (sel in ("home", "1", "local") and real == "home") or \
+                  (sel in ("away", "2", "visitante") and real == "away") or \
+                  (sel in ("draw", "empate", "x") and real == "draw")
+        return _ok(acierto, home + away, 0.95)
+
+    # ---- DOBLE OPORTUNIDAD ----
+    if mt in ("double_chance", "doble oportunidad"):
+        if home is None or away is None:
+            return _no()
+        if sel in ("1x", "home_or_draw", "local o empate"):
+            acierto = home >= away
+        elif sel in ("x2", "draw_or_away", "empate o visitante"):
+            acierto = away >= home
+        elif sel == "12":
+            acierto = home != away
+        else:
+            return _no()
+        return _ok(acierto, home + away, 0.9)
+
+    # ---- EMPATE NO VALE ----
+    if mt in ("draw_no_bet", "sin empate", "dnb"):
+        if home is None or away is None:
+            return _no()
+        if home == away:
+            return {"result": "FALLO", "value_real": home + away, "confidence": 0.9}
+        acierto = (sel in ("home", "1", "local") and home > away) or \
+                  (sel in ("away", "2", "visitante") and away > home)
+        return _ok(acierto, home + away, 0.9)
+
+    # ---- OVER / UNDER GOLES ----
+    if mt in ("over_under", "over_under_goles", "total_goles", "goals"):
+        total = _f(d.get("total_goals"))
+        if total is None and home is not None and away is not None:
+            total = home + away
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.9)
+
+    # ---- GOLES DE UN EQUIPO ----
+    if mt in ("team_goals", "goles equipo", "equipo total de goles"):
+        valor = home if sel.startswith("home") else away
+        limpio = sel.replace("home", "").replace("away", "").strip()
+        r = _over_under(limpio, valor, lv)
+        return _no() if r is None else _ok(r, valor, 0.85)
+
+    # ---- AMBOS MARCAN ----
+    if mt in ("btts", "ambos marcan", "both_teams_score"):
+        if home is None or away is None:
+            return _no()
+        ambos = home > 0 and away > 0
+        acierto = (sel in ("si", "sí", "yes", "true", "1") and ambos) or \
+                  (sel in ("no", "false", "0") and not ambos)
+        return _ok(acierto, home + away, 0.9)
+
+    # ---- CORNERS ----
+    if mt in ("corners", "tiros de esquina", "esquinas", "total_corners"):
+        total = _f(d.get("total_corners"))
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.85)
+
+    if mt in ("corners_home", "corners local"):
+        r = _over_under(sel, _f(d.get("home_corners")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("home_corners")), 0.85)
+
+    if mt in ("corners_away", "corners visitante"):
+        r = _over_under(sel, _f(d.get("away_corners")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("away_corners")), 0.85)
+
+    if mt in ("corners_1h", "corners primera mitad", "corners 1a mitad"):
+        ch = _f(d.get("home_corners_1h")); ca = _f(d.get("away_corners_1h"))
+        total = (ch + ca) if ch is not None and ca is not None else None
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.6)
+
+    # ---- TARJETAS ----
+    if mt in ("cards", "tarjetas", "total_cards", "tarjetas totales"):
+        hy = _f(d.get("home_yellow")); ay = _f(d.get("away_yellow"))
+        hr = _f(d.get("home_red")); ar = _f(d.get("away_red"))
+        if None in (hy, ay, hr, ar):
+            return _no()
+        total = hy + ay + hr + ar
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.8)
+
+    if mt in ("yellow_cards", "amarillas", "tarjetas amarillas"):
+        hy = _f(d.get("home_yellow")); ay = _f(d.get("away_yellow"))
+        total = (hy + ay) if hy is not None and ay is not None else None
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.85)
+
+    # ---- FALTAS ----
+    if mt in ("fouls", "faltas", "total_fouls"):
+        total = _f(d.get("total_fouls"))
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.8)
+
+    # ---- TIROS A PUERTA ----
+    if mt in ("shots_on_target", "tiros a puerta"):
+        hs = _f(d.get("home_shots_on_target")); as_ = _f(d.get("away_shots_on_target"))
+        total = (hs + as_) if hs is not None and as_ is not None else None
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.75)
+
+    if mt in ("shots_on_target_home", "tiros a puerta local"):
+        r = _over_under(sel, _f(d.get("home_shots_on_target")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("home_shots_on_target")), 0.75)
+
+    # ---- ATAJADAS ----
+    if mt in ("saves", "atajadas"):
+        hs = _f(d.get("home_saves")); as_ = _f(d.get("away_saves"))
+        total = (hs + as_) if hs is not None and as_ is not None else None
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.75)
+
+    # ---- HANDICAP ----
+    if mt in ("handicap", "handicap_1x2"):
+        if home is None or away is None or lv is None:
+            return _no()
+        if sel in ("home", "1", "local"):
+            acierto = (home + lv) > away
+        elif sel in ("away", "2", "visitante"):
+            acierto = (away + lv) > home
+        else:
+            return _no()
+        return _ok(acierto, home + away, 0.8)
+
+    # ---- JUGADOR: PUNTOS / REBOTES / ASISTENCIAS ----
+    if mt in ("player_points", "puntos jugador"):
+        r = _over_under(sel, _f(d.get("player_points")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_points")), 0.9)
+
+    if mt in ("player_rebounds", "rebotes jugador"):
+        r = _over_under(sel, _f(d.get("player_rebounds")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_rebounds")), 0.9)
+
+    if mt in ("player_assists", "asistencias jugador"):
+        r = _over_under(sel, _f(d.get("player_assists")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_assists")), 0.9)
+
+    # ---- NFL: PASES DE TD ----
+    if mt in ("player_td_passes", "pases de td jugador"):
+        r = _over_under(sel, _f(d.get("player_td_passes")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_td_passes")), 0.9)
+
+    # ---- TENIS: ACES / DOBLES FALTAS ----
+    if mt in ("aces", "servicios directos"):
+        r = _over_under(sel, _f(d.get("player_aces")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_aces")), 0.7)
+
+    if mt in ("double_faults", "dobles faltas"):
+        r = _over_under(sel, _f(d.get("player_double_faults")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("player_double_faults")), 0.7)
+
+    return _no()
+
