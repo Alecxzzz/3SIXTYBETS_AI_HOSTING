@@ -629,7 +629,8 @@ Ventaja encontrada:
 (escribe la tendencia detectada)
 
 Estadística clave:
-(la estadística que respalda la ventaja)
+(la estadística que respalda la ventaja, con números concretos: forma V/E/D,
+promedios de goles/corners/tarjetas, H2H. Sin nombrar fuentes ni sitios web.)
 
 💡 Oportunidad de apuesta:
 (el mercado recomendado)
@@ -652,14 +653,18 @@ Devuelve exactamente ese formato y en ese orden.
   CAMBIA a un mercado de TU deporte para el que SI tengas datos reales, baja
   la confianza y anota lo que falta en consideraciones.
 - Si tras re-buscar sigue sin haber datos, entrega igualmente el pick con el
-  mercado más seguro y cuota estimada marcada como estimada, confianza baja.
+  mercado más seguro; si no hay cuota real, omite la cuota por completo.
+  NUNCA escribas "(estimada)" ni inventes una cuota.
 - PERO jamás inventes cifras que no estén en los datos.
+- PROHIBIDO nombrar fuentes ni sitios web (ni "la web confirma"): presenta
+  TODO como análisis propio, con números concretos (forma V/E/D, promedios de
+  goles/corners/tarjetas, H2H, cuota real del bookmaker).
 - Si SÍ hay datos pero la confianza es baja (<50%), elige el mercado MÁS
   SEGURO disponible dentro de TU deporte y baja la confianza, pero entrega el pick.
 - El campo 'titulo' debe coincidir SIEMPRE con la selección: si selection
   es doble oportunidad 2X, el titulo NO puede decir "no pierde" del local.
-- Si no hay cuota verificada, estima una cuota razonable basada en ESPN e
-  indícala como estimada.
+- Si no hay cuota real del bookmaker, omite la línea de cuota. PROHIBIDO
+  inventar una cuota ni marcarla como estimada.
 
 """
 
