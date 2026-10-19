@@ -1324,6 +1324,70 @@ def get_admin(user=Depends(get_current_user)):
         raise HTTPException(403, "Acceso restringido a administradores.")
     return user
 
+
+# ==============================
+# ANALISTA DE PICKS (IA propia, aislada del chat)
+# ==============================
+# Motor: ai/analista_picks.py
+#   Capa 1 CUANTITATIVA: Poisson sobre la forma real de ESPN. Siempre activa,
+#           no necesita API key ni gasta cuota de ningun proveedor.
+#   Capa 2 LLM: PROVEEDOR PROPIO (ANALISTA_AI_API_KEY / _BASE_URL / _MODEL),
+#           deliberadamente distinto al del chat para no competir por cuota.
+try:
+    from ai import analista_picks as analista
+    _analista_ok = True
+    print("[analista] modulo cargado OK")
+except Exception as _an_err:  # noqa: BLE001
+    analista = None
+    _analista_ok = False
+    print(f"[WARN] analista_picks no disponible: {_an_err}")
+
+
+class AnalisisIn(BaseModel):
+    """Entrada del analista. Acepta el pick completo o solo su id."""
+    pick: dict | None = None
+    pick_id: str | None = None
+    con_llm: bool = False
+    limite: int = 10
+
+
+@app.get("/analisis/estado")
+def analisis_estado():
+    """Estado del analista: proveedor, modelo y si la capa LLM esta activa."""
+    if not _analista_ok:
+        return {"ok": False, "motivo": "modulo analista_picks no disponible"}
+    return {"ok": True, **analista.estado()}
+
+
+@app.post("/analisis/pick")
+def analisis_un_pick(data: AnalisisIn, user=Depends(get_admin)):
+    """Analiza UN pick: probabilidad justa, edge, EV y veredicto."""
+    if not _analista_ok:
+        raise HTTPException(503, "El analista no esta disponible.")
+
+    pick = data.pick
+    if not pick and data.pick_id:
+        encontrados = db.list_picks_por_ids([data.pick_id]) or []
+        if not encontrados:
+            raise HTTPException(404, "Ese pick no existe o no es de hoy.")
+        pick = encontrados[0]
+    if not pick:
+        raise HTTPException(400, "Falta 'pick' o 'pick_id'.")
+
+    return analista.analizar_pick(pick, con_llm=bool(data.con_llm))
+
+
+@app.post("/analisis/pendientes")
+def analisis_pendientes(data: AnalisisIn, user=Depends(get_admin)):
+    """Analiza los picks PENDIENTES y devuelve el veredicto del modelo."""
+    if not _analista_ok:
+        raise HTTPException(503, "El analista no esta disponible.")
+
+    picks = db.list_picks_pendientes() or []
+    limite = max(1, min(int(data.limite or 10), 60))
+    return analista.analizar_lote(picks, con_llm=bool(data.con_llm),
+                                  limite=limite)
+
 # ---- Endpoints ----
 
 @app.get("/health")
