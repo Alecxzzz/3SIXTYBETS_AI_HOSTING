@@ -36,8 +36,6 @@ except ImportError:  # pragma: no cover - depende del entorno
 # CONFIGURACIÓN (todo desde entorno, con defaults seguros)
 # ============================================================
 
-# Si el entorno no define la key, se usa la key proporcionada por el usuario
-# para que la IA funcione out-of-the-box. En producción sobreescribir con AI36_GROQ_API_KEY.
 # PROVEEDOR. Si existe AI36_OPENROUTER_API_KEY, 365AI corre sobre OpenRouter
 # (recomendado: los modelos :free no consumen la cuota de Groq). Si no, se
 # conserva Groq para no romper despliegues existentes.
