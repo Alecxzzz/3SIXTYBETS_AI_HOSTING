@@ -90,7 +90,93 @@ def search_match(q: MatchQuery):
     }
 
 
-@router.post("/search/prop")
+@router.post("/resolve/picks")
+def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles: bool = False):
+    """
+    Resuelve los picks PENDIENTE de la tabla ai_picks con el motor de datos reales.
+    anular_no_resolubles=true marca ANULADO los que no se pueden verificar.
+    """
+    import db as _db
+    from data_engine.pick_parser import parsear_pick
+    from datetime import datetime, timezone
+
+    # Solo partidos YA jugados (evita resolver picks de partidos futuros)
+    cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    where = "result='PENDIENTE' AND event_date < %s"
+    params = [cutoff]
+    if solo_hoy:
+        where += " AND pick_date = CURDATE()"
+
+    picks = _db.run_query(
+        f"SELECT id, sport, league, home_name, away_name, event_date, market, titulo, selection "
+        f"FROM ai_picks WHERE {where} ORDER BY event_date DESC LIMIT {int(limite)}",
+        tuple(params)
+    ) or []
+
+    resueltos = 0
+    sin_datos = 0
+    anulados = 0
+    detalles = []
+
+    for p in picks:
+        parsed = parsear_pick(p)
+        if not parsed:
+            if anular_no_resolubles:
+                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
+                anulados += 1
+            else:
+                sin_datos += 1
+            continue
+        market_type, sel, linea = parsed
+        if not sel:
+            if anular_no_resolubles:
+                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
+                anulados += 1
+            else:
+                sin_datos += 1
+            continue
+
+        fecha = str(p.get("event_date") or "")[:10].replace("-", "") or None
+        try:
+            d = buscar_completo(p.get("sport") or "soccer", p.get("home_name") or "",
+                                p.get("away_name") or "", fecha, p.get("league"))
+        except Exception as e:
+            print(f"[resolve/picks] error buscar {p.get('id')}: {e}")
+            sin_datos += 1
+            continue
+
+        if not d.get("found"):
+            sin_datos += 1
+            continue
+
+        r = resolver_mercado(market_type, d, sel, linea)
+        if r["result"] in ("ACIERTO", "FALLO"):
+            _db.run_query("UPDATE ai_picks SET result=%s, updated_at=NOW() WHERE id=%s",
+                          (r["result"], p["id"]))
+            resueltos += 1
+            detalles.append({
+                "id": p["id"],
+                "partido": f"{p.get('home_name')} {d.get('home_score')}-{d.get('away_score')} {p.get('away_name')}",
+                "mercado": p.get("market"),
+                "seleccion": p.get("selection"),
+                "resultado": r["result"],
+                "valor_real": r.get("value_real"),
+            })
+        else:
+            if anular_no_resolubles:
+                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
+                anulados += 1
+            else:
+                sin_datos += 1
+
+    return {
+        "total_pendientes": len(picks),
+        "resueltos": resueltos,
+        "anulados": anulados,
+        "sin_datos": sin_datos,
+        "detalle": detalles[:40],
+    }
+
 def search_prop(q: PropQuery):
     """Verifica un pick: ACIERTO / FALLO / NO_RESOLUBLE."""
     d = buscar_completo(q.sport, q.home_name, q.away_name, q.event_date, q.league)
