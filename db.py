@@ -1314,6 +1314,21 @@ def list_picks_pendientes():
     return [public_ai_pick(r) for r in (rows or [])]
 
 
+def list_picks_pendientes_sport(sport: str, limite: int = 60):
+    """Picks PENDIENTE de UN deporte, los mas recientes primero.
+
+    Existe porque el analista cuantitativo solo modela futbol: pidiendo los 60
+    pendientes mas antiguos (que suelen ser MLB/tenis) el analisis se quedaba
+    sin nada que analizar aunque hubiera futbol pendiente mas nuevo.
+    """
+    rows = run_query(
+        "select * from ai_picks where result = 'PENDIENTE' and sport = %s "
+        "order by created_at desc limit %s",
+        (sport, limite),
+    )
+    return [public_ai_pick(r) for r in (rows or [])]
+
+
 def picks_sin_equipo():
     """Picks a reparar: sin nombres de equipos o con logo invalido.
 
