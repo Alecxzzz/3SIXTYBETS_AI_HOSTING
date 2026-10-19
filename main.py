@@ -38,13 +38,8 @@ except ImportError:
 # ==============================
 # CONFIGURACION PARA HOSTING
 # ==============================
-# Este backend solo soporta You.com.
-# No inicializa OpenAI ni Groq en el arranque.
-
-import youkeys
-
-YOU_API_KEY = youkeys.get_you_key() or youkeys.get_you_search_key()
-YOU_BASE_URL = os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research")
+# Demian y 365AI corren sobre OpenRouter (365AI puede caer a Groq). No hay
+# proveedores legacy.
 
 app = FastAPI(
     title="3SIXTYBETS AI WORKSPOT",
@@ -230,12 +225,9 @@ def buscar_web(mensaje: str, max_resultados: int = 2) -> str:
         for consulta in consultas:
             resultados.append(f"\n=== BUSQUEDA WEB: {consulta} ===\n")
 
-            # Usar You.com para búsqueda
-            datos_busqueda = search_engine.buscar_you(consulta, cantidad=max_resultados)
-
-            if not datos_busqueda:
-                # Fallback a DDGS si You.com falla
-                datos_busqueda = search_engine.buscar_ddgs(consulta, cantidad=max_resultados)
+            datos_busqueda = search_engine.buscar_ddgs(
+                consulta, cantidad=max_resultados
+            )
 
             for r in datos_busqueda:
                 titulo = recortar(r.get("title", "Sin titulo"), 100)
@@ -633,19 +625,6 @@ def chat_iniciar(request: Request, user=Depends(get_current_user_optional)):
         "ttl_s": CHAT_CONV_TTL_S,
     }
 
-def _respuesta_you_agotada(respuesta) -> bool:
-    """True si You.com respondio con falta de creditos (402) o cuota (429).
-
-    El texto del error lo arma engine/search_engine.py, asi que se detectan las
-    marcas reales que devuelve esa API.
-    """
-    if not respuesta:
-        return False
-    from ai.proveedor_fallos import sin_cuota
-
-    return sin_cuota(respuesta)
-
-
 @app.get("/debug/gemini")
 def debug_gemini():
     """Endpoint obsoleto. Se conserva para que los clientes viejos no den 404."""
@@ -805,7 +784,7 @@ def chat(request: Request, data: Chat,
 
     from ai.model import DEMIAN_API_KEY
 
-    if not DEMIAN_API_KEY and not YOU_API_KEY:
+    if not DEMIAN_API_KEY:
         if fallo_365:
             return (
                 "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
@@ -816,7 +795,7 @@ def chat(request: Request, data: Chat,
             "En Northflank agrega la clave de OpenRouter y la variable DEMIAN_AI_MODEL."
         )
 
-    # Demian (You.com): clasificar para diferenciar conversación de análisis.
+    # Demian (OpenRouter): clasificar para diferenciar conversación de análisis.
     # Usamos el clasificador de 365AI (rápido, vía Groq) para decidir.
     # Ruido sin palabras reales ("..", "??", "123"): NUNCA es analisis de
     # partido (bug real: '..' disparaba el analisis de los partidos de hoy).
@@ -839,7 +818,7 @@ def chat(request: Request, data: Chat,
             bloque_memoria + data.mensaje,
         )
         if not respuesta:
-            # Demian (OpenRouter/You.com) no respondio: 365AI es el relevo.
+            # Demian (OpenRouter) no respondio: 365AI es el relevo.
             alternativa = _responder_groq(
                 bloque_memoria + data.mensaje,
                 contexto=ctx_espn,

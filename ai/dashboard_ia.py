@@ -18,10 +18,9 @@ Configuracion (variables de entorno):
 CONFIGURACION DE BUSQUEDA WEB
 
 El dashboard genera picks, asi que necesita informacion FRESCA (lesiones,
-cuotas, forma reciente). Antes este motor era Demian/You.com, que hacia
-research web con include_domains. Al darle modelo Groq propio se perdio esa
-capacidad, asi que ahora el modulo busca en la web ANTES de generar el pick y
-le pasa los resultados al modelo como contexto.
+cuotas, forma reciente). El motor de chat no comparte esta busqueda: para que
+el pick se apoye en datos frescos, el modulo busca en la web ANTES de generar
+y le pasa los resultados al modelo como contexto.
 
 Busqueda: ai.ia36.buscar_web (DuckDuckGo, ya anade mes y anio a la consulta).
 """

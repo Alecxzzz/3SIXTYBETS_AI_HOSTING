@@ -168,7 +168,7 @@ No se añade ningún SDK de OpenAI/Anthropic. El modelo es local y no cuesta tok
 - `test_no_hay_fuga_de_datos`: el scaler se ajusta solo con train. **Este test protege contra sobreajuste y no debe omitirse.**
 
 ### Fuera de alcance
-`test_contexto_avisa_cuando_no_encuentra_el_partido` (en `tests/test_you_integration.py`) ya fallaba antes de estos cambios — verificado con `git stash`. No es regresión.
+Nota historica: el test de contexto de You.com se elimino junto con el proveedor; ya fallaba antes de estos cambios.
 
 ## Implementation Order
 

@@ -15,11 +15,7 @@ GROQ_API_KEY=tu_groq_key
 GROQ_BASE_URL=https://api.groq.com/openai/v1
 GROQ_MODEL=llama-3.1-8b-instant
 
-YOU_API_KEY=tu_you_key
-YOU_BASE_URL=https://api.you.com/v1
-YOU_MODEL=you
-YOU_SEARCH_API_KEY=tu_you_key
-YOU_SEARCH_URL=https://api.ydc-index.io/search
+# Busqueda web: DuckDuckGo (paquete ddgs), sin API key.
 
 # Aiven PostgreSQL (SSL requerido)
 DATABASE_URL=postgres://usuario:password@host:puerto/database?sslmode=require
@@ -51,10 +47,10 @@ La cuenta principal se crea automaticamente si configuras `ADMIN_USERNAME` y `AD
 
 Abre `/docs` y usa `POST /chat`. El campo `modelo` selecciona la IA:
 
-- `you` (por defecto): Demian tipster (You.com).
-- `36ai`: 365AI (Groq + function-calling, busca forma/lesiones/H2H con DDGS). En el frontend aparece como "365AI" (id `groq`).
+- `you` (por defecto): Demian tipster (OpenRouter).
+- `36ai`: 365AI (OpenRouter o Groq + function-calling, busca forma/lesiones/H2H con DDGS). En el frontend aparece como "365AI" (id `groq`).
 
-> **Motores:** You.com (Demian) y Groq (365AI). Si You.com se queda sin creditos (402) o saturado, `/chat` responde con Groq automaticamente en las tres rutas (conversacion, analisis EDGE y picks). Gemini se elimino del proyecto: su cuota diaria se agotaba sola y no era confiable como unico motor.
+> **Motores:** OpenRouter para Demian, 365AI, dashboard y analista (365AI puede caer a Groq). La busqueda web usa DuckDuckGo (`ddgs`). Si Demian no responde, `/chat` releva a 365AI automaticamente.
 
 `GET /models` lista las IAs disponibles y si están configuradas.
 
@@ -68,7 +64,7 @@ Abre `/docs` y usa `POST /chat`. El campo `modelo` selecciona la IA:
 }
 ```
 
-You.com:
+Demian (OpenRouter):
 
 ```json
 {

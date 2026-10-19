@@ -1802,12 +1802,9 @@ def _partidos_hoy():
 def _es_error_ia(texto) -> bool:
     """True si el 'texto' es en realidad un mensaje de error del proveedor.
 
-    Delega en ai.proveedor_fallos, que es la lista unica de marcas. Antes esta
-    logica estaba copiada aqui y en main.py, y cada copia se quedaba vieja: al
-    expirar el plan de prueba de You.com su texto paso a 'Your platform trial
-    has ended' y NINGUNA copia lo reconocia. El mensaje se colaba como si fuera
-    la respuesta del modelo y el partido se descartaba como 'sin datos' (6 h de
-    bloqueo) cuando en realidad no habia cuota.
+    Delega en ai.proveedor_fallos, que es la lista unica de marcas: cada
+    proveedor cambia el texto de sus errores y tenerlo en un solo sitio evita
+    que una copia vieja deje pasar un 'sin cuota' como si fuera una respuesta.
     """
     from ai.proveedor_fallos import respuesta_nula
 
@@ -1818,10 +1815,9 @@ def _es_error_ia(texto) -> bool:
 def _preguntar_ia(mensaje: str, sport: str | None = None, system_prompt: str | None = None, buscar_web: bool = True):
     """Genera los picks del Dashboard con su motor DEDICADO (ai/dashboard_ia.py).
 
-    Antes usaba Demian (You.com) directamente. Ahora el dashboard tiene modelo
-    propio: si el chat satura un modelo, el dashboard sigue respondiendo, porque
-    Groq aplica los limites POR MODELO. You.com queda solo como ultimo recurso
-    cuando ya no queda saldo.
+    El dashboard tiene modelo propio (DASHBOARD_AI_*): si el chat satura un
+    modelo, el dashboard sigue respondiendo. El proveedor es OpenRouter (o Groq
+    si no hay key de OpenRouter).
 
     'sport' recorta el catalogo del system prompt al de ese deporte: mandar los
     4catalogos en cada llamada costaba ~1470 tokens de prompt y quemaba el TPD.
@@ -1843,16 +1839,6 @@ def _preguntar_ia(mensaje: str, sport: str | None = None, system_prompt: str | N
             return contenido, f"365AI Dashboard ({modelo})"
     except Exception as exc:
         print(f"[Dashboard] motor dedicado fallo: {exc}", flush=True)
-
-    # 2) Relevo: Demian (You.com), util solo si quedo saldo.
-    try:
-        from ai.model import generar_respuesta_you
-
-        contenido = generar_respuesta_you(system_prompt, mensaje)
-        if contenido and not _es_error_ia(contenido):
-            return contenido, "Demian tipster"
-    except Exception as exc:
-        print(f"[Dashboard] Demian fallo: {exc}")
 
     # 'SIN_CUOTA' distingue "no hubo respuesta por limite de cuota" de un fallo
     # puntual: el generador usa esa marca para NO descartar el partido.
@@ -2196,8 +2182,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             pick = _parsear_pick_json(texto)
 
         if not pick and modelo == "SIN_CUOTA":
-            # SIN_CUOTA: la IA no respondio (TPD/ITPM de Groq agotado, 402 de
-            # You.com). Antes aqui se cortaba el ciclo y el dia se quedaba sin
+            # SIN_CUOTA: la IA no respondio (TPD/ITPM del proveedor agotado).
+            # Antes aqui se cortaba el ciclo y el dia se quedaba sin
             # picks. Ahora se sigue con ELECCION CUANTITATIVA sobre los mercados
             # reales que ya tenemos: no gasta un solo token y la cuota es la
             # verdadera del bookmaker, no una estimacion de la IA.
@@ -4282,7 +4268,6 @@ def salud_scheduler() -> dict:
             "doradobet": True,
             "odds_api_secundaria": bool(ODDS_API_KEY),
             "groq": bool(_os.getenv("GROQ_API_KEY")),
-            "you_api": bool(_os.getenv("YOU_API_KEY")),
             "pagadito": bool(
                 _os.getenv("PAGADITO_UID") and _os.getenv("PAGADITO_WSK")
             ),

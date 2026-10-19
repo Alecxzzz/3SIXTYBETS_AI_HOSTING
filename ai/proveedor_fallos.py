@@ -25,18 +25,10 @@ MARCAS_SIN_CUOTA = (
     "insufficient funds",
     "quota exceeded",
     "rate_limit",          # el proveedor lo escribe asi en el cuerpo
-    # You.com al expirar el plan de prueba:
-    "trial has ended",
-    "platform trial",
-    "upgrade to get access",
-    # Groq:
+    # Limites diarios de los proveedores:
     "requests per day",
     "tokens per day",
     "rate limit",
-    # Prefijos que ya armaba el motor de busqueda propio:
-    "error de you.com (402",
-    "error de you.com (429",
-    "no se pudo completar la busqueda en vivo",
 )
 
 # Fallos transitorios: reintentar mas tarde tiene sentido.
@@ -82,10 +74,8 @@ def transitorio(texto) -> bool:
 def respuesta_nula(texto) -> bool:
     """True si la respuesta esta vacia o es un error del proveedor, no una pick.
 
-    Unificacion de lo que cada modulo hacia por su cuenta:
-      - _es_error_ia (dashboard.py)
-      - _you_fallo_de_creditos (main.py)
-      - generar_respuesta_you (ai/model.py)
+    Unificacion de la deteccion de errores del proveedor: dashboard, chat y
+    modulos de picks consultan esta misma lista.
 
     OJO: NO incluye las marcas de 'sin datos'. Un {"error": "sin datos"} es una
     respuesta VALIDA del modelo (el filtro anti-alucinaciones), no una caida del
@@ -99,8 +89,7 @@ def respuesta_nula(texto) -> bool:
         return True
     bajo = t.lower()
     if bajo.startswith((
-        "error", "error:", "error de you.com", "error leyendo",
-        "demian tipster no pudo", "no se pudo",
+        "error", "error:", "no se pudo",
     )):
         return True
     # Fallos del proveedor embebidos en un 200 OK (el caso de 'trial has ended').

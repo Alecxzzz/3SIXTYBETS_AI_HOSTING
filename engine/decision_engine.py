@@ -169,7 +169,9 @@ Contenido: {r.get("body", "Sin contenido")}
         return "\n".join(bloques)
 
     def construir_contexto(self, partido, modelo="you"):
-        proveedor_busqueda = "you" if modelo == "you" else "ddgs"
+        # Unico proveedor de busqueda: DDGS. `modelo` se conserva en la firma
+        # por compatibilidad con llamadas existentes.
+        proveedor_busqueda = "ddgs"
 
         deporte_inicial = self.detectar_deporte(partido)
 
