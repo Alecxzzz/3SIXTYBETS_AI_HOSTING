@@ -902,10 +902,11 @@ def clasificar_36ai(mensaje: str) -> str:
         {"role": "user", "content": f"Mensaje: {mensaje}\nEtiqueta:"},
     ]
 
-    # max_tokens holgado a proposito: los gpt-oss gastan tokens en razonamiento
-    # ANTES de emitir texto. Con 20 el content llegaba vacío y el clasificador
-    # caía siempre en CONVERSACION.
-    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=400, max_reintentos=1)
+    # max_tokens holgado a proposito: los modelos de razonamiento gastan tokens
+    # ANTES de emitir texto. Con 400 y un solo intento el content llegaba vacio
+    # y el clasificador caia SIEMPRE en CONVERSACION (365AI nunca analizaba
+    # partidos). 1200 + 2 intentos dan margen incluso a los modelos :free.
+    data, _ = llamar_modelo(messages, usar_tools=False, max_tokens=1200, max_reintentos=2)
     if not data:
         return "CONVERSACION"
 
