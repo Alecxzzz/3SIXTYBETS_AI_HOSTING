@@ -785,6 +785,14 @@ def chat(request: Request, data: Chat,
     from ai.model import DEMIAN_API_KEY
 
     if not DEMIAN_API_KEY:
+        # Sin key de Demian, 365AI es el relevo para no dejar el chat mudo.
+        alternativa = _responder_groq(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=parece_partido,
+        )
+        if alternativa:
+            return alternativa
         if fallo_365:
             return (
                 "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
@@ -796,7 +804,7 @@ def chat(request: Request, data: Chat,
         )
 
     # Demian (OpenRouter): clasificar para diferenciar conversación de análisis.
-    # Usamos el clasificador de 365AI (rápido, vía Groq) para decidir.
+    # Usamos el clasificador de 365AI (una llamada corta) para decidir.
     # Ruido sin palabras reales ("..", "??", "123"): NUNCA es analisis de
     # partido (bug real: '..' disparaba el analisis de los partidos de hoy).
     if re.search(r"[a-záéíóúüñ]{2,}", (data.mensaje or "").lower()):
