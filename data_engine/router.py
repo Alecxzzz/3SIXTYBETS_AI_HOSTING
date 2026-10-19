@@ -2,7 +2,7 @@
 Router FastAPI: motor de datos reales + verificacion de picks.
 Se monta en main.py con app.include_router(data_engine.router).
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import hashlib
@@ -11,6 +11,23 @@ from data_engine.buscador import buscar_completo, contexto_para_ia
 from data_engine.rules import resolver_mercado
 
 router = APIRouter(tags=["data-engine"])
+
+
+def _admin(authorization: Optional[str] = Header(None)):
+    """Valida que el token pertenezca a un administrador."""
+    import db as _db
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Necesitas iniciar sesion.")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        user = _db.get_user_by_token(token)
+    except Exception:
+        user = None
+    if not user:
+        raise HTTPException(status_code=401, detail="Sesion invalida.")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Acceso restringido a administradores.")
+    return user
 
 
 class MatchQuery(BaseModel):
@@ -91,7 +108,8 @@ def search_match(q: MatchQuery):
 
 
 @router.post("/resolve/picks")
-def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles: bool = False):
+def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles: bool = False,
+                  admin=Depends(_admin)):
     """
     Resuelve los picks PENDIENTE de la tabla ai_picks con el motor de datos reales.
     anular_no_resolubles=true marca ANULADO los que no se pueden verificar.
