@@ -1928,6 +1928,20 @@ def _ultimos5(sport: str, event_id: str, home_name: str, away_name: str) -> dict
     return salida
 
 
+def _forma_v_e_d(resultados) -> str:
+    """'G 2-1 vs X; P 0-2 vs Y' -> 'V D' (G=victoria, P=derrota, E=empate).
+
+    Se usa para los chips de forma de la tarjeta del dashboard. Devuelve cadena
+    vacia si no hay resultados reales: nunca se inventa una forma.
+    """
+    letras = []
+    for fila in resultados or []:
+        m = re.match(r"\s*([GPE])", str(fila))
+        if m:
+            letras.append({"G": "V", "P": "D", "E": "E"}[m.group(1)])
+    return " ".join(letras)
+
+
 def _doble_verificar_pick(p: dict, market: str, selection: str, label: str) -> int:
     """Doble verificacion antes de publicar un GOLDEN PICK.
 
@@ -2142,12 +2156,24 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # primer partido sin respuesta de IA.
         # Contexto del MOTOR (ESPN) que acompana al pick cuantitativo: aporta
         # analisis real (ultimos partidos) sin gastar un token de IA.
-        stats_motor = [
-            f"Motor ESPN (ultimos 5) {p['away_name']}: "
-            f"{'; '.join(recientes.get('away') or ['sin datos'])}",
-            f"Motor ESPN (ultimos 5) {p['home_name']}: "
-            f"{'; '.join(recientes.get('home') or ['sin datos'])}",
-        ]
+        # Forma V/E/D de los ultimos 5 (G=ganó, P=perdió, E=empate) para los
+        # chips de la tarjeta. Solo se agrega cuando hay datos reales: antes se
+        # escribia "sin datos" y la tarjeta quedaba con ruido.
+        stats_motor = []
+        for nombre, lado in ((p["away_name"], "away"), (p["home_name"], "home")):
+            forma = _forma_v_e_d(recientes.get(lado))
+            if forma:
+                stats_motor.append(f"Forma {nombre}: {forma}")
+        if recientes.get("away"):
+            stats_motor.append(
+                f"Motor ESPN (ultimos 5) {p['away_name']}: "
+                f"{'; '.join(recientes['away'])}"
+            )
+        if recientes.get("home"):
+            stats_motor.append(
+                f"Motor ESPN (ultimos 5) {p['home_name']}: "
+                f"{'; '.join(recientes['home'])}"
+            )
 
         # MOTOR PRIMERO (prioridad: no saturar la IA): tenis/NFL/NBA/MLB
         # eligen con los mercados REALES de Doradobet + los ultimos partidos
@@ -2376,6 +2402,18 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 if cuota_real is not None
                 else f"Cuota estimada: {odds_final} (sin precio del bookmaker)",
             )
+
+        # Chips de forma V/E/D (misma fuente ESPN que el motor). Solo se
+        # agregan cuando hay datos reales y si el modelo no los trajo ya.
+        if not any(str(s).startswith("Forma ") for s in stats_lista):
+            formas = []
+            for nombre, lado in (
+                (p["away_name"], "away"), (p["home_name"], "home")
+            ):
+                forma = _forma_v_e_d(recientes.get(lado))
+                if forma:
+                    formas.append(f"Forma {nombre}: {forma}")
+            stats_lista = formas + stats_lista
 
         creado = db.create_ai_pick(
             sport=p["sport"],
