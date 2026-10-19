@@ -791,8 +791,8 @@ def chat(request: Request, data: Chat,
         fallo_365 = True
         if fallo_365:
             return (
-                "365AI esta saturada en este momento (limite de peticiones de "
-                "Groq). Espera unos segundos e intenta de nuevo."
+                "365AI esta saturada en este momento (limite de peticiones del "
+                "proveedor). Espera unos segundos e intenta de nuevo."
             )
 
     if modelo_id in ("gemini", "google", "googleai"):
@@ -803,15 +803,17 @@ def chat(request: Request, data: Chat,
             "'Demian tipster' en el selector de modelo."
         )
 
-    if not YOU_API_KEY:
+    from ai.model import DEMIAN_API_KEY
+
+    if not DEMIAN_API_KEY and not YOU_API_KEY:
         if fallo_365:
             return (
                 "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
-                "YOU_API_KEY configurada para Demian. Revisa las API keys en Northflank."
+                "DEMIAN_AI_API_KEY configurada para Demian. Revisa las API keys en Northflank."
             )
         return (
-            "ERROR: Falta YOU_API_KEY o YOU_SEARCH_API_KEY.\n"
-            "En Northflank agrega la clave de You.com y la variable YOU_BASE_URL."
+            "ERROR: Falta DEMIAN_AI_API_KEY (OpenRouter) para Demian.\n"
+            "En Northflank agrega la clave de OpenRouter y la variable DEMIAN_AI_MODEL."
         )
 
     # Demian (You.com): clasificar para diferenciar conversación de análisis.
@@ -830,14 +832,14 @@ def chat(request: Request, data: Chat,
     if tipo != "SPORTS_MATCH":
         # Modo conversación: sin formato EDGE, respuesta natural de asistente.
         from engine.prompt_builder import construir_prompt_conversacional
-        respuesta = SearchEngine().ask_you(
-            bloque_memoria + data.mensaje, system_prompt=construir_prompt_conversacional("Demian tipster")
+        from ai.model import generar_respuesta_demian
+
+        respuesta = generar_respuesta_demian(
+            construir_prompt_conversacional("Demian tipster"),
+            bloque_memoria + data.mensaje,
         )
-        # You.com sin creditos (402) o saturado (429): Groq es el motor de relevo.
-        # /chat llama a ask_you() directamente, asi que el dispatch de
-        # ai/model.py no aplica en esta ruta.
-        if _respuesta_you_agotada(respuesta):
-            # You.com sin creditos: Groq es el motor de relevo.
+        if not respuesta:
+            # Demian (OpenRouter/You.com) no respondio: 365AI es el relevo.
             alternativa = _responder_groq(
                 bloque_memoria + data.mensaje,
                 contexto=ctx_espn,
@@ -845,9 +847,8 @@ def chat(request: Request, data: Chat,
             )
             if alternativa:
                 return alternativa
-        if respuesta:
-            respuesta = respuesta.replace("*", "").replace("#", "")
-        return respuesta or "No pude generar una respuesta. Intenta de nuevo."
+            return "Demian no pudo responder en este momento. Intenta de nuevo en unos segundos."
+        return respuesta.replace("*", "").replace("#", "")
 
     # Modo análisis de partido: reglas EDGE + búsqueda web (comportamiento anterior).
     reglas = """
@@ -1110,11 +1111,13 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
             "combinacion no existe: no la analices como si fuera real."
         )
 
-    respuesta = SearchEngine().ask_you(
-        bloque_memoria + data.mensaje + bloque_verif, system_prompt=reglas
+    from ai.model import generar_respuesta_demian
+
+    respuesta = generar_respuesta_demian(
+        reglas, bloque_memoria + data.mensaje + bloque_verif
     )
-    # You.com sin creditos en el analisis EDGE: Groq es el motor de relevo.
-    if _respuesta_you_agotada(respuesta):
+    # Demian sin respuesta en el analisis EDGE: 365AI es el motor de relevo.
+    if not respuesta:
         alternativa = _responder_groq(
             bloque_memoria + data.mensaje,
             contexto=ctx_espn,

@@ -38,32 +38,58 @@ except ImportError:  # pragma: no cover - depende del entorno
 
 # Si el entorno no define la key, se usa la key proporcionada por el usuario
 # para que la IA funcione out-of-the-box. En producción sobreescribir con AI36_GROQ_API_KEY.
-GROQ_API_KEY = os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY") or ""
+# PROVEEDOR. Si existe AI36_OPENROUTER_API_KEY, 365AI corre sobre OpenRouter
+# (recomendado: los modelos :free no consumen la cuota de Groq). Si no, se
+# conserva Groq para no romper despliegues existentes.
+OPENROUTER_API_KEY = os.getenv("AI36_OPENROUTER_API_KEY") or ""
+USANDO_OPENROUTER = bool(OPENROUTER_API_KEY)
 
-GROQ_URL = os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
-GROQ_MODELS_URL = os.getenv("AI36_GROQ_MODELS_URL", "https://api.groq.com/openai/v1/models")
+GROQ_API_KEY = (
+    OPENROUTER_API_KEY
+    or os.getenv("AI36_GROQ_API_KEY")
+    or os.getenv("GROQ_API_KEY")
+    or ""
+)
 
-MODELO_DEFAULT = os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b")
-# Cadena de fallback con modelos REALES disponibles en la cuenta de Groq
-# (llama-3.3-70b-versatile fue deprecado y devolvia 404 -> timeouts).
-MODELO_FALLBACK = os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b")
-# Cadena de fallback. Los limites diarios de Groq (TPD) son POR MODELO, asi
-# que cada uno debe ser distinto: si se repite, un 429 se repetiria tambien.
-MODELOS_FALLBACK_CADENA = [
-    MODELO_FALLBACK,
-    "qwen/qwen3.8-27b",
-    # groq/compound-mini RETIRADO: la API responde 404 "model does not exist"
-    # (verificado contra /models). No volver a incluirlo o rompe la cadena.
-]
+GROQ_URL = (
+    os.getenv("AI36_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+    if USANDO_OPENROUTER
+    else os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+)
+GROQ_MODELS_URL = (
+    os.getenv("AI36_OPENROUTER_MODELS_URL", "https://openrouter.ai/api/v1/models")
+    if USANDO_OPENROUTER
+    else os.getenv("AI36_GROQ_MODELS_URL", "https://api.groq.com/openai/v1/models")
+)
+
+MODELO_DEFAULT = (
+    os.getenv("AI36_OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free")
+    if USANDO_OPENROUTER
+    else os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b")
+)
+# En Groq los limites diarios (TPD) son POR MODELO, asi que la cadena rota
+# entre varios. En OpenRouter el cupo es por CUENTA: se usa el fallback
+# configurado y, como ultimo recurso, el router gratuito.
+MODELO_FALLBACK = (
+    os.getenv("AI36_OPENROUTER_FALLBACK", "nvidia/nemotron-3-super-120b-a12b:free")
+    if USANDO_OPENROUTER
+    else os.getenv("AI36_GROQ_FALLBACK", "openai/gpt-oss-20b")
+)
+MODELOS_FALLBACK_CADENA = [MODELO_FALLBACK] + (
+    ["openrouter/free"]
+    if USANDO_OPENROUTER
+    else [
+        "qwen/qwen3.8-27b",
+        # groq/compound-mini RETIRADO: la API responde 404 "model does not exist"
+        # (verificado contra /models). No volver a incluirlo o rompe la cadena.
+    ]
+)
 
 # Esfuerzo de razonamiento para modelos gpt-oss (low = respuestas ~40-50% mas rapidas).
 # Solo aplica a modelos "openai/gpt-oss-*": llama y demas NO soportan el parametro.
 REASONING_EFFORT = os.getenv("AI36_GROQ_REASONING_EFFORT", "low")
 
-MODELOS_PREFERIDOS = [
-    os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
-    "openai/gpt-oss-120b",
-]
+MODELOS_PREFERIDOS = [MODELO_DEFAULT, MODELO_FALLBACK]
 
 MAX_TOKENS = int(os.getenv("AI36_MAX_TOKENS", "2500"))
 MAX_CHARS_HERRAMIENTA = int(os.getenv("AI36_MAX_CHARS_HERRAMIENTA", "600"))
@@ -356,6 +382,10 @@ def compactar_messages(messages, max_chars=MAX_CHARS_MENSAJES):
 def obtener_modelos_disponibles():
     if not GROQ_API_KEY:
         return []
+    # En OpenRouter /models devuelve cientos de modelos y suma latencia en cada
+    # clasificacion. Como ya sabemos exactamente cuales queremos, no se consulta.
+    if USANDO_OPENROUTER:
+        return [m for m in (MODELO_DEFAULT, MODELO_FALLBACK) if m]
     try:
         response = requests.get(
             url=GROQ_MODELS_URL,
@@ -437,8 +467,22 @@ def _dormir_hasta(segundos):
         restante -= trozo
 
 
+def _aplicar_reasoning(payload: dict, modelo: str) -> None:
+    """Ajusta el presupuesto de razonamiento segun proveedor y modelo.
+
+    OpenRouter usa el objeto "reasoning". Groq solo entiende reasoning_effort,
+    y unicamente los gpt-oss lo soportan (llama/qwen devuelven 400).
+    """
+    payload.pop("reasoning_effort", None)
+    payload.pop("reasoning", None)
+    if USANDO_OPENROUTER:
+        payload["reasoning"] = {"effort": REASONING_EFFORT}
+    elif modelo.startswith("openai/gpt-oss"):
+        payload["reasoning_effort"] = REASONING_EFFORT
+
+
 def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, modelo_actual=None, max_tokens=None):
-    """Llama a Groq chat completions con reintentos, fallback de modelo y compactación."""
+    """Llama al proveedor de chat completions con reintentos y fallback."""
     modelo = modelo_actual or seleccionar_modelo()
     payload = {
         "model": modelo,
@@ -448,17 +492,25 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
     if usar_tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    # Recortar razonamiento en modelos gpt-oss (~40-50% mas rapido, misma calidad)
-    if modelo.startswith("openai/gpt-oss"):
-        payload["reasoning_effort"] = REASONING_EFFORT
+    _aplicar_reasoning(payload, modelo)
 
     ultimo_error = "Error desconocido"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if USANDO_OPENROUTER:
+        # OpenRouter pide identificarse; sin esto algunas rutas dan 403.
+        headers["HTTP-Referer"] = os.getenv(
+            "OPENROUTER_HTTP_REFERER", "https://threesixtybets.com"
+        )
+        headers["X-Title"] = os.getenv("OPENROUTER_X_TITLE", "3SIXTYBETS 365AI")
 
     for intento in range(max_reintentos):
         try:
             response = requests.post(
                 url=GROQ_URL,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                headers=headers,
                 data=json.dumps(payload),
                 timeout=60
             )
@@ -489,14 +541,22 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
 
                 if not contenido and not tiene_tools:
                     ultimo_error = (
-                        "Groq devolvio content vacio (max_tokens agotado por razonamiento)"
+                        "El proveedor devolvio content vacio "
+                        "(max_tokens agotado por razonamiento)"
                     )
                     if DEBUG:
                         print(
                             f"[36AI][DEBUG] content vacio en {modelo}; subiendo max_tokens",
                             flush=True,
                         )
-                    if max_tokens is None or max_tokens < 512:
+                    detalles = (
+                        (data.get("usage") or {}).get("completion_tokens_details") or {}
+                    )
+                    if detalles.get("reasoning_tokens"):
+                        payload["max_tokens"] = min(
+                            4096, int(payload["max_tokens"]) * 2
+                        )
+                    elif max_tokens is None or max_tokens < 512:
                         payload["max_tokens"] = 1024
                     time.sleep(1)
                     continue
@@ -534,10 +594,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                               f"Cambiando a: {siguiente}")
                     modelo = siguiente
                     payload["model"] = modelo
-                    if modelo.startswith("openai/gpt-oss"):
-                        payload["reasoning_effort"] = REASONING_EFFORT
-                    else:
-                        payload.pop("reasoning_effort", None)
+                    _aplicar_reasoning(payload, modelo)
                     continue
                 # No hay mas modelos: esperar a que se reestablezca el dia.
                 espera = _segundos_para_reintentar(ultimo_error)
@@ -558,10 +615,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                         print(f"[36AI] 429 en {modelo}. Cambiando a: {siguiente}")
                     modelo = siguiente
                     payload["model"] = modelo
-                    if modelo.startswith("openai/gpt-oss"):
-                        payload["reasoning_effort"] = REASONING_EFFORT
-                    else:
-                        payload.pop("reasoning_effort", None)
+                    _aplicar_reasoning(payload, modelo)
                     if usar_tools and "tools" not in payload:
                         payload["tools"] = tools
                         payload["tool_choice"] = "auto"
@@ -580,7 +634,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             if modelo != MODELO_FALLBACK:
                 modelo = MODELO_FALLBACK
                 payload["model"] = modelo
-                payload.pop("reasoning_effort", None)  # llama no soporta reasoning_effort
+                _aplicar_reasoning(payload, modelo)
                 if usar_tools:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
@@ -609,10 +663,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                     print(f"[36AI] Modelo {modelo} no disponible. Cambiando a: {siguiente}")
                 modelo = siguiente
                 payload["model"] = modelo
-                if modelo.startswith("openai/gpt-oss"):
-                    payload["reasoning_effort"] = REASONING_EFFORT
-                else:
-                    payload.pop("reasoning_effort", None)
+                _aplicar_reasoning(payload, modelo)
                 # Reponer herramientas: el nuevo modelo puede si soportarlas
                 if usar_tools and "tools" not in payload:
                     payload["tools"] = tools
@@ -871,7 +922,10 @@ def clasificar_36ai(mensaje: str) -> str:
 def responder_conversacion_36ai(mensaje: str, system_prompt: str) -> str:
     """Responde en modo conversación: una sola llamada a Groq, sin tools ni formato EDGE."""
     if not GROQ_API_KEY:
-        return "365AI no está configurada. Falta AI36_GROQ_API_KEY en el backend."
+        return (
+            "365AI no está configurada. Falta AI36_OPENROUTER_API_KEY "
+            "(o AI36_GROQ_API_KEY) en el backend."
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},

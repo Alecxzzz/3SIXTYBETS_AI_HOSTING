@@ -70,11 +70,9 @@ MODELOS_EXTRA = [
     m.strip()
     for m in os.getenv(
         "DASHBOARD_AI_MODELOS_EXTRA",
-        # Modelos confirmados en la cuenta de Groq del proyecto (verificado
-        # contra GET /openai/v1/models). Los que no existan devuelven 404 y el
-        # bucle pasa al siguiente, pero cada 404 suma latencia a un ciclo que
-        # puede tener 90 partidos: por eso solo van los que SI respondieron.
-        "qwen/qwen3.8-27b",
+        # En OpenRouter los qwen de Groq devuelven 404 y solo suman latencia:
+        # si no se configura nada, la cadena se queda con principal + fallback.
+        "" if "openrouter.ai" in BASE_URL else "qwen/qwen3.8-27b",
     ).split(",")
     if m.strip()
 ]
@@ -265,7 +263,11 @@ def _construir_payload(modelo: str, system_prompt: str, mensaje: str) -> dict:
         ],
         "max_tokens": _max_tokens_para(modelo),
     }
-    if modelo.startswith("openai/gpt-oss"):
+    if "openrouter.ai" in BASE_URL:
+        # Los modelos de razonamiento de OpenRouter consumen max_tokens antes de
+        # emitir texto. "low" acota el gasto sin perder calidad en un JSON corto.
+        payload["reasoning"] = {"effort": REASONING_EFFORT}
+    elif modelo.startswith("openai/gpt-oss"):
         payload["reasoning_effort"] = REASONING_EFFORT
     return payload
 
@@ -301,6 +303,12 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
         return None, None
 
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    if "openrouter.ai" in BASE_URL:
+        # OpenRouter pide identificarse; sin esto algunas rutas dan 403.
+        headers["HTTP-Referer"] = os.getenv(
+            "OPENROUTER_HTTP_REFERER", "https://threesixtybets.com"
+        )
+        headers["X-Title"] = os.getenv("OPENROUTER_X_TITLE", "3SIXTYBETS Dashboard")
     ultimo_error = ""
 
     # Contexto web (una sola vez, compartido por modelo principal y fallback).

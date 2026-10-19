@@ -13,18 +13,47 @@ except ImportError:
 if load_dotenv:
     load_dotenv()
 
+DEMIAN_API_KEY = os.getenv("DEMIAN_AI_API_KEY") or ""
+DEMIAN_MODEL = os.getenv("DEMIAN_AI_MODEL", "nvidia/nemotron-3.5-super-vl:free")
+DEMIAN_FALLBACK = os.getenv(
+    "DEMIAN_AI_FALLBACK", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+)
+DEMIAN_REASONING = os.getenv("DEMIAN_AI_REASONING", "low")
+DEMIAN_MAX_TOKENS = int(os.getenv("DEMIAN_AI_MAX_TOKENS", "1800"))
+DEMIAN_TEMPERATURE = float(os.getenv("DEMIAN_AI_TEMPERATURE", "0.6"))
+
+# 365AI puede correr sobre OpenRouter (recomendado) o sobre Groq. Si existe
+# AI36_OPENROUTER_API_KEY manda OpenRouter; si no, se conserva la config de Groq
+# para no romper despliegues viejos.
+AI36_API_KEY = (
+    os.getenv("AI36_OPENROUTER_API_KEY")
+    or os.getenv("AI36_GROQ_API_KEY")
+    or os.getenv("GROQ_API_KEY")
+    or ""
+)
+AI36_BASE_URL = os.getenv(
+    "AI36_OPENROUTER_URL",
+    os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
+)
+AI36_MODEL = os.getenv(
+    "AI36_OPENROUTER_MODEL",
+    os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
+)
+
 MODEL_CONFIGS = {
     "you": {
         "name": "Demian tipster",
-        "api_key": youkeys.get_you_key(),
-        "base_url": os.getenv("YOU_BASE_URL", "https://api.you.com/v1/research"),
-        "model": os.getenv("YOU_MODEL", "research"),
+        "api_key": DEMIAN_API_KEY,
+        "base_url": os.getenv(
+            "DEMIAN_AI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
+        ),
+        "model": DEMIAN_MODEL,
     },
     "36ai": {
         "name": "365AI",
-        "api_key": os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY"),
-        "base_url": os.getenv("AI36_GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"),
-        "model": os.getenv("AI36_GROQ_MODEL", "openai/gpt-oss-120b"),
+        "api_key": AI36_API_KEY,
+        "base_url": AI36_BASE_URL,
+        "model": AI36_MODEL,
     },
 }
 
@@ -53,14 +82,20 @@ def env_diagnostics():
     you_key = youkeys.get_you_key()
     you_search_key = youkeys.get_you_search_key()
     return {
+        "demian_configured": bool(DEMIAN_API_KEY),
+        "demian_key_prefix": DEMIAN_API_KEY[:10] if DEMIAN_API_KEY else "",
+        "demian_model": DEMIAN_MODEL,
+        "demian_fallback": DEMIAN_FALLBACK or None,
         "you_configured": bool(you_key),
         "you_key_prefix": you_key[:7] if you_key else "",
         "you_search_configured": bool(you_search_key),
         "you_search_key_prefix": you_search_key[:7] if you_search_key else "",
         "you_use_research": os.getenv("YOU_USE_RESEARCH", "false"),
-        "groq_configured": bool(
-            os.getenv("AI36_GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
-        ),
+        "ai36_configured": bool(AI36_API_KEY),
+        "ai36_model": AI36_MODEL,
+        "ai36_provider": "openrouter" if os.getenv("AI36_OPENROUTER_API_KEY") else "groq",
+        # Compat: clientes viejos leen groq_configured.
+        "groq_configured": bool(AI36_API_KEY),
     }
 
 
@@ -178,6 +213,32 @@ Solicitud del usuario:
             "Demian tipster no pudo completar la busqueda en vivo ahora. "
             f"Motivo tecnico: {error}"
         )
+
+
+def generar_respuesta_demian(prompt_sistema: str, prompt_usuario: str):
+    """Demian tipster sobre OpenRouter. None si no pudo (el caller hace relevo).
+
+    You.com queda como ultimo recurso SOLO si no hay DEMIAN_AI_API_KEY, para no
+    romper instalaciones que todavia tengan la key vieja.
+    """
+    if DEMIAN_API_KEY:
+        from ai.openrouter import generar
+
+        texto, _modelo = generar(
+            prompt_sistema,
+            prompt_usuario,
+            api_key=DEMIAN_API_KEY,
+            model=DEMIAN_MODEL,
+            fallback=DEMIAN_FALLBACK,
+            max_tokens=DEMIAN_MAX_TOKENS,
+            temperature=DEMIAN_TEMPERATURE,
+            reasoning=DEMIAN_REASONING,
+        )
+        return texto or None
+
+    if youkeys.get_you_key() or youkeys.get_you_search_key():
+        return generar_respuesta_you(prompt_sistema, prompt_usuario)
+    return None
 
 
 def generar_respuesta(prompt_sistema: str, prompt_usuario: str, modelo: str = "you") -> str:

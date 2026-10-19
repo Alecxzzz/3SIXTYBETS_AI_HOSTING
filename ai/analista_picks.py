@@ -61,10 +61,17 @@ BASE_URL = os.getenv(
     "ANALISTA_AI_BASE_URL",
     "https://openrouter.ai/api/v1/chat/completions",
 )
-MODELO = os.getenv("ANALISTA_AI_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-MODELO_FALLBACK = os.getenv("ANALISTA_AI_FALLBACK", "")
-MAX_TOKENS = int(os.getenv("ANALISTA_AI_MAX_TOKENS", "900"))
-TIMEOUT = int(os.getenv("ANALISTA_AI_TIMEOUT", "45"))
+MODELO = os.getenv(
+    "ANALISTA_AI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
+)
+MODELO_FALLBACK = os.getenv(
+    "ANALISTA_AI_FALLBACK", "nvidia/nemotron-3.5-lightning:free"
+)
+# Los modelos de razonamiento gastan max_tokens ANTES de escribir el informe:
+# con 900 el content llegaba vacio. 2500 deja margen de sobra.
+MAX_TOKENS = int(os.getenv("ANALISTA_AI_MAX_TOKENS", "2500"))
+TIMEOUT = int(os.getenv("ANALISTA_AI_TIMEOUT", "60"))
+REASONING = os.getenv("ANALISTA_AI_REASONING", "low")
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_SEARCH = "https://site.api.espn.com/apis/common/v3/search"
@@ -654,6 +661,10 @@ def _llamar(mensaje: str, system: str) -> tuple:
             "max_tokens": MAX_TOKENS,
             "temperature": 0.2,
         }
+        if "openrouter.ai" in BASE_URL:
+            # Acota el razonamiento interno: sin esto el modelo puede gastar
+            # todo el presupuesto y devolver el informe vacio.
+            payload["reasoning"] = {"effort": REASONING}
         try:
             r = requests.post(
                 BASE_URL,
