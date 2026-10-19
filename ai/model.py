@@ -237,7 +237,11 @@ def generar_respuesta_demian(prompt_sistema: str, prompt_usuario: str):
         return texto or None
 
     if youkeys.get_you_key() or youkeys.get_you_search_key():
-        return generar_respuesta_you(prompt_sistema, prompt_usuario)
+        texto = generar_respuesta_you(prompt_sistema, prompt_usuario)
+        # You.com sin prepago (402) o rate-limit (429) NO es una respuesta:
+        # se devuelve None para que /chat haga el relevo a 365AI.
+        if texto and not _you_fallo_de_creditos(texto):
+            return texto
     return None
 
 
