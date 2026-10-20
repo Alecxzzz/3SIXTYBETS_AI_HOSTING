@@ -764,7 +764,8 @@ def analizar_36ai(mensaje_usuario, system_prompt):
                         "ganador, handicap, totales, hits o strikeouts. "
                         "Despues de la re-busqueda, CAMBIA a un mercado para el que si tengas "
                         "datos reales y entrega el pick final en el formato solicitado, con "
-                        "confianza ajustada y cuota estimada si hace falta. "
+                        "confianza ajustada. PROHIBIDO dar una cuota estimada o inventada: "
+                        "si no hay precio real del bookmaker, omite la linea de cuota. "
                         "JAMAS devuelvas 'SIN PICK'."
                     )
                 })

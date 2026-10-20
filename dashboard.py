@@ -1649,7 +1649,7 @@ REGLAS OBLIGATORIAS:
   "market": "<nombre del mercado del catalogo que elegiste (para validar)>",
   "titulo": "<apuesta en lenguaje natural y corto para mostrar al usuario. Ejemplos: 'Corners de Club Brugge: Over 3.5', 'Total de corners del partido: Over 7.5', 'Ambos equipos marcan: SI', 'HÃ¡ndicap asiatico Real Madrid -1.5', 'Total de puntos Lakers: Under 210.5'>",
   "selection": "<seleccion concreta: equipo A/B, SI/NO, over/under X.X, etc>",
-  "odds": <cuota decimal estimada o null>,
+  "odds": <cuota real del bookmaker o null; NUNCA una cuota estimada o inventada>,
   "confidence": "<ALTA|MEDIA|BAJA>",
   "rationale": "<1-2 frases del edge en espanol>",
   "stats": ["<dato corto 1 basado en los ultimos 5 partidos>", "<dato corto 2>", "<dato corto 3>", ...]
@@ -2373,6 +2373,10 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         # que poder distinguir el precio REAL del bookmaker de una estimacion
         # de la IA. Los picks de IA salian sin esta linea (y con la cuota
         # inventada); los cuantitativos ya la traian, hence el startswith.
+        # Regla actual: si el pick llega hasta aqui, `odds_final` SIEMPRE es
+        # un precio real (del bookmaker o heredado de la lista real de
+        # mercados), asi que la linea se rotula "Cuota real" y NUNCA
+        # "Cuota estimada" (esa palabra implicaba cuota inventada).
         stats_lista = (
             [str(s) for s in (pick.get("stats") or [])[:5]]
             if isinstance(pick.get("stats"), list)
@@ -2382,12 +2386,7 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             s.lower().startswith(("cuota real", "cuota estimada"))
             for s in stats_lista
         ):
-            stats_lista.insert(
-                0,
-                f"Cuota real: {odds_final}"
-                if cuota_real is not None
-                else f"Cuota estimada: {odds_final} (sin precio del bookmaker)",
-            )
+            stats_lista.insert(0, f"Cuota real: {odds_final}")
 
         # Chips de forma V/E/D (misma fuente ESPN que el motor). Solo se
         # agregan cuando hay datos reales y si el modelo no los trajo ya.
