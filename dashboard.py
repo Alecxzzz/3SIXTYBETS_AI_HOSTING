@@ -47,7 +47,7 @@ VERIFICACIONES_PUBLICAR = 2
 # Se mantiene la constante por compatibilidad pero ya no bloquea.
 HORA_INICIO_ANALISIS = 0
 # Las 5 mejores ligas de Europa: se analizan PRIMERO (prioridad del dashboard).
-LIGAS_TOP_EUROPA = ("eng.1", "esp.1", "ita.1", "ger.1", "fra.1")
+LIGAS_TOP_EUROPA = ("eng.1", "esp.1", "ita.1", "ger.1", "fra.1", "uefa.champions")
 # Ventana de analisis: partidos que arrancan dentro de las proximas N horas
 # (los EN VIVO siempre entran). A las 9 PM las grandes ligas europeas juegan
 # de madrugada/manana siguiente, asi que sin ventana no habria nada que
