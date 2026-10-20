@@ -2027,9 +2027,14 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     con_pick = db.eventos_con_pick()
 
     for p in partidos[:max_partidos]:
-        if p["event_id"] in con_pick:
+        if p["event_id"] in con_pick and not forzar:
             omitidos += 1
             continue
+        if p["event_id"] in con_pick and forzar:
+            try:
+                db.delete_ai_picks_by_event_id(p["event_id"])
+            except Exception:
+                pass
         if p["event_id"] in descartes:
             omitidos_descartados += 1
             continue

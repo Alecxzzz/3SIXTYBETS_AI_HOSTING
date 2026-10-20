@@ -1283,6 +1283,14 @@ def pick_existe(event_id):
     return bool(row)
 
 
+def delete_ai_picks_by_event_id(event_id: str) -> int:
+    n = run_query(
+        "delete from ai_picks where event_id = %s and result = 'PENDIENTE'",
+        (event_id,),
+    )
+    return n or 0
+
+
 def eventos_con_pick(dias: int = 2) -> set:
     """Set de event_id con pick vigente (mismo criterio que pick_existe).
 
@@ -1362,6 +1370,20 @@ def delete_ai_pick(pick_id):
     se borran para no dejar basura ni picks fantasma en PENDIENTE eterno.
     """
     return bool(run_query("delete from ai_picks where id = %s", (pick_id,)))
+
+
+def delete_ai_picks_by_event_id(event_id: str) -> int:
+    """Borra picks PENDIENTE de un evento concreto (para regenerar con forzar).
+
+    Se usa cuando forzar=True en generar_picks_dia: si el evento ya tiene un
+    pick pendiente, se borra antes de crear uno nuevo para evitar duplicados.
+    Devuelve cuantas filas borro.
+    """
+    n = run_query(
+        "delete from ai_picks where event_id = %s and result = 'PENDIENTE'",
+        (event_id,),
+    )
+    return n or 0
 
 
 def set_closing_odds(pick_id, snapshot):
