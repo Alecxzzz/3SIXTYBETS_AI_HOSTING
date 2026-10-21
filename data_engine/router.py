@@ -113,12 +113,22 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
     """
     Resuelve los picks PENDIENTE de la tabla ai_picks con el motor de datos reales.
     anular_no_resolubles=true marca ANULADO los que no se pueden verificar.
+
+    INVARIANTE: solo se toca (resolver o anular) un pick cuyo partido YA TERMINO
+    segun la fuente. Un partido en juego o programado jamas se anula: antes el
+    filtro era solo `event_date < ahora`, asi que los picks de partidos EN VIVO
+    (el dashboard los genera a proposito con state="in") entraban al resolver,
+    no habia marcador final, `resolver_mercado` devolvia NO_RESOLUBLE y el boton
+    "Verificar y resolver resultados" (anular_no_resolubles=true) los marcaba
+    ANULADO minutos despues de generarlos: los picks desaparecian del dashboard
+    y el arranque siguiente los borraba con el resto de ANULADO legacy.
     """
     import db as _db
     from data_engine.pick_parser import parsear_pick
     from datetime import datetime, timezone
 
-    # Solo partidos YA jugados (evita resolver picks de partidos futuros)
+    # Solo partidos YA EMPEZADOS (evita resolver picks de partidos futuros);
+    # que esten TERMINADOS se comprueba despues con el estado real de la fuente.
     cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
     where = "result='PENDIENTE' AND event_date < %s"
     params = [cutoff]
@@ -134,26 +144,10 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
     resueltos = 0
     sin_datos = 0
     anulados = 0
+    en_juego = 0
     detalles = []
 
     for p in picks:
-        parsed = parsear_pick(p)
-        if not parsed:
-            if anular_no_resolubles:
-                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
-                anulados += 1
-            else:
-                sin_datos += 1
-            continue
-        market_type, sel, linea = parsed
-        if not sel:
-            if anular_no_resolubles:
-                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
-                anulados += 1
-            else:
-                sin_datos += 1
-            continue
-
         fecha = str(p.get("event_date") or "")[:10].replace("-", "") or None
         try:
             d = buscar_completo(p.get("sport") or "soccer", p.get("home_name") or "",
@@ -164,7 +158,32 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
             continue
 
         if not d.get("found"):
+            # Sin datos no se puede saber si el partido termino: se deja
+            # PENDIENTE (nunca ANULADO por esta via).
             sin_datos += 1
+            continue
+
+        # GUARDA DURA: solo un partido FINALIZADO admite veredicto o anulacion.
+        estado = str(d.get("estado") or "").strip().lower()
+        if estado in ("in", "pre"):
+            en_juego += 1
+            continue
+        if not estado and (d.get("home_score") is None or d.get("away_score") is None):
+            # Fuente sin estado y sin marcador: partido no terminado (o no
+            # jugado). Manos fuera, sigue PENDIENTE.
+            en_juego += 1
+            continue
+
+        parsed = parsear_pick(p)
+        market_type, sel, linea = parsed if parsed else (None, None, None)
+        if not market_type or not sel:
+            # Mercado no interpretable. Solo se descarta si el partido ya
+            # termino (arriba); si no, se espera a que se juegue.
+            if anular_no_resolubles:
+                _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
+                anulados += 1
+            else:
+                sin_datos += 1
             continue
 
         r = resolver_mercado(market_type, d, sel, linea)
@@ -192,6 +211,7 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
         "resueltos": resueltos,
         "anulados": anulados,
         "sin_datos": sin_datos,
+        "en_juego": en_juego,
         "detalle": detalles[:40],
     }
 

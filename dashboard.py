@@ -2006,35 +2006,28 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
     sin_cuota = False
     mercados_usados = {_market_norm(r["market"]) for r in (db.list_picks_hoy() or [])}
 
-    # Patron 'doble oportunidad' demasiado repetido: se borran sus picks
-    # PENDIENTE para que esos partidos vuelvan a analizarse YA en este ciclo y
-    # elijan otro mercado (mercados_usados de arriba ya incluye 'doble
-    # oportunidad', asi que no se repetira hoy). Los resueltos (ACIERTO/FALLO)
-    # se conservan: son la fuente del aprendizaje de peso_mercado().
-    try:
-        borrados = db.purgar_picks_pendientes_mercado("doble oportunidad")
-        if borrados:
-            print(
-                f"[Dashboard] {borrados} picks PENDIENTE de doble oportunidad "
-                "borrados para re-analizar",
-                flush=True,
-            )
-    except Exception:
-        pass
+    # NOTA: aqui habia un purgado automatico de TODOS los picks PENDIENTE de
+    # "doble oportunidad" (db.purgar_picks_pendientes_mercado) en cada ciclo.
+    # No comprobaba que el patron estuviera realmente saturado y no filtraba
+    # por fecha: cada pulsacion de "Analizar y generar picks" borraba los
+    # picks de doble oportunidad de hoy Y de manana, incluidos los recien
+    # creados. El filtro de mercados_usados (abajo) ya evita que el mercado se
+    # repita sin destruir nada, asi que el purgado sobraba.
 
     refrescar_ligas_flojas()
 
     con_pick = db.eventos_con_pick()
 
     for p in partidos[:max_partidos]:
+        reemplazar = p["event_id"] in con_pick and forzar
         if p["event_id"] in con_pick and not forzar:
             omitidos += 1
             continue
-        if p["event_id"] in con_pick and forzar:
-            try:
-                db.delete_ai_picks_by_event_id(p["event_id"])
-            except Exception:
-                pass
+        # OJO: el pick anterior NO se borra aqui. Antes se borraba al entrar al
+        # partido y, si la IA no llegaba a generar uno nuevo (cuota fuera de
+        # rango, descarte reciente, liga floja, error de modelo...), el pick
+        # publicado desaparecia para siempre. Se borra justo antes de insertar
+        # el nuevo (ver db.create_ai_pick mas abajo).
         if p["event_id"] in descartes:
             omitidos_descartados += 1
             continue
@@ -2407,6 +2400,15 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                     formas.append(f"Forma {nombre}: {forma}")
             stats_lista = formas + stats_lista
 
+        # Ya hay una seleccion valida (mercado, cuota y verificaciones pasadas):
+        # ahora SI se puede sustituir el pick anterior sin riesgo de dejar el
+        # evento sin pick.
+        if reemplazar:
+            try:
+                db.delete_ai_picks_by_event_id(p["event_id"])
+            except Exception:
+                pass
+
         creado = db.create_ai_pick(
             sport=p["sport"],
             sport_label=label,
@@ -2432,6 +2434,12 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         if creado:
             generados += 1
             mercados_usados.add(_market_norm(market))
+            # Evita que el mismo evento se reanalice en este lote (importante
+            # ahora que el pick anterior se sustituye al insertar, no antes).
+            try:
+                con_pick.add(p["event_id"])
+            except Exception:
+                pass
 
     stats_out = {
         "partidos": len(partidos),
