@@ -4231,12 +4231,19 @@ def salud_scheduler() -> dict:
     # Consumo de cuota de la IA: lo primero que hay que mirar cuando el
     # dashboard deja de generar picks.
     try:
-        from ai.dashboard_ia import estado_consumo, MODELOS_EN_PAUSA
+        from ai.dashboard_ia import (
+            estado_claves,
+            estado_consumo,
+            MODELOS_EN_PAUSA,
+        )
 
         s["ia_consumo"] = estado_consumo()
         s["ia_modelos_en_pausa"] = [
             m for m, hasta in MODELOS_EN_PAUSA.items() if time.time() < hasta
         ]
+        # Que clave/proveedor esta sirviendo los picks y cuales quedaron sin
+        # cuota. Sin esto, un 429 diario de OpenRouter solo se ve en los logs.
+        s["ia_claves"] = estado_claves()
     except Exception:
         pass
     if _salud.get("ultima_generacion_ts"):

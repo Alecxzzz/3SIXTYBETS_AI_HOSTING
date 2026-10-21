@@ -32,6 +32,37 @@ FRONTEND_ORIGINS=http://localhost:5173,https://threesixtybets-chat.vercel.app
 
 `DATABASE_URL` conecta el backend con PostgreSQL. Si tu hosting no usa URL, configura `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` y `PGSSLMODE`.
 
+### IA del dashboard (picks): rotación de claves y proveedor de respaldo
+
+El plan gratuito de OpenRouter se agota **por cuenta** (50 peticiones diarias a
+modelos `:free`): cuando llega a cero, **todos** los modelos devuelven 429
+`free-models-per-day`, así que rotar modelos no recupera el servicio. El
+generador de picks (`ai/dashboard_ia.py`) resuelve eso en dos niveles: rota de
+**clave** (otra cuenta = otra cuota) y, si todas están agotadas, salta a un
+**proveedor de respaldo**.
+
+```env
+# Proveedor principal (OpenRouter). Admite varias claves separadas por comas:
+# se usan en orden y la agotada queda en pausa DASHBOARD_AI_PAUSA_KEY segundos.
+DASHBOARD_AI_API_KEY=sk-or-v1-...
+DASHBOARD_AI_API_KEY_FALLBACK=sk-or-v1-...   # alias para una clave extra
+DASHBOARD_AI_BASE_URL=https://openrouter.ai/api/v1/chat/completions
+DASHBOARD_AI_MODEL=modelo-principal:free
+DASHBOARD_AI_FALLBACK=modelo-de-respaldo:free
+
+# Proveedor de respaldo (Groq). Si no se define API_KEY usa AI36_GROQ_API_KEY
+# o GROQ_API_KEY, así que normalmente NO hace falta configurar nada más.
+DASHBOARD_AI_RESPALDO=true
+DASHBOARD_AI_RESPALDO_API_KEY=gsk_...
+DASHBOARD_AI_RESPALDO_BASE_URL=https://api.groq.com/openai/v1/chat/completions
+DASHBOARD_AI_RESPALDO_MODEL=openai/gpt-oss-120b
+DASHBOARD_AI_RESPALDO_MODELOS_EXTRA=openai/gpt-oss-20b,qwen/qwen3.8-27b
+```
+
+`GET /dashboard/salud` devuelve `ia_claves` con el estado de cada clave
+(`proveedor`, `endpoint`, `en_pausa`, `reanuda_en_s`) y la clave **enmascarada**;
+nunca expone la credencial completa.
+
 ## Auth y base de datos
 
 El backend crea automaticamente tablas PostgreSQL con:
