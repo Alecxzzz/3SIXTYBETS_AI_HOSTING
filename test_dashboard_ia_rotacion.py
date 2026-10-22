@@ -75,6 +75,10 @@ class RotacionClavesTest(unittest.TestCase):
         "DASHBOARD_AI_DEBUG": "false",
         "AI36_GROQ_API_KEY": "",
         "GROQ_API_KEY": "",
+        # Hermeticidad: la clave de respaldo INCORPORADA se prueba aparte
+        # (test_respaldo_incorporado_se_suma_a_la_rotacion); aqui solo cuentan
+        # las claves del propio test.
+        "IA_SIN_CLAVE_RESPALDO": "1",
     }
 
     def setUp(self):
@@ -167,6 +171,42 @@ class RotacionClavesTest(unittest.TestCase):
         volcado = json.dumps(self.mod.estado_claves(), ensure_ascii=False)
         for clave in (CLAVE_A, CLAVE_B, CLAVE_GROQ):
             self.assertNotIn(clave, volcado)
+
+    def test_estado_claves_muestra_los_modelos_de_cada_proveedor(self):
+        """Salud debe decir que modelos se probaran (no solo el endpoint)."""
+        por_proveedor = {e["proveedor"]: e["modelos"] for e in self.mod.estado_claves()}
+        self.assertEqual(por_proveedor["principal"], ["modelo/free-a", "modelo/free-b"])
+        self.assertEqual(por_proveedor["respaldo"][0], "openai/gpt-oss-120b")
+
+    def test_estado_consumo_reporta_el_ultimo_error(self):
+        """Sin respuesta de ningun proveedor, el motivo queda visible en salud."""
+
+        def post(url, headers=None, json=None, timeout=None):
+            return _Respuesta(404, text='{"error": "model_not_found"}')
+
+        self._generar(post)
+
+        consumo = self.mod.estado_consumo()
+        self.assertIn("404", consumo["ultimo_error"])
+        self.assertIsNotNone(consumo["ultimo_error_hace_s"])
+
+    def test_respaldo_incorporado_se_suma_a_la_rotacion(self):
+        """Sin IA_SIN_CLAVE_RESPALDO, la clave incorporada cierra la rotacion
+        (enmascarada: el estado NUNCA la muestra completa)."""
+        from ai import claves as mod_claves
+
+        with mock.patch.dict(os.environ, {"IA_SIN_CLAVE_RESPALDO": "0"}):
+            importlib.reload(dashboard_ia)
+            try:
+                estado = dashboard_ia.estado_claves()
+                principales = [e for e in estado if e["proveedor"] == "principal"]
+                self.assertEqual(len(principales), 3)
+                esperada = mod_claves.etiqueta(mod_claves._incorporada())
+                self.assertEqual(principales[-1]["clave"], esperada)
+                volcado = json.dumps(estado)
+                self.assertNotIn(mod_claves._incorporada(), volcado)
+            finally:
+                importlib.reload(dashboard_ia)
 
 
 if __name__ == "__main__":

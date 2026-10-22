@@ -18,6 +18,21 @@ import time
 
 import requests
 
+try:  # claves con rotacion + deteccion unica de "cuota agotada"
+    from ai.claves import claves_openrouter, etiqueta as _etiqueta_clave
+    from ai.proveedor_fallos import sin_cuota as _sin_cuota
+except ImportError:  # pragma: no cover - solo si se importa fuera del paquete
+    def claves_openrouter(*valores):
+        return [v.strip() for v in valores if v and str(v).strip()]
+
+    def _etiqueta_clave(clave):
+        return (clave or "")[:10] + "..."
+
+    def _sin_cuota(texto):
+        t = str(texto or "").lower()
+        return "quota" in t or "rate limit" in t or "free-models-per-day" in t
+
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -87,7 +102,7 @@ def generar(
     prompt_sistema: str,
     prompt_usuario: str,
     *,
-    api_key: str,
+    api_key: str | list[str],
     model: str,
     fallback: str | None = None,
     max_tokens: int = 1600,
@@ -105,7 +120,13 @@ def generar(
       3. Si el modelo no existe o se agota, pasa al fallback.
       4. 401/402/403 cortan de inmediato: no es un problema del modelo.
     """
-    if not api_key or not model:
+    # Rotacion de claves: la cuota de los modelos :free es POR CUENTA, asi que
+    # cuando una clave responde 429 "free-models-per-day" se pasa a la
+    # siguiente (otra cuenta = otra cuota) en vez de rendirse.
+    claves_api = claves_openrouter(
+        api_key if isinstance(api_key, str) else ",".join(api_key or [])
+    )
+    if not claves_api or not model:
         return None, None
 
     modelos = []
@@ -116,66 +137,85 @@ def generar(
     timeout = timeout or TIMEOUT
     ultimo_error = ""
 
-    for modelo in modelos:
-        payload = _payload(
-            modelo, prompt_sistema, prompt_usuario,
-            max_tokens, temperature, reasoning, tools,
-        )
-        for intento in range(2):
-            try:
-                response = requests.post(
-                    BASE_URL,
-                    headers=_headers(api_key),
-                    json=payload,
-                    timeout=timeout,
-                )
-            except requests.exceptions.RequestException as exc:
-                ultimo_error = f"red: {exc}"
-                time.sleep(3)
-                continue
-
-            if response.status_code == 200:
+    for clave in claves_api:
+        headers = _headers(clave)
+        clave_agotada = False
+        for modelo in modelos:
+            payload = _payload(
+                modelo, prompt_sistema, prompt_usuario,
+                max_tokens, temperature, reasoning, tools,
+            )
+            for intento in range(2):
                 try:
-                    data = response.json()
-                except ValueError:
-                    ultimo_error = f"{modelo}: respuesta no JSON"
-                    break
-
-                opciones = data.get("choices") or []
-                mensaje = (opciones[0].get("message") if opciones else {}) or {}
-                texto = limpiar(mensaje.get("content") or "")
-                if texto:
-                    return texto, data.get("model") or modelo
-
-                # Content vacio: el razonamiento consumio el presupuesto.
-                detalles = (
-                    (data.get("usage") or {}).get("completion_tokens_details") or {}
-                )
-                if detalles.get("reasoning_tokens") and payload["max_tokens"] < 4096:
-                    payload["max_tokens"] = min(4096, int(payload["max_tokens"]) * 2)
+                    response = requests.post(
+                        BASE_URL,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                    )
+                except requests.exceptions.RequestException as exc:
+                    ultimo_error = f"red: {exc}"
+                    time.sleep(3)
                     continue
 
-                ultimo_error = f"{modelo}: contenido vacio"
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        ultimo_error = f"{modelo}: respuesta no JSON"
+                        break
+
+                    opciones = data.get("choices") or []
+                    mensaje = (opciones[0].get("message") if opciones else {}) or {}
+                    texto = limpiar(mensaje.get("content") or "")
+                    if texto:
+                        return texto, data.get("model") or modelo
+
+                    # Content vacio: el razonamiento consumio el presupuesto.
+                    detalles = (
+                        (data.get("usage") or {}).get("completion_tokens_details") or {}
+                    )
+                    if detalles.get("reasoning_tokens") and payload["max_tokens"] < 4096:
+                        payload["max_tokens"] = min(4096, int(payload["max_tokens"]) * 2)
+                        continue
+
+                    ultimo_error = f"{modelo}: contenido vacio"
+                    break
+
+                try:
+                    detalle = response.json()
+                    mensaje_error = (
+                        detalle.get("error", {}).get("message") or response.text[:200]
+                    )
+                except ValueError:
+                    mensaje_error = (response.text or "")[:200]
+                ultimo_error = f"{modelo} {response.status_code}: {mensaje_error}"
+
+                # Cuota de la CUENTA agotada (401/402/403 o 429 de cupo diario):
+                # el modelo no tiene la culpa, la clave si. Se corta aqui y se
+                # pasa a la siguiente clave SIN dormir.
+                if response.status_code in _CODIGOS_SIN_RELEVO or (
+                    response.status_code == 429 and _sin_cuota(ultimo_error)
+                ):
+                    print(
+                        f"[OpenRouter] clave {_etiqueta_clave(clave)} sin cuota: "
+                        f"{ultimo_error}",
+                        flush=True,
+                    )
+                    clave_agotada = True
+                    break
+
+                if response.status_code in (429, 500, 502, 503, 504):
+                    time.sleep(3 if intento == 0 else 8)
+                    continue
+
+                # 400/404: modelo invalido o retirado -> probar el fallback.
                 break
-
-            try:
-                detalle = response.json()
-                mensaje_error = (
-                    detalle.get("error", {}).get("message") or response.text[:200]
-                )
-            except ValueError:
-                mensaje_error = (response.text or "")[:200]
-            ultimo_error = f"{modelo} {response.status_code}: {mensaje_error}"
-
-            if response.status_code in _CODIGOS_SIN_RELEVO:
-                print(f"[OpenRouter] {ultimo_error}", flush=True)
-                return None, None
-
-            if response.status_code in (429, 500, 502, 503, 504):
-                time.sleep(3 if intento == 0 else 8)
-                continue
-
-            # 400/404: modelo invalido o retirado -> probar el fallback.
+            if clave_agotada:
+                break
+        if not clave_agotada:
+            # Se recorrieron todos los modelos con esta clave sin senal de
+            # cuota: no hay otra clave que pueda arreglarlo.
             break
 
     print(f"[OpenRouter] sin respuesta: {ultimo_error}", flush=True)

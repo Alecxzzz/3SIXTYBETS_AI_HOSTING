@@ -67,6 +67,9 @@ RESULTADOS_POR_BUSQUEDA = 3
 MAX_CHARS_BUSQUEDA = int(os.getenv("DASHBOARD_AI_MAX_CHARS_BUSQUEDA", "2500"))
 
 
+from ai.claves import claves_openrouter
+
+
 def _claves(*valores) -> list:
     """Claves sin repetir. Cada valor admite varias separadas por coma."""
     salida, vistos = [], set()
@@ -111,9 +114,14 @@ MODELOS_EXTRA = [
 #   2. un PROVEEDOR DE RESPALDO distinto (Groq por defecto), porque su cuota
 #      es independiente de la de OpenRouter.
 # Cada clave agotada queda en pausa un tiempo (no se reintenta en cada pick).
+# La clave de respaldo incorporada (otra cuenta de OpenRouter) se suma SOLO si
+# el proveedor principal es OpenRouter: su cuota es POR CUENTA, asi que una
+# segunda clave devuelve 50 peticiones/dia extra justo cuando la primera dice
+# "free-models-per-day". Contra Groq esa clave solo produciria un 401.
 KEYS_PRINCIPAL = _claves(
     os.getenv("DASHBOARD_AI_API_KEY"),
     os.getenv("DASHBOARD_AI_API_KEY_FALLBACK"),
+    ",".join(claves_openrouter()) if "openrouter.ai" in BASE_URL else "",
 ) or _claves(os.getenv("AI36_GROQ_API_KEY"), os.getenv("GROQ_API_KEY"))
 
 RESPALDO_ACTIVO = os.getenv("DASHBOARD_AI_RESPALDO", "true").strip().lower() != "off"
@@ -176,6 +184,12 @@ HORA_PUNTA = int(os.getenv("DASHBOARD_AI_HORA_PUNTA", "20"))
 
 _consumo = {"dia": "", "tokens": 0, "llamadas": 0}
 
+# ULTIMO ERROR DE LA IA. Cuando el dashboard deja de generar picks el motivo
+# (404 de un modelo retirado, 402 de la cuenta, 413 del ITPM...) solo estaba en
+# los logs del hosting. Se guarda aqui para verlo desde /dashboard/salud.
+_ultimo_error = {"detalle": "", "ts": 0.0}
+
+
 # REGULADOR DE ITPM (tokens de entrada por minuto). Los modelos qwen de Groq
 # aceptan 7000 tokens/min de entrada. El generador dispara peticiones seguidas
 # (un pick, y hasta 3 reintentos) y se pasa ese limite: Groq responde 413 y el
@@ -232,11 +246,16 @@ def registrar_consumo(tokens: int) -> None:
 def estado_consumo() -> dict:
     """Consumo del dia (para /dashboard/salud)."""
     _reset_consumo()
+    hace = (
+        int(time.time() - _ultimo_error["ts"]) if _ultimo_error["ts"] else None
+    )
     return {
         "tokens_hoy": _consumo["tokens"],
         "llamadas_hoy": _consumo["llamadas"],
         "presupuesto": PRESUPUESTO_TPD,
         "disponible": presupuesto_disponible(),
+        "ultimo_error": _ultimo_error["detalle"][:300],
+        "ultimo_error_hace_s": hace,
     }
 
 
@@ -361,6 +380,10 @@ def estado_claves() -> list:
                     "clave": _etiqueta_clave(clave),
                     "en_pausa": hasta > ahora,
                     "reanuda_en_s": max(0, int(hasta - ahora)) if hasta > ahora else 0,
+                    # Modelos que se probaran con ESTA clave. Sin esto, un
+                    # DASHBOARD_AI_RESPALDO_MODEL mal escrito solo se descubre
+                    # por los 404 de los logs.
+                    "modelos": list(perfil["modelos"]),
                 }
             )
     return salida
@@ -525,6 +548,9 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
     perfiles = _perfiles()
     if not perfiles:
         print("[Dashboard-AI] Sin API key (define DASHBOARD_AI_API_KEY).")
+        _ultimo_error.update(
+            detalle="sin API key configurada (DASHBOARD_AI_API_KEY)", ts=time.time()
+        )
         return None, None
 
     ultimo_error = ""
@@ -607,6 +633,7 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
                                     f"[Dashboard-AI] {modelo} respondio "
                                     f"({len(texto)} chars)"
                                 )
+                            _ultimo_error.update(detalle="", ts=0.0)
                             return texto, modelo
                         # content vacio aqui SI es fallo: este modulo no usa
                         # tools, asi que no puede ser una peticion de
@@ -694,4 +721,7 @@ def generar_picks(system_prompt: str, mensaje: str, buscar_web: bool = True):
             flush=True,
         )
     print(f"[Dashboard-AI] sin respuesta: {ultimo_error}", flush=True)
+    _ultimo_error.update(
+        detalle=ultimo_error or "sin detalle del proveedor", ts=time.time()
+    )
     return None, None

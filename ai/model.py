@@ -14,7 +14,15 @@ except ImportError:
 if load_dotenv:
     load_dotenv()
 
+from ai.claves import claves_openrouter, es_respaldo
+
 DEMIAN_API_KEY = os.getenv("DEMIAN_AI_API_KEY") or ""
+# Demian corre SIEMPRE sobre OpenRouter, asi que hereda la clave de respaldo
+# incorporada: si la cuenta principal agota su cupo diario, el chat sigue vivo
+# con la otra cuenta sin tocar configuracion.
+DEMIAN_API_KEYS = claves_openrouter(
+    DEMIAN_API_KEY, os.getenv("DEMIAN_AI_API_KEY_FALLBACK")
+)
 DEMIAN_MODEL = os.getenv("DEMIAN_AI_MODEL", "nvidia/nemotron-3.5-super-vl:free")
 DEMIAN_FALLBACK = os.getenv(
     "DEMIAN_AI_FALLBACK", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
@@ -81,8 +89,10 @@ def modelos_disponibles():
 
 def env_diagnostics():
     return {
-        "demian_configured": bool(DEMIAN_API_KEY),
+        "demian_configured": bool(DEMIAN_API_KEYS),
         "demian_key_prefix": DEMIAN_API_KEY[:10] if DEMIAN_API_KEY else "",
+        "demian_claves": len(DEMIAN_API_KEYS),
+        "demian_usa_respaldo": any(es_respaldo(k) for k in DEMIAN_API_KEYS),
         "demian_model": DEMIAN_MODEL,
         "demian_fallback": DEMIAN_FALLBACK or None,
         "ai36_configured": bool(AI36_API_KEY),
@@ -95,7 +105,7 @@ def env_diagnostics():
 
 def generar_respuesta_demian(prompt_sistema: str, prompt_usuario: str):
     """Demian tipster sobre OpenRouter. None si no pudo (el caller hace relevo)."""
-    if not DEMIAN_API_KEY:
+    if not DEMIAN_API_KEYS:
         return None
 
     from ai.openrouter import generar
@@ -103,7 +113,7 @@ def generar_respuesta_demian(prompt_sistema: str, prompt_usuario: str):
     texto, _modelo = generar(
         prompt_sistema,
         prompt_usuario,
-        api_key=DEMIAN_API_KEY,
+        api_key=DEMIAN_API_KEYS,
         model=DEMIAN_MODEL,
         fallback=DEMIAN_FALLBACK,
         max_tokens=DEMIAN_MAX_TOKENS,

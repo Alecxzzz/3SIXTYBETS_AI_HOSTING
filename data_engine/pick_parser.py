@@ -28,6 +28,10 @@ def _lado(sel, home, away):
         return "away"
     if "empate" in t or t == "x":
         return "draw"
+    if t in ("1", "local", "home"):
+        return "home"
+    if t in ("2", "visitante", "away"):
+        return "away"
     return None
 
 def parsear_pick(pick):
@@ -43,9 +47,7 @@ def parsear_pick(pick):
     txt = market + " " + titulo
     sel = (sel_raw or "").lower()
 
-    # Mercados SIN datos gratis: 1a/2a mitad, primer punto de servicio
-    if any(k in txt for k in ("1ª mitad", "2ª mitad", "1a mitad", "2a mitad", "primer tiempo", "segundo tiempo")):
-        return None
+    # Mercados SIN datos gratis: primer juego/punto de servicio (tenis)
     if "primer juego" in txt or "primer punto" in txt:
         return None
 
@@ -58,8 +60,9 @@ def parsear_pick(pick):
 
     lado = _lado(sel_raw, home, away)
 
-    # linea over/under
-    m = re.search(r'(?:mas de|más de|menos de|over|under)\s*([0-9]+(?:[.,][0-9]+)?)', txt)
+    # linea over/under: puede venir en el titulo O en la seleccion ('Over 2.5')
+    m = re.search(r'(?:mas de|más de|menos de|over|under)\s*([0-9]+(?:[.,][0-9]+)?)',
+                  txt + " " + sel)
     linea = float(m.group(1).replace(",", ".")) if m else None
     # handicap tipo (+0.5) o (1:0)
     mh = re.search(r'\(\s*([+-]?[0-9]+(?:[.,][0-9]+)?)\s*:\s*([0-9]+(?:[.,][0-9]+)?)\s*\)', sel_raw)
@@ -69,6 +72,76 @@ def parsear_pick(pick):
         mh2 = re.search(r'\(\s*([+-][0-9]+(?:[.,][0-9]+)?)\s*\)', sel_raw)
         if mh2:
             linea = float(mh2.group(1).replace(",", "."))
+
+    # ---- MERCADOS DE PERIODO (mitades / cuartos) ----
+    # Antes TODOS se descartaban aqui como 'sin datos' y JAMAS se verificaban
+    # (medido en produccion: 18 'sin_datos' en una sola pasada del panel).
+    # ESPN publica el marcador por periodos (linescores), asi que se resuelven
+    # con datos reales igual que el marcador final. OJO: un mercado de periodo
+    # NUNCA debe caer en las reglas de partido completo (seria resolver con el
+    # marcador equivocado): si no se puede interpretar, se devuelve None.
+    es_ambas = "ambas mitades" in txt
+    es_cualquier = (not es_ambas) and (
+        "cualquier mitad" in txt or ("alguna" in txt and "mitad" in txt)
+    )
+    es_primera = bool(re.search(r"\b1\s*(?:a|ª|er)?\s*(?:mitad|half)\b", txt)) \
+        or "primera mitad" in txt or "primer tiempo" in txt
+    es_segunda = bool(re.search(r"\b2\s*(?:a|ª|do)?\s*(?:mitad|half)\b", txt)) \
+        or "segunda mitad" in txt or "segundo tiempo" in txt
+    m_cuarto = re.search(
+        r"(primer|1er|1º|segundo|2do|2º|tercer|3er|3º|cuarto|4to|4º)\s*cuarto", txt)
+    n_cuarto = {"primer": 1, "1er": 1, "1º": 1, "segundo": 2, "2do": 2, "2º": 2,
+                "tercer": 3, "3er": 3, "3º": 3, "cuarto": 4, "4to": 4, "4º": 4
+                }.get(m_cuarto.group(1)) if m_cuarto else None
+
+    if es_ambas or es_cualquier or es_primera or es_segunda or n_cuarto:
+        # Corners/tarjetas/faltas POR PERIODO: ESPN no los desglosa. Mejor
+        # 'sin datos' que resolver con el total del partido (seria mentira).
+        if any(k in txt for k in ("corner", "esquina", "tarjeta", "faltas")):
+            return None
+        # 'Ambos marcan en la 1a mitad': tampoco hay dato por periodo.
+        if "ambos" in txt and not es_ambas:
+            return None
+
+        if es_ambas or es_cualquier:
+            lado_txt = _lado(f"{market} {titulo}", home, away)
+            if lado_txt is None and (
+                "cualquier equipo" in txt or "algun equipo" in txt or "algún equipo" in txt
+            ):
+                lado_txt = "cualquiera"
+            if lado_txt is None:
+                return None
+            tipo = "ambas_mitades" if es_ambas else "cualquier_mitad"
+            si_no = "no" if sel.startswith("no") else "si"
+            return (f"{tipo}_{si_no}", lado_txt, None)
+
+        # indice del periodo: 1/2 para mitades, 1-4 para cuartos
+        cual = n_cuarto or (1 if es_primera else 2)
+        indice = "cuarto" if n_cuarto else "mitad"
+
+        txt_dir = txt + " " + sel
+        direccion = None
+        if "mas de" in txt_dir or "más de" in txt_dir or "over" in txt_dir:
+            direccion = "over"
+        if "menos de" in txt_dir or "under" in txt_dir:
+            direccion = "under"
+
+        if direccion:
+            if linea is None:
+                return None
+            lado_txt = _lado(f"{market} {titulo}", home, away)
+            if lado_txt:
+                return ("team_periodo", f"{lado_txt}|{direccion}|{indice}|{cual}", linea)
+            return ("over_under_periodo", f"{direccion}|{indice}|{cual}", linea)
+
+        # 'X gana la primera mitad' / '1a mitad - 1x2' / 'primer cuarto ganador'
+        lado_sel = lado or _lado(f"{market} {titulo}", home, away)
+        if lado_sel is None:
+            return None
+        if lado is None and sel.startswith("no"):
+            # 'Nacional gana la 1a mitad: NO' -> acierto si NO la gana.
+            lado_sel = "no_" + lado_sel
+        return ("winner_periodo", f"{lado_sel}|{indice}|{cual}", None)
 
     # ---- CORNERS ----
     if any(k in txt for k in ("tiros de esquina", "corners", "esquina")):

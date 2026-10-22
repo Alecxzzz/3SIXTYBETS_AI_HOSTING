@@ -44,6 +44,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from ai.claves import claves, claves_openrouter
+from ai.proveedor_fallos import sin_cuota
+
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - dotenv es opcional
@@ -72,6 +75,20 @@ MODELO_FALLBACK = os.getenv(
 MAX_TOKENS = int(os.getenv("ANALISTA_AI_MAX_TOKENS", "2500"))
 TIMEOUT = int(os.getenv("ANALISTA_AI_TIMEOUT", "60"))
 REASONING = os.getenv("ANALISTA_AI_REASONING", "low")
+
+# Rotacion de cuentas (mismo motivo que el dashboard): el cupo :free de
+# OpenRouter es DIARIO POR CUENTA; si la principal se agota, la clave de
+# respaldo mantiene el analisis vivo sin tocar configuracion.
+KEYS = (
+    claves_openrouter(API_KEY, os.getenv("ANALISTA_AI_API_KEY_FALLBACK"))
+    if "openrouter.ai" in BASE_URL
+    else claves(API_KEY)
+)
+
+# Cuentas que respondieron 'cuota agotada' hace poco: se saltan un rato para
+# no pagar un 429 de ida y vuelta en cada analisis.
+_CLAVES_EN_PAUSA = {}
+_PAUSA_CLAVE_S = int(os.getenv("ANALISTA_AI_PAUSA_KEY", "1800"))
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_SEARCH = "https://site.api.espn.com/apis/common/v3/search"
@@ -646,58 +663,71 @@ def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]
 # --------------------------------------------------------------------------
 def _llamar(mensaje: str, system: str) -> tuple:
     """Llama al proveedor del analista. Devuelve (texto, modelo) o (None, None)."""
-    if not API_KEY:
+    if not KEYS:
         return None, None
 
     modelos = [m for m in (MODELO, MODELO_FALLBACK) if m]
     ultimo = ""
-    for modelo in modelos:
-        payload = {
-            "model": modelo,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": mensaje},
-            ],
-            "max_tokens": MAX_TOKENS,
-            "temperature": 0.2,
-        }
-        if "openrouter.ai" in BASE_URL:
-            # Acota el razonamiento interno: sin esto el modelo puede gastar
-            # todo el presupuesto y devolver el informe vacio.
-            payload["reasoning"] = {"effort": REASONING}
-        try:
-            r = requests.post(
-                BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json",
-                    # OpenRouter pide identificarse; sin esto algunas rutas dan 403.
-                    "HTTP-Referer": "https://threesixtybets.com",
-                    "X-Title": "3SIXTYBETS Analista",
-                },
-                json=payload,
-                timeout=TIMEOUT,
-            )
-        except Exception as e:  # noqa: BLE001
-            ultimo = f"red: {e}"
-            print(f"[Analista-LLM] {ultimo}", flush=True)
-            continue
+    ahora = time.time()
+    for clave in KEYS:
+        if ahora < _CLAVES_EN_PAUSA.get(clave, 0):
+            continue  # esta cuenta agoto su cupo hace poco: no gastar intentos
+        clave_agotada = False
+        for modelo in modelos:
+            payload = {
+                "model": modelo,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": mensaje},
+                ],
+                "max_tokens": MAX_TOKENS,
+                "temperature": 0.2,
+            }
+            if "openrouter.ai" in BASE_URL:
+                # Acota el razonamiento interno: sin esto el modelo puede gastar
+                # todo el presupuesto y devolver el informe vacio.
+                payload["reasoning"] = {"effort": REASONING}
+            try:
+                r = requests.post(
+                    BASE_URL,
+                    headers={
+                        "Authorization": f"Bearer {clave}",
+                        "Content-Type": "application/json",
+                        # OpenRouter pide identificarse; sin esto algunas rutas dan 403.
+                        "HTTP-Referer": "https://threesixtybets.com",
+                        "X-Title": "3SIXTYBETS Analista",
+                    },
+                    json=payload,
+                    timeout=TIMEOUT,
+                )
+            except Exception as e:  # noqa: BLE001
+                ultimo = f"red: {e}"
+                print(f"[Analista-LLM] {ultimo}", flush=True)
+                continue
 
-        if r.status_code != 200:
-            ultimo = f"{modelo} {r.status_code}: {r.text[:160]}"
-            print(f"[Analista-LLM] {ultimo}", flush=True)
-            if r.status_code in (401, 402, 403):
-                break  # credencial o cuota: no tiene sentido probar otro modelo
-            continue
+            if r.status_code != 200:
+                ultimo = f"{modelo} {r.status_code}: {r.text[:160]}"
+                print(f"[Analista-LLM] {ultimo}", flush=True)
+                # Cuota o credencial de ESTA cuenta: otra clave = otra cuota.
+                # Se pausa la clave un rato y se pasa a la siguiente sin dormir.
+                if r.status_code in (401, 402, 403) or (
+                    r.status_code == 429 and sin_cuota(r.text)
+                ):
+                    _CLAVES_EN_PAUSA[clave] = time.time() + _PAUSA_CLAVE_S
+                    clave_agotada = True
+                    break
+                continue
 
-        try:
-            opciones = r.json().get("choices") or []
-            texto = ((opciones[0].get("message") or {}).get("content") or "").strip()
-        except Exception:  # noqa: BLE001
-            texto = ""
-        if texto:
-            return texto, modelo
-        ultimo = f"{modelo} devolvio contenido vacio"
+            try:
+                opciones = r.json().get("choices") or []
+                texto = ((opciones[0].get("message") or {}).get("content") or "").strip()
+            except Exception:  # noqa: BLE001
+                texto = ""
+            if texto:
+                return texto, modelo
+            ultimo = f"{modelo} devolvio contenido vacio"
+        if not clave_agotada:
+            break
 
     print(f"[Analista-LLM] sin respuesta: {ultimo}", flush=True)
     return None, None
@@ -804,7 +834,8 @@ def estado() -> Dict[str, Any]:
     """Estado del analista: que proveedor usa y si la capa 2 esta activa."""
     return {
         "capa_cuantitativa": "activa (no necesita API key)",
-        "capa_llm": "activa" if API_KEY else "inactiva (falta ANALISTA_AI_API_KEY)",
+        "capa_llm": "activa" if KEYS else "inactiva (falta ANALISTA_AI_API_KEY)",
+        "claves": len(KEYS),
         "proveedor": BASE_URL,
         "modelo": MODELO,
         "modelo_fallback": MODELO_FALLBACK or None,

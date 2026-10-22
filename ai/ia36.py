@@ -17,6 +17,8 @@ import time
 from datetime import datetime
 
 import requests
+from ai.claves import claves, claves_openrouter
+
 
 try:
     from dotenv import load_dotenv
@@ -42,12 +44,16 @@ except ImportError:  # pragma: no cover - depende del entorno
 OPENROUTER_API_KEY = os.getenv("AI36_OPENROUTER_API_KEY") or ""
 USANDO_OPENROUTER = bool(OPENROUTER_API_KEY)
 
-GROQ_API_KEY = (
-    OPENROUTER_API_KEY
-    or os.getenv("AI36_GROQ_API_KEY")
-    or os.getenv("GROQ_API_KEY")
-    or ""
-)
+# Rotacion de cuentas: el cupo :free de OpenRouter es DIARIO POR CUENTA. Si la
+# cuenta principal se agota, la clave de respaldo (otra cuenta = otra cuota)
+# sigue dando servicio sin tocar configuracion.
+if USANDO_OPENROUTER:
+    API_KEYS = claves_openrouter(
+        OPENROUTER_API_KEY, os.getenv("AI36_OPENROUTER_API_KEY_FALLBACK")
+    )
+else:
+    API_KEYS = claves(os.getenv("AI36_GROQ_API_KEY"), os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = API_KEYS[0] if API_KEYS else ""
 
 GROQ_URL = (
     os.getenv("AI36_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
@@ -493,8 +499,9 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
     _aplicar_reasoning(payload, modelo)
 
     ultimo_error = "Error desconocido"
+    idx_clave = 0
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {API_KEYS[idx_clave] if API_KEYS else GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
     if USANDO_OPENROUTER:
@@ -581,6 +588,7 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
             # cambiar de modelo YA. Los 429 de tipo rpm/requests si se pueden
             # resolver esperando unos segundos.
             es_limite_diario = "tokens per day" in ultimo_error.lower() or \
+                               "free-models-per-day" in ultimo_error.lower() or \
                                "tpd" in ultimo_error.lower()
 
             if es_limite_diario:
@@ -594,7 +602,17 @@ def llamar_modelo(messages, max_reintentos=MAX_REINTENTOS, usar_tools=True, mode
                     payload["model"] = modelo
                     _aplicar_reasoning(payload, modelo)
                     continue
-                # No hay mas modelos: esperar a que se reestablezca el dia.
+                # Antes de rendirse: otra CUENTA tiene su propia cuota diaria.
+                if idx_clave + 1 < len(API_KEYS):
+                    idx_clave += 1
+                    headers["Authorization"] = f"Bearer {API_KEYS[idx_clave]}"
+                    modelo = seleccionar_modelo()
+                    payload["model"] = modelo
+                    _aplicar_reasoning(payload, modelo)
+                    print("[36AI] Cuota diaria agotada; rotando a la clave de "
+                          "respaldo.", flush=True)
+                    continue
+                # No hay mas modelos ni cuentas: esperar a que se reestablezca.
                 espera = _segundos_para_reintentar(ultimo_error)
                 if DEBUG:
                     print(f"[36AI] Todos los modelos agotaron su limite diario. "

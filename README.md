@@ -60,8 +60,11 @@ DASHBOARD_AI_RESPALDO_MODELOS_EXTRA=openai/gpt-oss-20b,qwen/qwen3.8-27b
 ```
 
 `GET /dashboard/salud` devuelve `ia_claves` con el estado de cada clave
-(`proveedor`, `endpoint`, `en_pausa`, `reanuda_en_s`) y la clave **enmascarada**;
-nunca expone la credencial completa.
+(`proveedor`, `endpoint`, `en_pausa`, `reanuda_en_s`, `modelos` que se probarán
+con ella) y la clave **enmascarada**; nunca expone la credencial completa.
+`ia_consumo.ultimo_error` guarda el motivo del último fallo de la IA (404 de un
+modelo retirado, 402 de la cuenta, 413 del ITPM...), que antes solo aparecía en
+los logs del hosting.
 
 ## Auth y base de datos
 

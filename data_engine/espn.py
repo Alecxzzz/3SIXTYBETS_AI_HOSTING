@@ -149,6 +149,10 @@ def _parse_summary(summ: Dict, ev: Dict) -> Dict[str, Any]:
             "home_away": c.get("homeAway"),
             "score": _to_float(c.get("score")),
             "winner": c.get("winner"),
+            # Marcador por periodo (linescores): imprescindible para verificar
+            # mercados de mitad/cuarto ('gana cualquier mitad', '1a mitad 1x2'),
+            # que el marcador final NO determina.
+            "linescores": c.get("linescores") or [],
         })
     out["equipos"] = equipos
     out["estado"] = (comps.get("status") or {}).get("type", {}).get("state")
@@ -160,6 +164,28 @@ def _parse_summary(summ: Dict, ev: Dict) -> Dict[str, Any]:
             out["home_name"] = e["name"]; out["home_score"] = e["score"]
         elif e.get("home_away") == "away":
             out["away_name"] = e["name"]; out["away_score"] = e["score"]
+
+    def _periodos(lado):
+        """Goles/puntos del equipo por periodo (1a mitad, 2a mitad, ...)."""
+        for e in equipos:
+            if e.get("home_away") == lado:
+                vals = []
+                for p in e.get("linescores") or []:
+                    v = p.get("displayValue", p.get("value")) if isinstance(p, dict) else p
+                    v = _to_float(v)
+                    vals.append(v if v is not None else 0.0)
+                return vals
+        return []
+    out["home_periodos"] = _periodos("home")
+    out["away_periodos"] = _periodos("away")
+    if out["home_periodos"] and out["away_periodos"]:
+        # Conveniencia: marcador al descanso. En deportes de 4 cuartos la 1a
+        # mitad es la suma de los dos primeros periodos.
+        hp, ap = out["home_periodos"], out["away_periodos"]
+        n = min(len(hp), len(ap))
+        corte = n // 2 if n >= 4 else 1
+        out["home_ht"] = sum(hp[:corte])
+        out["away_ht"] = sum(ap[:corte])
     if out.get("home_score") is not None and out.get("away_score") is not None:
         if out["home_score"] > out["away_score"]:
             out["winner"] = "home"

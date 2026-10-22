@@ -31,6 +31,49 @@ def _over_under(sel: str, valor: Optional[float], linea: Optional[float]) -> Opt
         return valor < linea
     return None
 
+
+def _periodos(d: Dict):
+    """Marcador por periodo (linescores de ESPN): (home, away) o (None, None)."""
+    hp = [v for v in (d.get("home_periodos") or []) if v is not None]
+    ap = [v for v in (d.get("away_periodos") or []) if v is not None]
+    if not hp or not ap:
+        return None, None
+    n = min(len(hp), len(ap))
+    if n == 0:
+        return None, None
+    return hp[:n], ap[:n]
+
+
+def _grupos_mitad(hp, ap):
+    """Agrupa los periodos en MITADES.
+
+    Futbol: 2 periodos = 2 mitades (un 3er periodo seria prorroga: no cuenta).
+    NBA/NFL: 4+ cuartos -> cada mitad es la suma de sus cuartos.
+    """
+    n = len(hp)
+    if n >= 4:
+        m = n // 2
+        return [(sum(hp[:m]), sum(ap[:m])), (sum(hp[m:m * 2]), sum(ap[m:m * 2]))]
+    if n >= 2:
+        return [(hp[0], ap[0]), (hp[1], ap[1])]
+    return []
+
+
+def _scores_periodo(d: Dict, indice: str, cual: int):
+    """Goles/puntos de UN periodo: ('mitad', 1|2) o ('cuarto', 1-4)."""
+    hp, ap = _periodos(d)
+    if hp is None:
+        return None, None
+    if indice == "mitad":
+        grupos = _grupos_mitad(hp, ap)
+        if cual < 1 or cual > len(grupos):
+            return None, None
+        return grupos[cual - 1]
+    # cuarto: periodo individual
+    if cual < 1 or cual > len(hp):
+        return None, None
+    return hp[cual - 1], ap[cual - 1]
+
 def resolver_mercado(market_type: str, d: Dict, selection: str, line_value=None) -> Dict[str, Any]:
     mt = _norm(market_type)
     sel = _norm(selection)
@@ -297,6 +340,77 @@ def resolver_mercado(market_type: str, d: Dict, selection: str, line_value=None)
         else:
             return _no()
         return _ok(acierto, hc + ac, 0.8)
+
+    # ---- MERCADOS DE PERIODO (mitades / cuartos) ----
+    # El pick_parser codifica el periodo en la seleccion: '<...>|<mitad|cuarto>|<n>'.
+    if mt == "winner_periodo":
+        try:
+            lado_p, indice, cual = sel.split("|")
+            cual = int(cual)
+        except (ValueError, AttributeError):
+            return _no()
+        hp, ap = _scores_periodo(d, indice, cual)
+        if hp is None:
+            return _no()
+        real = "home" if hp > ap else ("away" if ap > hp else "draw")
+        invertir = lado_p.startswith("no_")
+        if invertir:
+            lado_p = lado_p[3:]
+        base = (lado_p in ("home", "1", "local") and real == "home") or \
+               (lado_p in ("away", "2", "visitante") and real == "away") or \
+               (lado_p in ("draw", "empate", "x") and real == "draw")
+        return _ok((not base) if invertir else base, hp + ap, 0.9)
+
+    if mt in ("cualquier_mitad_si", "cualquier_mitad_no",
+              "ambas_mitades_si", "ambas_mitades_no"):
+        hp, ap = _periodos(d)
+        if hp is None:
+            return _no()
+        mitades = _grupos_mitad(hp, ap)
+        if not mitades:
+            return _no()
+        todas = mt.startswith("ambas")
+        if sel in ("home", "1", "local"):
+            gana = [h > a for h, a in mitades]
+        elif sel in ("away", "2", "visitante"):
+            gana = [a > h for h, a in mitades]
+        elif sel == "cualquiera" and not todas:
+            # 'Cualquier equipo gana alguna mitad': basta una mitad NO empatada.
+            gana = [h != a for h, a in mitades]
+        else:
+            return _no()
+        resultado = all(gana) if todas else any(gana)
+        acierto = resultado if mt.endswith("_si") else (not resultado)
+        return _ok(acierto, sum(h + a for h, a in mitades), 0.9)
+
+    if mt in ("over_under_periodo", "team_periodo"):
+        partes = sel.split("|")
+        if mt == "over_under_periodo":
+            if len(partes) != 3:
+                return _no()
+            direccion, indice, cual = partes
+            lado_p = None
+        else:
+            if len(partes) != 4:
+                return _no()
+            lado_p, direccion, indice, cual = partes
+        try:
+            cual = int(cual)
+        except ValueError:
+            return _no()
+        hp, ap = _scores_periodo(d, indice, cual)
+        if hp is None:
+            return _no()
+        if lado_p in ("home", "1", "local"):
+            valor = hp
+        elif lado_p in ("away", "2", "visitante"):
+            valor = ap
+        elif lado_p is None:
+            valor = hp + ap
+        else:
+            return _no()
+        r = _over_under(direccion, valor, lv)
+        return _no() if r is None else _ok(r, valor, 0.85)
 
     return _no()
 
