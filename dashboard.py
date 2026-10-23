@@ -83,13 +83,6 @@ _salud = {
     "resolver_borrados": 0,
     # NUEVO: Contador de picks favoritos por usuario
     "favoritos_por_usuario": {},
-    
-    # NUEVO: Estadísticas de valor (comparador de cuotas)
-    "comparador_cuotas": {
-        "total_comparadas": 0,
-        "valor_positivo": 0,
-        "ultima_actualizacion": None
-    },
 }
 
 
@@ -496,8 +489,8 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
     `local_en_odds` indica si el local del pick es el 'home' de la fuente
     (False = la fuente lo tiene invertido). Devuelve float o None.
 
-    Se separo de `_cuota_real_pick` para que el comparador de cuotas pueda
-    aplicar el mismo mapeo a CADA bookmaker y comparar precios entre casas.
+    Es la pieza que traduce el mercado del catalogo (texto libre) al formato
+    de odds-api.io: si el mapeo falla, el pick se publica SIN cuota real.
     """
     if not mercados:
         return None
@@ -572,8 +565,8 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
 
     # Handicap europeo ("Hándicap 1x2"): tres resultados con linea. Va ANTES
     # de la rama 1X2 porque el texto contiene "1x2" y antes se colaba en el
-    # ML: el comparador acababa mostrando la cuota del ganador del partido
-    # como si fuera la del handicap (otro mercado, precio que no es el suyo).
+    # ML: se asignaba al pick la cuota del ganador del partido como si fuera
+    # la de su handicap (otro mercado, precio que no es el suyo).
     if "european handicap" in texto_n or re.search(r"handicap\s*1x2", texto_n):
         m = _mercado("european handicap")
         lado = _lado()
@@ -725,177 +718,6 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return None
 
     return None
-
-
-# ============================================================
-# COMPARADOR DE CUOTAS (varias casas para el mismo mercado)
-# ============================================================
-# El plan free de odds-api.io permite 2 bookmakers (Bet365 y Winpot MX).
-# El comparador pide los mercados de TODAS las casas permitidas de una vez
-# y devuelve el precio de cada una para el mercado/seleccion del pick, mas
-# un veredicto de VALOR.
-#
-# NOTA: nunca se inventan cuotas. Si una casa no publica ese mercado o la
-# API falla, esa casa simplemente no aparece en la respuesta.
-
-# Bookmakers que se piden al comparador. _odds_request gestiona el 403 que
-# devuelve la lista de permitidos.
-COMPARADOR_BOOKMAKERS = "Bet365,Winpot MX"
-
-
-def _odds_mercados_por_bookmaker(event_id):
-    """Mercados del evento agrupados por bookmaker: {nombre: [mercados]}.
-
-    A diferencia de `_odds_evento` (que devuelve solo la primera casa con
-    mercados), aqui se guardan TODAS las casas para poder comparar precios.
-    """
-    ahora = time.time()
-    cached = _odds_cache.get(f"markets:{event_id}")
-    if cached and ahora - cached[0] < _ODDS_CACHE_TTL:
-        return cached[1]
-
-    data = _odds_request(
-        "/odds", {"eventId": event_id, "bookmakers": COMPARADOR_BOOKMAKERS}
-    )
-    if not isinstance(data, dict):
-        return {}
-    por_casa = {}
-    for nombre, mercados in (data.get("bookmakers") or {}).items():
-        if isinstance(mercados, list) and mercados:
-            por_casa[nombre] = mercados
-    if por_casa:
-        _odds_cache[f"markets:{event_id}"] = (ahora, por_casa)
-    return por_casa
-
-
-def _comparar_cuotas_evento(evento_id, sport, home_name, away_name,
-                             market, selection, titulo, local_en_odds=True):
-    """Precios del mismo mercado/seleccion en cada casa disponible.
-
-    Devuelve {"cuotas": {casa: precio}, "mejor_casa": str, "mejor": float}.
-    Casas sin ese mercado no se incluyen (no se inventan precios).
-    """
-    cuotas = {}
-    for nombre, mercados in (_odds_mercados_por_bookmaker(evento_id) or {}).items():
-        precio = _precio_en_mercados(
-            mercados, sport, home_name, away_name, market, selection, titulo,
-            local_en_odds,
-        )
-        if precio:
-            cuotas[nombre] = float(precio)
-    if not cuotas:
-        return {"cuotas": {}, "mejor_casa": None, "mejor": None}
-    mejor_casa = max(cuotas, key=lambda k: cuotas[k])
-    return {"cuotas": cuotas, "mejor_casa": mejor_casa, "mejor": cuotas[mejor_casa]}
-
-
-def comparar_cuotas_pick(pick: dict) -> dict:
-    """Compara la cuota de un pick entre casas y dice si hay valor.
-
-    La cuota publicada (`odds` del pick) es la referencia: es la que el
-    usuario ve. Si alguna casa ofrece una cuota MAYOR para el mismo
-    mercado/seleccion, el pick tiene "valor" (mejor precio disponible).
-    Si la cuota publicada es la mejor de todas, se marca como "optima".
-
-    Devuelve siempre un dict (nunca lanza): si no hay datos, `disponible`
-    es False y el frontend simplemente no muestra badge.
-    """
-    vacio = {
-        "disponible": False,
-        "cuota_publicada": pick.get("odds"),
-        "cuotas": {},
-        "mejor_casa": None,
-        "mejor_cuota": None,
-        "valor": False,
-        "motivo": "sin_datos",
-    }
-    sport = (pick.get("sport") or "").strip()
-    home_name = (pick.get("homeName") or pick.get("home_name") or "").strip()
-    away_name = (pick.get("awayName") or pick.get("away_name") or "").strip()
-    market = pick.get("market") or ""
-    selection = pick.get("selection") or ""
-    titulo = pick.get("titulo") or ""
-    publicada = pick.get("odds")
-
-    if not (sport and home_name and away_name and market):
-        vacio["motivo"] = "datos_insuficientes"
-        return vacio
-
-    try:
-        evento, _, local_en_odds = _evento_oddsapi_con_mercados(
-            sport, home_name, away_name
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[Dashboard] comparador: error buscando evento: {exc}", flush=True)
-        vacio["motivo"] = "error_evento"
-        return vacio
-
-    if not evento:
-        # La lista completa de /events esta truncada (5000 en soccer): algunos
-        #duelos no aparecen. Se reintenta filtrando por fecha.
-        try:
-            evento, local_en_odds = _evento_oddsapi_ventana(
-                sport, home_name, away_name
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[Dashboard] comparador: error en ventana: {exc}", flush=True)
-
-    if not evento or not evento.get("id"):
-        vacio["motivo"] = "evento_no_encontrado"
-        return vacio
-
-    try:
-        comparacion = _comparar_cuotas_evento(
-            evento.get("id"), sport, home_name, away_name,
-            market, selection, titulo,
-            True if local_en_odds is None else local_en_odds,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[Dashboard] comparador: error comparando: {exc}", flush=True)
-        vacio["motivo"] = "error_comparacion"
-        return vacio
-
-    cuotas = comparacion.get("cuotas") or {}
-    if not cuotas:
-        vacio["motivo"] = "sin_precios"
-        return vacio
-
-    mejor_cuota = comparacion.get("mejor")
-    mejor_casa = comparacion.get("mejor_casa")
-    resultado = {
-        "disponible": True,
-        "cuota_publicada": float(publicada) if publicada is not None else None,
-        "cuotas": cuotas,
-        "mejor_casa": mejor_casa,
-        "mejor_cuota": mejor_cuota,
-        "valor": False,
-        "motivo": "sin_valor",
-    }
-    if publicada is not None:
-        try:
-            pub = float(publicada)
-            # Valor = hay una casa que paga MAS que la cuota publicada.
-            if mejor_cuota and mejor_cuota > pub + 0.001:
-                resultado["valor"] = True
-                resultado["motivo"] = "mejor_precio_disponible"
-                resultado["mejora_pct"] = round(
-                    (mejor_cuota - pub) / pub * 100, 2
-                )
-            elif mejor_cuota and mejor_cuota >= pub - 0.001:
-                resultado["motivo"] = "cuota_optima"
-        except (TypeError, ValueError):
-            pass
-    else:
-        resultado["motivo"] = "sin_cuota_publicada"
-
-    # Estadisticas de valor para /dashboard/salud
-    _salud["comparador_cuotas"]["total_comparadas"] += 1
-    if resultado["valor"]:
-        _salud["comparador_cuotas"]["valor_positivo"] += 1
-    _salud["comparador_cuotas"]["ultima_actualizacion"] = datetime.now(
-        timezone.utc
-    ).isoformat()
-    return resultado
 
 
 # ============================================================

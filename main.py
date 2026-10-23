@@ -2379,42 +2379,6 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
     return {"ok": ok}
 
 
-# ---- Comparador de cuotas ----
-
-@app.get("/dashboard/comparador-cuotas")
-def dashboard_comparador_cuotas(
-    request: Request,
-    pick_id: str | None = None,
-    user=Depends(get_current_user),
-):
-    """Compara la cuota de un pronostico entre las casas disponibles.
-
-    Sin `pick_id` devuelve la comparacion de los pronosticos pendientes del
-    dia. Con `pick_id` devuelve solo la de ese pronostico (se usa al pedir
-    el detalle de una tarjeta).
-
-    Las cuotas son REALES: si una casa no publica el mercado, no aparece.
-
-    OJO: cada comparacion consume peticiones de odds-api.io (cuota diaria
-    de la cuenta), por eso el endpoint tiene rate-limit por usuario.
-    """
-    _rate_limit(f"comparador:{user['id']}", 30, 600)
-
-    if pick_id:
-        pick = db.get_pick_by_id(pick_id)
-        if not pick:
-            raise HTTPException(404, "Pronostico no encontrado")
-        return {"comparacion": dashboard.comparar_cuotas_pick(pick)}
-
-    # Solo los pronosticos de HOY: los pendientes viejos ya no tienen mercado.
-    pendientes = [
-        p for p in (db.list_picks_hoy() or [])
-        if p.get("odds") is not None and p.get("result") == "PENDIENTE"
-    ]
-    comparaciones = {}
-    for p in pendientes[:20]:
-        comparaciones[str(p.get("id"))] = dashboard.comparar_cuotas_pick(p)
-    return {"comparaciones": comparaciones}
 
 
 # NOTA: el SSE (/stats/stream) se retiro: el proxy de Northflank bufferiza la

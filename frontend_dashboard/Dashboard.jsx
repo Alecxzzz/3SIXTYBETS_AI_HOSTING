@@ -18,19 +18,6 @@ import "./Dashboard.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
 
-/**
- * Motivos por los que el comparador no devuelve precios. Se muestran como
- * texto, NUNCA como cuota: si no hay dato real, no se pinta ningun numero.
- */
-const MOTIVOS_CMP = {
-  sin_precios: "Las casas no publican este mercado",
-  evento_no_encontrado: "Partido no encontrado en el comparador",
-  sin_datos: "Faltan datos del pronostico",
-  datos_insuficientes: "Faltan datos del pronostico",
-  error_evento: "Comparador no disponible ahora",
-  error_comparacion: "Comparador no disponible ahora",
-};
-
 
 async function apiGet(path) {
   const token = localStorage.getItem("access_token");
@@ -207,11 +194,9 @@ export default function Dashboard() {
   const [analizando, setAnalizando] = useState(null);
   const [analisis, setAnalisis] = useState({});
   const [errorAnalisis, setErrorAnalisis] = useState({});
-  // Favoritos del usuario (ids de pronostico) y comparador de cuotas.
+  // Favoritos del usuario (ids de pronostico).
   const [favoritos, setFavoritos] = useState(() => new Set());
   const [favCargando, setFavCargando] = useState({});
-  const [comparaciones, setComparaciones] = useState({});
-  const [cmpCargando, setCmpCargando] = useState({});
 
   const ejecutarAnalisis = async (p) => {
     setAnalizando(p.id);
@@ -284,29 +269,6 @@ export default function Dashboard() {
       });
     } finally {
       setFavCargando((actual) => {
-        const nuevo = { ...actual };
-        delete nuevo[id];
-        return nuevo;
-      });
-    }
-  };
-
-  /** Pide al backend la comparacion de cuotas de un pronostico (bajo demanda). */
-  const pedirComparacion = async (p) => {
-    const id = String(p.id);
-    // No se repite si ya hay datos validos o si esta en curso: cada llamada
-    // consume cuota de odds-api.io. Si no habia datos, el boton reintenta.
-    if (cmpCargando[id] || comparaciones[id]?.disponible) return;
-    setCmpCargando((actual) => ({ ...actual, [id]: true }));
-    try {
-      const r = await apiGet(
-        `/dashboard/comparador-cuotas?pick_id=${encodeURIComponent(id)}`
-      );
-      setComparaciones((actual) => ({ ...actual, [id]: r?.comparacion || null }));
-    } catch {
-      setComparaciones((actual) => ({ ...actual, [id]: null }));
-    } finally {
-      setCmpCargando((actual) => {
         const nuevo = { ...actual };
         delete nuevo[id];
         return nuevo;
@@ -418,41 +380,6 @@ export default function Dashboard() {
             >
               {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
             </button>
-            </div>
-            <div className="dash-cmp-row">
-              <button
-                type="button"
-                className="dash-cmp-btn"
-                onClick={() => pedirComparacion(p)}
-                disabled={!!cmpCargando[String(p.id)]}
-                title="Comparar esta cuota entre las casas disponibles"
-              >
-                📊 Comparar cuota
-              </button>
-              {cmpCargando[String(p.id)] ? (
-                <span className="dash-cmp dash-cmp-cargando">⏳ Comparando…</span>
-              ) : comparaciones[String(p.id)]?.disponible ? (
-                <span
-                  className={`dash-cmp${comparaciones[String(p.id)].valor ? " es-valor" : ""}`}
-                  title={`Mejor cuota: ${comparaciones[String(p.id)].mejor_casa} (${comparaciones[String(p.id)].mejor_cuota})`}
-                >
-                  📊 {comparaciones[String(p.id)].mejor_casa}{" "}
-                  {Number(comparaciones[String(p.id)].mejor_cuota).toFixed(2)}
-                  {comparaciones[String(p.id)].valor &&
-                  comparaciones[String(p.id)].mejora_pct != null
-                    ? ` · +${comparaciones[String(p.id)].mejora_pct}%`
-                    : ""}
-                </span>
-              ) : comparaciones[String(p.id)] ? (
-                /* Sin precios reales no se pinta ninguna cuota: solo el aviso. */
-                <span
-                  className="dash-cmp dash-cmp-sin"
-                  title={MOTIVOS_CMP[comparaciones[String(p.id)].motivo] || "Sin cuotas publicadas para este mercado"}
-                >
-                  Sin comparación
-                </span>
-              ) : null}
-
             </div>
             <button
               className="dash-share"
