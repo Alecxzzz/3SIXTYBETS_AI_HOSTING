@@ -1569,6 +1569,23 @@ def dashboard_home(user=Depends(get_current_user_optional)):
     data = copy.deepcopy(_dashboard_base())
     data["welcome"] = f"Bienvenido, {username}"
 
+    # Favoritos del usuario: marca cada pick con `favorito` para que el
+    # frontend pueda pintar la estrella sin pedir los favoritos aparte.
+    if user:
+        try:
+            fav_ids = dashboard.ids_favoritos_picks(user["id"])
+        except Exception:  # noqa: BLE001
+            fav_ids = set()
+        if fav_ids:
+            for lista in (
+                data.get("pronosticos_del_dia") or [],
+                data.get("pronosticos_manana") or [],
+                data.get("pronosticos_acertados") or [],
+            ):
+                for pick in lista:
+                    if str(pick.get("id")) in fav_ids:
+                        pick["favorito"] = True
+
     # FREEMIUM (incluye invitados): los GOLDEN PICK son SIEMPRE premium y las
     # 2 gratis son picks NORMALES (antes los 2 gratis eran los golden, porque
     # el orden los pone primero). El resto llega sin datos sensibles: el
@@ -2253,20 +2270,25 @@ def stats_live(sport: str = "soccer", league: str = None,
             raise HTTPException(400, "dia debe ser un entero: -1, 0, 1 o 2")
     return data
 
-# ---- Favoritos (equipos / ligas) ----
+# ---- Favoritos (equipos / ligas / picks) ----
 
 class FavoritoIn(BaseModel):
-    tipo: str          # "equipo" | "liga"
+    tipo: str          # "equipo" | "liga" | "pick"
     ref_id: str
     nombre: str
     sport: str
     logo: str | None = None
     league_code: str | None = None
+    # Solo para tipo="pick": datos del pronostico guardado
+    market: str | None = None
+    selection: str | None = None
+    odds: float | None = None
+    event_id: str | None = None
 
 
 @app.get("/favoritos")
 def favoritos_listar(user=Depends(get_current_user)):
-    """Favoritos del usuario (equipos y ligas)."""
+    """Favoritos del usuario (equipos, ligas y pronosticos)."""
     return {"favoritos": db.list_favoritos(user["id"])}
 
 
@@ -2276,19 +2298,123 @@ def favoritos_agregar(data: FavoritoIn, user=Depends(get_current_user)):
         ok = db.add_favorito(
             user["id"], data.tipo, data.ref_id, data.nombre, data.sport,
             logo=data.logo, league_code=data.league_code,
+            market=data.market, selection=data.selection,
+            odds=data.odds, event_id=data.event_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": ok}
 
 
+# ---- Favoritos de PRONOSTICOS (estrella del dashboard) ----
+#
+# Rutas separadas de /favoritos para no romper el contrato existente de
+# equipos/ligas (mismo prefijo, otro recurso).
+#
+# OJO CON EL ORDEN: `DELETE /favoritos/{tipo}/{ref_id}` matchearia tambien
+# `/favoritos/picks/{pick_id}` (FastAPI prueba las rutas en orden de
+# registro). Por eso la ruta de picks se declara ANTES que la genérica.
+
+class FavoritoPickIn(BaseModel):
+    pick_id: str
+    # Alternativa al pick_id: se resuelve el pick en la BD del servidor.
+    event_id: str | None = None
+
+
+@app.get("/favoritos/picks")
+def favoritos_picks_listar(user=Depends(get_current_user)):
+    """Pronosticos que el usuario guardo como favoritos."""
+    return {"favoritos": dashboard.listar_favoritos_picks(user["id"])}
+
+
+@app.post("/favoritos/picks")
+def favoritos_picks_agregar(data: FavoritoPickIn, user=Depends(get_current_user)):
+    """Guarda un pronostico como favorito.
+
+    El pick se resuelve SIEMPRE en la BD por id (o por evento+mercado): asi
+    el cliente no puede inventarse una cuota ni un mercado.
+    """
+    pick = db.get_pick_by_id(data.pick_id)
+    if not pick and data.event_id:
+        for p in (db.list_picks_hoy() or []):
+            if str(p.get("eventId")) == str(data.event_id):
+                pick = p
+                break
+    if not pick:
+        raise HTTPException(404, "Pronostico no encontrado")
+    try:
+        return dashboard.agregar_favorito_pick(user["id"], pick)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/favoritos/picks/{pick_id}")
+def favoritos_picks_quitar(pick_id: str, user=Depends(get_current_user)):
+    """Quita un pronostico de los favoritos del usuario."""
+    try:
+        return dashboard.quitar_favorito_pick(user["id"], pick_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/favoritos/picks/{pick_id}/toggle")
+def favoritos_picks_alternar(pick_id: str, user=Depends(get_current_user)):
+    """Alterna el favorito de un pronostico (toggle de la estrella)."""
+    pick = db.get_pick_by_id(pick_id)
+    if not pick:
+        raise HTTPException(404, "Pronostico no encontrado")
+    try:
+        return dashboard.alternar_favorito_pick(user["id"], pick)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @app.delete("/favoritos/{tipo}/{ref_id}")
 def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
+    """Quita un favorito de equipo o liga (y tambien de pick)."""
     try:
         ok = db.remove_favorito(user["id"], tipo, ref_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": ok}
+
+
+# ---- Comparador de cuotas ----
+
+@app.get("/dashboard/comparador-cuotas")
+def dashboard_comparador_cuotas(
+    request: Request,
+    pick_id: str | None = None,
+    user=Depends(get_current_user),
+):
+    """Compara la cuota de un pronostico entre las casas disponibles.
+
+    Sin `pick_id` devuelve la comparacion de los pronosticos pendientes del
+    dia. Con `pick_id` devuelve solo la de ese pronostico (se usa al pedir
+    el detalle de una tarjeta).
+
+    Las cuotas son REALES: si una casa no publica el mercado, no aparece.
+
+    OJO: cada comparacion consume peticiones de odds-api.io (cuota diaria
+    de la cuenta), por eso el endpoint tiene rate-limit por usuario.
+    """
+    _rate_limit(f"comparador:{user['id']}", 30, 600)
+
+    if pick_id:
+        pick = db.get_pick_by_id(pick_id)
+        if not pick:
+            raise HTTPException(404, "Pronostico no encontrado")
+        return {"comparacion": dashboard.comparar_cuotas_pick(pick)}
+
+    # Solo los pronosticos de HOY: los pendientes viejos ya no tienen mercado.
+    pendientes = [
+        p for p in (db.list_picks_hoy() or [])
+        if p.get("odds") is not None and p.get("result") == "PENDIENTE"
+    ]
+    comparaciones = {}
+    for p in pendientes[:20]:
+        comparaciones[str(p.get("id"))] = dashboard.comparar_cuotas_pick(p)
+    return {"comparaciones": comparaciones}
 
 
 # NOTA: el SSE (/stats/stream) se retiro: el proxy de Northflank bufferiza la

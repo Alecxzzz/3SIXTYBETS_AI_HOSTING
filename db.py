@@ -325,6 +325,11 @@ def init_db():
             sport varchar(20) not null,
             logo varchar(400) null,
             league_code varchar(40) null,
+            -- tipo='pick': datos del pronostico guardado como favorito
+            market varchar(200) null,
+            selection varchar(200) null,
+            odds decimal(10, 2) null,
+            event_id varchar(64) null,
             created_at datetime not null,
             primary key (user_id, tipo, ref_id),
             index favoritos_user_idx (user_id)
@@ -367,6 +372,26 @@ def init_db():
     )
     if stats_col and not stats_col.get("cnt"):
         run_query("alter table ai_picks add column stats_ultimos5 text null")
+
+    # Migracion ligera: la tabla 'favoritos' ahora guarda tambien los
+    # pronosticos favoritos (tipo='pick'), que necesitan mercado, seleccion,
+    # cuota y evento. Sin esto, la estrella del dashboard no persistiria.
+    for column, tipo_col in (
+        ("market", "varchar(200) null"),
+        ("selection", "varchar(200) null"),
+        ("odds", "decimal(10, 2) null"),
+        ("event_id", "varchar(64) null"),
+    ):
+        existe = run_query(
+            """
+            select count(*) as cnt from information_schema.columns
+            where table_schema = database() and table_name = 'favoritos' and column_name = %s
+            """,
+            (column,),
+            fetchone=True,
+        )
+        if existe and not existe.get("cnt"):
+            run_query(f"alter table favoritos add column {column} {tipo_col}")
 
     ensure_admin_user()
 
@@ -1322,6 +1347,22 @@ def list_picks_pendientes():
     return [public_ai_pick(r) for r in (rows or [])]
 
 
+def get_pick_by_id(pick_id: str):
+    """Un pick por id (public_ai_pick) o None.
+
+    Se usa al marcar un pick como favorito: el servidor resuelve los datos
+    del pick en la BD, asi el cliente no puede inventar mercado/cuota.
+    """
+    if not pick_id:
+        return None
+    row = run_query(
+        "select * from ai_picks where id = %s limit 1",
+        (str(pick_id)[:64],),
+        fetchone=True,
+    )
+    return public_ai_pick(row) if row else None
+
+
 def list_picks_pendientes_sport(sport: str, limite: int = 60):
     """Picks PENDIENTE de UN deporte, los mas recientes primero.
 
@@ -1794,7 +1835,8 @@ def list_favoritos(user_id: str) -> list:
     """Favoritos del usuario, los mas recientes primero."""
     rows = run_query(
         """
-        select tipo, ref_id, nombre, sport, logo, league_code
+        select tipo, ref_id, nombre, sport, logo, league_code,
+               market, selection, odds, event_id
         from favoritos
         where user_id = %s
         order by created_at desc
@@ -1803,8 +1845,9 @@ def list_favoritos(user_id: str) -> list:
     )
     if not rows:
         return []
-    return [
-        {
+    salida = []
+    for r in rows:
+        item = {
             "tipo": r.get("tipo"),
             "ref_id": r.get("ref_id"),
             "nombre": r.get("nombre"),
@@ -1812,39 +1855,63 @@ def list_favoritos(user_id: str) -> list:
             "logo": r.get("logo"),
             "league_code": r.get("league_code"),
         }
-        for r in rows
-    ]
+        if r.get("tipo") == "pick":
+            cuota = r.get("odds")
+            item.update(
+                {
+                    "market": r.get("market"),
+                    "selection": r.get("selection"),
+                    "odds": float(cuota) if cuota is not None else None,
+                    "event_id": r.get("event_id"),
+                }
+            )
+        salida.append(item)
+    return salida
 
 
 def add_favorito(user_id: str, tipo: str, ref_id: str, nombre: str, sport: str,
-                 logo: str | None = None, league_code: str | None = None) -> bool:
-    """Agrega un favorito (idempotente). tipo: 'equipo' o 'liga'."""
+                 logo: str | None = None, league_code: str | None = None,
+                 market: str | None = None, selection: str | None = None,
+                 odds: float | None = None, event_id: str | None = None) -> bool:
+    """Agrega un favorito (idempotente).
+
+    tipo: 'equipo', 'liga' o 'pick'. Los 'pick' guardan ademas mercado,
+    seleccion, cuota y evento para poder mostrarlos en el dashboard.
+    """
     tipo = (tipo or "").strip().lower()
-    if tipo not in ("equipo", "liga"):
-        raise ValueError("tipo debe ser 'equipo' o 'liga'")
+    if tipo not in ("equipo", "liga", "pick"):
+        raise ValueError("tipo debe ser 'equipo', 'liga' o 'pick'")
     if not str(ref_id or "").strip():
         raise ValueError("ref_id requerido")
     if not sport:
         raise ValueError("sport requerido")
     return bool(run_query(
         """
-        insert into favoritos (user_id, tipo, ref_id, nombre, sport, logo, league_code, created_at)
-        values (%s, %s, %s, %s, %s, %s, %s, now())
+        insert into favoritos (
+            user_id, tipo, ref_id, nombre, sport, logo, league_code,
+            market, selection, odds, event_id, created_at
+        )
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
         on duplicate key update
             nombre = values(nombre),
             logo = values(logo),
-            league_code = values(league_code)
+            league_code = values(league_code),
+            market = values(market),
+            selection = values(selection),
+            odds = values(odds),
+            event_id = values(event_id)
         """,
         (user_id, tipo, str(ref_id)[:120], (nombre or "?")[:200], sport,
-         (logo or None), (league_code or None)),
+         (logo or None), (league_code or None),
+         (market or None), (selection or None), odds, (event_id or None)),
     ))
 
 
 def remove_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
     """Quita un favorito. Devuelve True si se elimino alguna fila."""
     tipo = (tipo or "").strip().lower()
-    if tipo not in ("equipo", "liga"):
-        raise ValueError("tipo debe ser 'equipo' o 'liga'")
+    if tipo not in ("equipo", "liga", "pick"):
+        raise ValueError("tipo debe ser 'equipo', 'liga' o 'pick'")
     r = run_query(
         "delete from favoritos where user_id = %s and tipo = %s and ref_id = %s",
         (user_id, tipo, str(ref_id)[:120]),
@@ -1855,7 +1922,7 @@ def remove_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
 def is_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
     """True si (tipo, ref_id) es favorito del usuario."""
     tipo = (tipo or "").strip().lower()
-    if tipo not in ("equipo", "liga"):
+    if tipo not in ("equipo", "liga", "pick"):
         return False
     row = run_query(
         "select 1 as x from favoritos where user_id = %s and tipo = %s and ref_id = %s limit 1",
@@ -1863,6 +1930,15 @@ def is_favorito(user_id: str, tipo: str, ref_id: str) -> bool:
         fetchone=True,
     )
     return bool(row)
+
+
+def list_favoritos_picks(user_id: str) -> set:
+    """Set con los ref_id de los pronosticos guardados como favorito."""
+    rows = run_query(
+        "select ref_id from favoritos where user_id = %s and tipo = 'pick'",
+        (user_id,),
+    )
+    return {str(r.get("ref_id")) for r in (rows or []) if r.get("ref_id")}
 
 
 # ==============================

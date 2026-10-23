@@ -204,3 +204,93 @@
   padding: 40px 0;
   opacity: 0.7;
 }
+
+/* Favorito (estrella) del pronostico */
+.dash-fav {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.dash-fav:hover:not(:disabled) {
+  transform: scale(1.12);
+  color: #f5c542;
+  border-color: rgba(245, 197, 66, 0.6);
+}
+
+.dash-fav.es-fav {
+  color: #f5c542;
+  border-color: rgba(245, 197, 66, 0.75);
+  background: rgba(245, 197, 66, 0.12);
+}
+
+.dash-fav:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+/* Comparador de cuotas */
+.dash-cmp-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dash-cmp-btn {
+  padding: 7px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(124, 108, 255, 0.45);
+  background: rgba(124, 108, 255, 0.12);
+  color: #a89bff;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+.dash-cmp-btn:hover:not(:disabled) {
+  background: rgba(124, 108, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.dash-cmp-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.dash-cmp {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 108, 255, 0.4);
+  background: rgba(124, 108, 255, 0.14);
+  color: #a89bff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.dash-cmp.es-valor {
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.dash-cmp-cargando {
+  color: rgba(255, 255, 255, 0.55);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}

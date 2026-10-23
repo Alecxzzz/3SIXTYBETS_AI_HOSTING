@@ -27,6 +27,16 @@ async function apiGet(path) {
   return res.json();
 }
 
+async function apiPost(path) {
+  const token = localStorage.getItem("access_token");
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Error ${res.status}`);
+  return res.json();
+}
+
 async function analizarPartido(pick) {
   const token = localStorage.getItem("access_token");
   const params = new URLSearchParams({
@@ -183,6 +193,11 @@ export default function Dashboard() {
   const [analizando, setAnalizando] = useState(null);
   const [analisis, setAnalisis] = useState({});
   const [errorAnalisis, setErrorAnalisis] = useState({});
+  // Favoritos del usuario (ids de pronostico) y comparador de cuotas.
+  const [favoritos, setFavoritos] = useState(() => new Set());
+  const [favCargando, setFavCargando] = useState({});
+  const [comparaciones, setComparaciones] = useState({});
+  const [cmpCargando, setCmpCargando] = useState({});
 
   const ejecutarAnalisis = async (p) => {
     setAnalizando(p.id);
@@ -210,6 +225,78 @@ export default function Dashboard() {
       clearInterval(intervalo);
     };
   }, []);
+
+  // Favoritos del usuario: se cargan una vez al montar.
+  useEffect(() => {
+    let alive = true;
+    apiGet("/favoritos/picks")
+      .then((r) => {
+        if (!alive) return;
+        setFavoritos(new Set((r?.favoritos || []).map((f) => String(f.ref_id))));
+      })
+      .catch(() => {
+        /* sin sesion: la estrella simplemente no marca nada */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** Alterna el favorito de un pronostico (optimista, revierte si falla). */
+  const alternarFavorito = async (p) => {
+    const id = String(p.id);
+    const estaba = favoritos.has(id);
+    setFavoritos((actual) => {
+      const nuevo = new Set(actual);
+      if (estaba) nuevo.delete(id);
+      else nuevo.add(id);
+      return nuevo;
+    });
+    setFavCargando((actual) => ({ ...actual, [id]: true }));
+    try {
+      const r = await apiPost(`/favoritos/picks/${encodeURIComponent(id)}/toggle`);
+      setFavoritos((actual) => {
+        const nuevo = new Set(actual);
+        if (r?.favorito) nuevo.add(id);
+        else nuevo.delete(id);
+        return nuevo;
+      });
+    } catch {
+      setFavoritos((actual) => {
+        const nuevo = new Set(actual);
+        if (estaba) nuevo.add(id);
+        else nuevo.delete(id);
+        return nuevo;
+      });
+    } finally {
+      setFavCargando((actual) => {
+        const nuevo = { ...actual };
+        delete nuevo[id];
+        return nuevo;
+      });
+    }
+  };
+
+  /** Pide al backend la comparacion de cuotas de un pronostico (bajo demanda). */
+  const pedirComparacion = async (p) => {
+    const id = String(p.id);
+    if (comparaciones[id] || cmpCargando[id]) return;
+    setCmpCargando((actual) => ({ ...actual, [id]: true }));
+    try {
+      const r = await apiGet(
+        `/dashboard/comparador-cuotas?pick_id=${encodeURIComponent(id)}`
+      );
+      setComparaciones((actual) => ({ ...actual, [id]: r?.comparacion || null }));
+    } catch {
+      setComparaciones((actual) => ({ ...actual, [id]: null }));
+    } finally {
+      setCmpCargando((actual) => {
+        const nuevo = { ...actual };
+        delete nuevo[id];
+        return nuevo;
+      });
+    }
+  };
 
   if (error) return <div className="dash-error">No se pudo cargar el dashboard: {error}</div>;
   if (!data) return <div className="dash-loading">Cargando dashboard...</div>;
@@ -276,6 +363,25 @@ export default function Dashboard() {
               ) : (
                 p.result === "ACIERTO" && <span className="dash-pick-win">✅ ACIERTO</span>
               )}
+              <button
+                type="button"
+                className={`dash-fav${favoritos.has(String(p.id)) ? " es-fav" : ""}`}
+                onClick={() => alternarFavorito(p)}
+                disabled={!!favCargando[String(p.id)]}
+                title={
+                  favoritos.has(String(p.id))
+                    ? "Quitar de favoritos"
+                    : "Guardar en favoritos"
+                }
+                aria-label={
+                  favoritos.has(String(p.id))
+                    ? "Quitar de favoritos"
+                    : "Guardar en favoritos"
+                }
+                aria-pressed={favoritos.has(String(p.id))}
+              >
+                {favoritos.has(String(p.id)) ? "★" : "☆"}
+              </button>
             </div>
             <div className="dash-pick-event">{p.eventName}</div>
             <div className="dash-pick-market">
@@ -296,6 +402,32 @@ export default function Dashboard() {
             >
               {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
             </button>
+            </div>
+            <div className="dash-cmp-row">
+              <button
+                type="button"
+                className="dash-cmp-btn"
+                onClick={() => pedirComparacion(p)}
+                disabled={!!cmpCargando[String(p.id)]}
+                title="Comparar esta cuota entre las casas disponibles"
+              >
+                📊 Comparar cuota
+              </button>
+              {cmpCargando[String(p.id)] ? (
+                <span className="dash-cmp dash-cmp-cargando">⏳ Comparando…</span>
+              ) : comparaciones[String(p.id)]?.disponible ? (
+                <span
+                  className={`dash-cmp${comparaciones[String(p.id)].valor ? " es-valor" : ""}`}
+                  title={`Mejor cuota: ${comparaciones[String(p.id)].mejor_casa} (${comparaciones[String(p.id)].mejor_cuota})`}
+                >
+                  📊 {comparaciones[String(p.id)].mejor_casa}{" "}
+                  {Number(comparaciones[String(p.id)].mejor_cuota).toFixed(2)}
+                  {comparaciones[String(p.id)].valor &&
+                  comparaciones[String(p.id)].mejora_pct != null
+                    ? ` · +${comparaciones[String(p.id)].mejora_pct}%`
+                    : ""}
+                </span>
+              ) : null}
             </div>
             <button
               className="dash-share"

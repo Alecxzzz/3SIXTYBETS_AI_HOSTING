@@ -81,6 +81,15 @@ _salud = {
     # Antes se marcaban ANULADO y se acumulaban en el historial sin contar como
     # acierto ni como fallo.
     "resolver_borrados": 0,
+    # NUEVO: Contador de picks favoritos por usuario
+    "favoritos_por_usuario": {},
+    
+    # NUEVO: Estadísticas de valor (comparador de cuotas)
+    "comparador_cuotas": {
+        "total_comparadas": 0,
+        "valor_positivo": 0,
+        "ultima_actualizacion": None
+    },
 }
 
 
@@ -201,7 +210,44 @@ def _norm_texto(s: str) -> str:
     }
     for k, v in reemplazos.items():
         s = s.replace(k, v)
+    # Quita los acentos reales (Málaga -> malaga). Sin esto, el matching de
+    # nombres contra odds-api.io fallaba en todos los equipos con tilde:
+    # 'málaga' nunca esta contenido en 'malaga cf', asi que el evento no se
+    # encontraba y el pick se publicaba sin cuota comparable.
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
     return s
+
+
+def _variantes_nombre(nombre: str) -> list:
+    """Formas normalizadas de un nombre de equipo para comparar.
+
+    odds-api.io devuelve el tenis como 'Apellido, Nombre' (p.ej. 'Machac,
+    Tomas') y el resto como 'Nombre Apellido' (p.ej. 'Deportivo Alaves').
+    Se generan las dos formas para que el matching funcione en ambos casos.
+    """
+    base = _norm_texto(nombre)
+    variantes = [base]
+    if "," in (nombre or ""):
+        apellido, _, nombre_p = (nombre or "").partition(",")
+        invertida = _norm_texto(f"{nombre_p} {apellido}")
+        if invertida and invertida not in variantes:
+            variantes.append(invertida)
+    return variantes
+
+
+def _nombres_coinciden(a: str, b: str) -> bool:
+    """True si dos nombres de equipo se refieren al mismo equipo.
+
+    Mismo criterio que antes (igual o uno contenido en el otro) pero
+    tolerando acentos y el formato 'Apellido, Nombre'.
+    """
+    va, vb = _variantes_nombre(a), _variantes_nombre(b)
+    for x in va:
+        for y in vb:
+            if x and y and (x == y or x in y or y in x):
+                return True
+    return False
 
 
 def _odds_request(path: str, params: dict):
@@ -292,6 +338,56 @@ def _odds_evento(event_id):
     return mercados
 
 
+def _odds_eventos_ventana(sport_slug: str, horas: int = 48):
+    """Eventos de una ventana de horas, con cache de 30 min.
+
+    La lista completa de /events esta truncada por la API (5000 eventos en
+    soccer), asi que los partidos de las ligas menores pueden no aparecer.
+    Filtrando por fechas sale una lista corta y completa para la ventana
+    relevante (el dashboard analiza los proximos ~32 h).
+    """
+    ahora = time.time()
+    clave = f"events_win:{sport_slug}:{horas}"
+    cached = _odds_cache.get(clave)
+    if cached and ahora - cached[0] < _ODDS_EVENTS_TTL:
+        return cached[1]
+    desde = datetime.now(timezone.utc) - timedelta(hours=6)
+    hasta = datetime.now(timezone.utc) + timedelta(hours=horas)
+    data = _odds_request(
+        "/events",
+        {
+            "sport": sport_slug,
+            "from": desde.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": hasta.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    )
+    eventos = data if isinstance(data, list) else []
+    _odds_cache[clave] = (ahora, eventos)
+    return eventos
+
+
+def _evento_oddsapi_ventana(sport: str, home_name: str, away_name: str):
+    """Busca el duelo en la ventana de fechas (si no esta en la lista completa).
+
+    Devuelve (evento, local_en_odds) o (None, None).
+    """
+    slug = ODDS_SPORT_SLUGS.get(sport)
+    if not slug:
+        return None, None
+    for e in _odds_eventos_ventana(slug):
+        if e.get("status") not in ("pending", "live"):
+            continue
+        if _nombres_coinciden(e.get("home", ""), home_name) and _nombres_coinciden(
+            e.get("away", ""), away_name
+        ):
+            return e, True
+        if _nombres_coinciden(e.get("home", ""), away_name) and _nombres_coinciden(
+            e.get("away", ""), home_name
+        ):
+            return e, False
+    return None, None
+
+
 def _evento_oddsapi_con_mercados(sport: str, home_name: str, away_name: str):
     """Devuelve (evento, mercados, local_en_odds) de odds-api.io para el duelo.
 
@@ -303,18 +399,14 @@ def _evento_oddsapi_con_mercados(sport: str, home_name: str, away_name: str):
     if not slug:
         return None, None, None
 
-    def _coincide(a: str, b: str) -> bool:
-        a, b = _norm_texto(a), _norm_texto(b)
-        return bool(a) and bool(b) and (a == b or a in b or b in a)
-
     for e in _odds_eventos(slug):
         if e.get("status") not in ("pending", "live"):
             continue
-        if _coincide(e.get("home", ""), home_name) and _coincide(
+        if _nombres_coinciden(e.get("home", ""), home_name) and _nombres_coinciden(
             e.get("away", ""), away_name
         ):
             return e, (_odds_evento(e.get("id")) or []), True
-        if _coincide(e.get("home", ""), away_name) and _coincide(
+        if _nombres_coinciden(e.get("home", ""), away_name) and _nombres_coinciden(
             e.get("away", ""), home_name
         ):
             return e, (_odds_evento(e.get("id")) or []), False
@@ -390,6 +482,23 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
     _, mercados, local_en_odds = _evento_oddsapi_con_mercados(
         sport, home_name, away_name
     )
+    return _precio_en_mercados(
+        mercados, sport, home_name, away_name, market, selection, titulo,
+        local_en_odds,
+    )
+
+
+def _precio_en_mercados(mercados, sport, home_name, away_name, market,
+                        selection, titulo, local_en_odds=True):
+    """Precio de un mercado/seleccion dentro de la lista de mercados.
+
+    `mercados` es la lista de mercados de UN bookmaker (formato odds-api.io).
+    `local_en_odds` indica si el local del pick es el 'home' de la fuente
+    (False = la fuente lo tiene invertido). Devuelve float o None.
+
+    Se separo de `_cuota_real_pick` para que el comparador de cuotas pueda
+    aplicar el mismo mapeo a CADA bookmaker y comparar precios entre casas.
+    """
     if not mercados:
         return None
 
@@ -540,6 +649,253 @@ def _cuota_real_pick(sport: str, home_name: str, away_name: str,
         return None
 
     return None
+
+
+# ============================================================
+# COMPARADOR DE CUOTAS (varias casas para el mismo mercado)
+# ============================================================
+# El plan free de odds-api.io permite 2 bookmakers (Bet365 y Winpot MX).
+# El comparador pide los mercados de TODAS las casas permitidas de una vez
+# y devuelve el precio de cada una para el mercado/seleccion del pick, mas
+# un veredicto de VALOR.
+#
+# NOTA: nunca se inventan cuotas. Si una casa no publica ese mercado o la
+# API falla, esa casa simplemente no aparece en la respuesta.
+
+# Bookmakers que se piden al comparador. _odds_request gestiona el 403 que
+# devuelve la lista de permitidos.
+COMPARADOR_BOOKMAKERS = "Bet365,Winpot MX"
+
+
+def _odds_mercados_por_bookmaker(event_id):
+    """Mercados del evento agrupados por bookmaker: {nombre: [mercados]}.
+
+    A diferencia de `_odds_evento` (que devuelve solo la primera casa con
+    mercados), aqui se guardan TODAS las casas para poder comparar precios.
+    """
+    ahora = time.time()
+    cached = _odds_cache.get(f"markets:{event_id}")
+    if cached and ahora - cached[0] < _ODDS_CACHE_TTL:
+        return cached[1]
+
+    data = _odds_request(
+        "/odds", {"eventId": event_id, "bookmakers": COMPARADOR_BOOKMAKERS}
+    )
+    if not isinstance(data, dict):
+        return {}
+    por_casa = {}
+    for nombre, mercados in (data.get("bookmakers") or {}).items():
+        if isinstance(mercados, list) and mercados:
+            por_casa[nombre] = mercados
+    if por_casa:
+        _odds_cache[f"markets:{event_id}"] = (ahora, por_casa)
+    return por_casa
+
+
+def _comparar_cuotas_evento(evento_id, sport, home_name, away_name,
+                             market, selection, titulo, local_en_odds=True):
+    """Precios del mismo mercado/seleccion en cada casa disponible.
+
+    Devuelve {"cuotas": {casa: precio}, "mejor_casa": str, "mejor": float}.
+    Casas sin ese mercado no se incluyen (no se inventan precios).
+    """
+    cuotas = {}
+    for nombre, mercados in (_odds_mercados_por_bookmaker(evento_id) or {}).items():
+        precio = _precio_en_mercados(
+            mercados, sport, home_name, away_name, market, selection, titulo,
+            local_en_odds,
+        )
+        if precio:
+            cuotas[nombre] = float(precio)
+    if not cuotas:
+        return {"cuotas": {}, "mejor_casa": None, "mejor": None}
+    mejor_casa = max(cuotas, key=lambda k: cuotas[k])
+    return {"cuotas": cuotas, "mejor_casa": mejor_casa, "mejor": cuotas[mejor_casa]}
+
+
+def comparar_cuotas_pick(pick: dict) -> dict:
+    """Compara la cuota de un pick entre casas y dice si hay valor.
+
+    La cuota publicada (`odds` del pick) es la referencia: es la que el
+    usuario ve. Si alguna casa ofrece una cuota MAYOR para el mismo
+    mercado/seleccion, el pick tiene "valor" (mejor precio disponible).
+    Si la cuota publicada es la mejor de todas, se marca como "optima".
+
+    Devuelve siempre un dict (nunca lanza): si no hay datos, `disponible`
+    es False y el frontend simplemente no muestra badge.
+    """
+    vacio = {
+        "disponible": False,
+        "cuota_publicada": pick.get("odds"),
+        "cuotas": {},
+        "mejor_casa": None,
+        "mejor_cuota": None,
+        "valor": False,
+        "motivo": "sin_datos",
+    }
+    sport = (pick.get("sport") or "").strip()
+    home_name = (pick.get("homeName") or pick.get("home_name") or "").strip()
+    away_name = (pick.get("awayName") or pick.get("away_name") or "").strip()
+    market = pick.get("market") or ""
+    selection = pick.get("selection") or ""
+    titulo = pick.get("titulo") or ""
+    publicada = pick.get("odds")
+
+    if not (sport and home_name and away_name and market):
+        vacio["motivo"] = "datos_insuficientes"
+        return vacio
+
+    try:
+        evento, _, local_en_odds = _evento_oddsapi_con_mercados(
+            sport, home_name, away_name
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Dashboard] comparador: error buscando evento: {exc}", flush=True)
+        vacio["motivo"] = "error_evento"
+        return vacio
+
+    if not evento:
+        # La lista completa de /events esta truncada (5000 en soccer): algunos
+        #duelos no aparecen. Se reintenta filtrando por fecha.
+        try:
+            evento, local_en_odds = _evento_oddsapi_ventana(
+                sport, home_name, away_name
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Dashboard] comparador: error en ventana: {exc}", flush=True)
+
+    if not evento or not evento.get("id"):
+        vacio["motivo"] = "evento_no_encontrado"
+        return vacio
+
+    try:
+        comparacion = _comparar_cuotas_evento(
+            evento.get("id"), sport, home_name, away_name,
+            market, selection, titulo,
+            True if local_en_odds is None else local_en_odds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Dashboard] comparador: error comparando: {exc}", flush=True)
+        vacio["motivo"] = "error_comparacion"
+        return vacio
+
+    cuotas = comparacion.get("cuotas") or {}
+    if not cuotas:
+        vacio["motivo"] = "sin_precios"
+        return vacio
+
+    mejor_cuota = comparacion.get("mejor")
+    mejor_casa = comparacion.get("mejor_casa")
+    resultado = {
+        "disponible": True,
+        "cuota_publicada": float(publicada) if publicada is not None else None,
+        "cuotas": cuotas,
+        "mejor_casa": mejor_casa,
+        "mejor_cuota": mejor_cuota,
+        "valor": False,
+        "motivo": "sin_valor",
+    }
+    if publicada is not None:
+        try:
+            pub = float(publicada)
+            # Valor = hay una casa que paga MAS que la cuota publicada.
+            if mejor_cuota and mejor_cuota > pub + 0.001:
+                resultado["valor"] = True
+                resultado["motivo"] = "mejor_precio_disponible"
+                resultado["mejora_pct"] = round(
+                    (mejor_cuota - pub) / pub * 100, 2
+                )
+            elif mejor_cuota and mejor_cuota >= pub - 0.001:
+                resultado["motivo"] = "cuota_optima"
+        except (TypeError, ValueError):
+            pass
+    else:
+        resultado["motivo"] = "sin_cuota_publicada"
+
+    # Estadisticas de valor para /dashboard/salud
+    _salud["comparador_cuotas"]["total_comparadas"] += 1
+    if resultado["valor"]:
+        _salud["comparador_cuotas"]["valor_positivo"] += 1
+    _salud["comparador_cuotas"]["ultima_actualizacion"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    return resultado
+
+
+# ============================================================
+# FAVORITOS DE PICKS (estrella del dashboard)
+# ============================================================
+
+def _contar_favorito_usuario(user_id: str, delta: int) -> None:
+    """Actualiza el contador de favoritos por usuario de /dashboard/salud."""
+    try:
+        clave = str(user_id)
+        actual = int(_salud["favoritos_por_usuario"].get(clave, 0))
+        nuevo = max(0, actual + delta)
+        if nuevo:
+            _salud["favoritos_por_usuario"][clave] = nuevo
+        else:
+            _salud["favoritos_por_usuario"].pop(clave, None)
+    except (TypeError, ValueError):
+        pass
+
+
+def agregar_favorito_pick(user_id: str, pick: dict) -> dict:
+    """Guarda un pick como favorito del usuario (idempotente)."""
+    ref_id = str(pick.get("id") or "").strip()
+    if not ref_id:
+        raise ValueError("pick sin id")
+    sport = (pick.get("sport") or "").strip()
+    if not sport:
+        raise ValueError("pick sin sport")
+    ya_era = db.is_favorito(user_id, "pick", ref_id)
+    db.add_favorito(
+        user_id, "pick", ref_id,
+        pick.get("eventName") or pick.get("event_name") or "Pick",
+        sport,
+        market=pick.get("market"),
+        selection=pick.get("selection") or pick.get("porque"),
+        odds=pick.get("odds"),
+        event_id=pick.get("eventId") or pick.get("event_id"),
+    )
+    if not ya_era:
+        _contar_favorito_usuario(user_id, 1)
+    return {"ok": True, "favorito": True, "ya_existia": ya_era}
+
+
+def quitar_favorito_pick(user_id: str, pick_id: str) -> dict:
+    """Quita un pick de los favoritos del usuario."""
+    ref_id = str(pick_id or "").strip()
+    if not ref_id:
+        raise ValueError("pick_id requerido")
+    ok = db.remove_favorito(user_id, "pick", ref_id)
+    if ok:
+        _contar_favorito_usuario(user_id, -1)
+    return {"ok": bool(ok), "favorito": False}
+
+
+def alternar_favorito_pick(user_id: str, pick: dict) -> dict:
+    """Alterna el estado de favorito de un pick (toggle de la estrella)."""
+    ref_id = str(pick.get("id") or "").strip()
+    if not ref_id:
+        raise ValueError("pick sin id")
+    if db.is_favorito(user_id, "pick", ref_id):
+        return quitar_favorito_pick(user_id, ref_id)
+    return agregar_favorito_pick(user_id, pick)
+
+
+def listar_favoritos_picks(user_id: str) -> list:
+    """Pronosticos guardados como favorito del usuario."""
+    return [f for f in (db.list_favoritos(user_id) or []) if f.get("tipo") == "pick"]
+
+
+def ids_favoritos_picks(user_id: str) -> set:
+    """Set de ids de los picks favoritos (para marcar las estrellas)."""
+    try:
+        return db.list_favoritos_picks(user_id)
+    except Exception:  # noqa: BLE001
+        return set()
+
 
 # ============================================================
 # MERCADOS DEFINIDOS POR DEPORTE (unico catalogo permitido)
