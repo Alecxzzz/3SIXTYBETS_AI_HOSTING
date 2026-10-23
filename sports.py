@@ -186,19 +186,54 @@ def _cache_set(key, data):
 
 
 def _dias_rango() -> list:
-    """Fechas individuales (uno por dia) de ayer..pasado-manana, hora UTC.
+    """Fechas individuales (uno por dia) de ayer..pasado-manana, hora del Este.
+
+    ESPN agrupa eventos por fecha del Este (America/New_York), no UTC.
+    Un partido del 2026-10-21T01:30Z es en realidad 2026-10-20T20:30 ET,
+    así que pertenece al día 20 en ESPN. Si usamos UTC, buscamos en el día
+    21 y no lo encontramos (NOT_FOUND). Por eso convertimos a Eastern Time.
 
     ESPN YA NO ACEPTA rangos en dates=YYYYMMDD-YYYYMMDD (responde 400 Bad
     Request desde sep/2026). Solo acepta UNA fecha por peticion, por eso
     devolvemos una lista de dias y _fetch_scoreboard hace una peticion por dia.
     """
     from datetime import timedelta
-    today = datetime.now(timezone.utc)
+    today_utc = datetime.now(timezone.utc)
+    
+    # Convertir UTC a Eastern Time (America/New_York)
+    # Intentamos zoneinfo primero (disponible en Linux y con tzdata en Windows)
+    try:
+        from zoneinfo import ZoneInfo
+        tz_eastern = ZoneInfo("America/New_York")
+        today_eastern = today_utc.astimezone(tz_eastern)
+    except (ImportError, Exception):
+        # Fallback: calcular Eastern Time manualmente considerando DST
+        # DST en US: segundo domingo de marzo a primer domingo de noviembre
+        year = today_utc.year
+        
+        # Segundo domingo de marzo
+        mar1 = datetime(year, 3, 1, tzinfo=timezone.utc)
+        mar1_weekday = mar1.weekday()  # 0=lunes, 6=domingo
+        second_sunday_mar = 8 + (6 - mar1_weekday) if mar1_weekday != 6 else 14
+        
+        # Primer domingo de noviembre
+        nov1 = datetime(year, 11, 1, tzinfo=timezone.utc)
+        nov1_weekday = nov1.weekday()
+        first_sunday_nov = 1 + (6 - nov1_weekday) if nov1_weekday != 6 else 7
+        
+        dst_start = datetime(year, 3, second_sunday_mar, 7, 0, 0, tzinfo=timezone.utc)  # 2 AM EST = 7 AM UTC
+        dst_end = datetime(year, 11, first_sunday_nov, 6, 0, 0, tzinfo=timezone.utc)  # 2 AM EDT = 6 AM UTC
+        
+        # Si estamos en DST, UTC-4; si no, UTC-5
+        offset_hours = -4 if dst_start <= today_utc < dst_end else -5
+        tz_eastern = timezone(timedelta(hours=offset_hours))
+        today_eastern = today_utc.astimezone(tz_eastern)
+    
     return [
-        (today - timedelta(days=1)).strftime("%Y%m%d"),
-        today.strftime("%Y%m%d"),
-        (today + timedelta(days=1)).strftime("%Y%m%d"),
-        (today + timedelta(days=2)).strftime("%Y%m%d"),
+        (today_eastern - timedelta(days=1)).strftime("%Y%m%d"),
+        today_eastern.strftime("%Y%m%d"),
+        (today_eastern + timedelta(days=1)).strftime("%Y%m%d"),
+        (today_eastern + timedelta(days=2)).strftime("%Y%m%d"),
     ]
 
 

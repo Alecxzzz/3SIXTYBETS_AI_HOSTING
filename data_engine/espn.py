@@ -29,15 +29,44 @@ def _to_float(v):
         return None
 
 def _espn_path(sport: str, league: Optional[str]) -> str:
+    """Convierte el nombre del deporte al path que usa ESPN en su API.
+
+    ESPN usa URLs como `baseball/mlb/scoreboard`, `basketball/nba/scoreboard`.
+    El primer segmento es el deporte (baseball, basketball, football, hockey,
+    soccer, tennis, mma) y el segundo es la liga (mlb, nba, nfl, nhl, esp.1).
+    Sin este mapeo, `mlb` devolvía "mlb" en vez de "baseball/mlb" y ESPN
+    respondía 404 (partido no encontrado -> pick "Sin datos").
+    """
     s = (sport or "").lower()
     if s in ("soccer", "futbol", "football_soccer"):
         return "soccer/" + (league or "esp.1")
-    if s in ("nfl", "americanfootball"):
+    if s in ("nfl", "americanfootball", "american_football"):
         return "football/nfl"
+    if s == "ncaaf" or s == "college_football":
+        return "football/college-football"
     if s == "nba":
         return "basketball/nba"
+    if s == "wnba":
+        return "basketball/wnba"
+    if s == "ncaab" or s == "mens_college_basketball":
+        return "basketball/mens-college-basketball"
+    if s == "mlb" or s == "baseball":
+        return "baseball/mlb"
+    if s == "nhl" or s == "hockey":
+        return "hockey/nhl"
     if s == "tennis":
         return "tennis/atp"
+    if s == "mma" or s == "ufc":
+        return "mma/ufc"
+    if s == "golf":
+        return "golf/pga"
+    if s == "boxing":
+        return "boxing/boxing"
+    if s == "cricket":
+        return "cricket/icc"
+    if s == "rugby":
+        return "rugby/nzl"
+    # Fallback: si no lo conocemos, usamos el nombre tal cual (puede fallar).
     return s
 
 def buscar_equipo(nombre: str) -> Optional[Dict[str, Any]]:
@@ -107,7 +136,25 @@ def datos_completos(sport: str, home: str, away: str,
                     fecha: Optional[str] = None, league: Optional[str] = None) -> Dict[str, Any]:
     """
     MOTOR DE BUSQUEDA: junta TODO lo disponible de un partido en ESPN.
+
+    Si no se da fecha, usa la fecha actual en Eastern Time (no UTC), porque
+    ESPN agrupa eventos por fecha del Este. Un partido del 2026-10-21T01:30Z
+    es 2026-10-20T20:30 ET y pertenece al día 20 en ESPN.
     """
+    if not fecha:
+        # Usar Eastern Time, no UTC (ESPN agrupa por fecha del Este)
+        from datetime import timedelta, timezone as tz
+        now_utc = datetime.utcnow()
+        try:
+            from zoneinfo import ZoneInfo
+            tz_eastern = ZoneInfo("America/New_York")
+            now_eastern = now_utc.replace(tzinfo=tz.utc).astimezone(tz_eastern)
+            fecha = now_eastern.strftime("%Y-%m-%d")
+        except (ImportError, Exception):
+            # Fallback: calcular offset ET manualmente (DST simplificado)
+            # En invierno UTC-5, en verano UTC-4
+            # Aproximación: usar UTC-5 como default (funciona la mayor parte del año)
+            fecha = (now_utc - timedelta(hours=5)).strftime("%Y-%m-%d")
     partido = buscar_partido(sport, home, away, fecha, league)
     if not partido:
         return {"found": False, "raw": {}}
