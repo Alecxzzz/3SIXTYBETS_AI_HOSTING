@@ -503,14 +503,41 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return None
 
     texto = f"{market} {titulo} {selection}".lower()
+    # Version sin acentos para las CLAVES: "Hándicap 1x2" o "Más de 2.5" no
+    # contenian "handicap"/"mas de" y esas ramas nunca se ejecutaban.
+    texto_n = _norm_texto(texto)
     nh, na = _norm_texto(home_name), _norm_texto(away_name)
     lado_txt = _norm_texto(f"{titulo} {selection}")
+
+    # Mitad del partido. Un precio de "Double Chance HT" NO vale para un pick
+    # de 2ª mitad (y al reves): antes se cogia el primer mercado que contenia
+    # la clave y se comparaba el precio de OTRO mercado. Si la casa no publica
+    # esa mitad (Bet365 no tiene "Double Chance 2H"), no hay precio y punto.
+    def _mitad_del_texto(t):
+        if re.search(r"\b2\s*[ªa]?\s*mitad|\b2nd\s*half|\b2h\b|segund[oa]\s*(?:parte|mitad)", t):
+            return "2h"
+        if re.search(r"\b1\s*[ªa]?\s*mitad|\b1st\s*half|\b1h\b|\bht\b|primer\s*tiempo", t):
+            return "ht"
+        return None
+
+    def _mitad_del_mercado(nombre):
+        n = (nombre or "").lower()
+        if re.search(r"\b2h\b|2nd\s*half", n):
+            return "2h"
+        if re.search(r"\bht\b|1st\s*half|\b1h\b", n):
+            return "ht"
+        return None
+
+    mitad = _mitad_del_texto(texto)
 
     def _mercado(*claves):
         for m in mercados:
             n = (m.get("name") or "").lower()
-            if any(c in n for c in claves):
-                return m
+            if not any(c in n for c in claves):
+                continue
+            if _mitad_del_mercado(n) != mitad:
+                continue
+            return m
         return None
 
     def _lado():
@@ -534,7 +561,7 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return l
 
     # Sin empate (Draw No Bet)
-    if "sin empate" in texto:
+    if "sin empate" in texto_n:
         m = _mercado("draw no bet")
         for o in (m or {}).get("odds") or []:
             if isinstance(o, dict):
@@ -543,8 +570,42 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
                     return _num_cuota(o.get(lado))
         return None
 
+    # Handicap europeo ("Hándicap 1x2"): tres resultados con linea. Va ANTES
+    # de la rama 1X2 porque el texto contiene "1x2" y antes se colaba en el
+    # ML: el comparador acababa mostrando la cuota del ganador del partido
+    # como si fuera la del handicap (otro mercado, precio que no es el suyo).
+    if "european handicap" in texto_n or re.search(r"handicap\s*1x2", texto_n):
+        m = _mercado("european handicap")
+        lado = _lado()
+        mm = re.search(r"\((\d+)\s*:\s*(\d+)\)", str(selection or ""))
+        hdp_pick = None
+        if mm:
+            try:
+                hdp_pick = float(int(mm.group(1)) - int(mm.group(2)))
+            except ValueError:
+                hdp_pick = None
+        if lado:
+            esperado = None
+            if hdp_pick is not None:
+                # La linea de odds-api se expresa sobre el local.
+                esperado = hdp_pick if lado == "home" else -hdp_pick
+            for o in (m or {}).get("odds") or []:
+                if not isinstance(o, dict):
+                    continue
+                try:
+                    hdp = float(o.get("hdp"))
+                except (TypeError, ValueError):
+                    continue
+                if esperado is not None and abs(hdp - esperado) > 0.01:
+                    continue
+                val = _num_cuota(o.get(lado))
+                if val:
+                    return val
+        return None
+
     # 1X2 / Ganador
-    if any(k in texto for k in ("1x2", "ganador", "moneyline", " ml", "cualquier equipo gana")):
+    if any(k in texto_n for k in ("1x2", "ganador", "moneyline",
+                                  "cualquier equipo gana")) or re.search(r"\bml\b", texto_n):
         m = _mercado("ml", "moneyline", "match winner", "1x2")
         for o in (m or {}).get("odds") or []:
             if not isinstance(o, dict):
@@ -552,15 +613,28 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
             lado = _lado()
             if lado and _num_cuota(o.get(lado)):
                 return _num_cuota(o.get(lado))
-            if "empate" in texto and _num_cuota(o.get("draw")):
+            if "empate" in texto_n and _num_cuota(o.get("draw")):
                 return _num_cuota(o.get("draw"))
         return None
 
     # Doble oportunidad (1X / 12 / X2)
-    if "doble oportunidad" in texto or "doble" in texto:
+    if "doble oportunidad" in texto_n or "doble" in texto_n:
         m = _mercado("double chance")
         sel = lado_txt.replace(" ", "")
         clave = next((k for k in ("1x", "12", "x2") if k in sel), None)
+        if clave is None:
+            # El catalogo a veces escribe la seleccion con NOMBRES
+            # ("Deportivo Alaves o Malaga") en vez de 1X/12/X2.
+            menciona_home = bool(nh) and nh in lado_txt
+            menciona_away = bool(na) and na in lado_txt
+            menciona_empate = "empate" in lado_txt or "draw" in lado_txt
+            if menciona_empate and menciona_home:
+                clave = "1x"
+            elif menciona_empate and menciona_away:
+                clave = "x2"
+            elif menciona_home and menciona_away:
+                # "A o B" = cualquiera de los dos gana -> 12 (sin empate)
+                clave = "12"
         for o in (m or {}).get("odds") or []:
             if isinstance(o, dict) and clave:
                 val = _num_cuota(o.get(clave.upper()) or o.get(clave))
@@ -569,7 +643,7 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return None
 
     # Handicap (Spread)
-    if "handicap" in texto or "spread" in texto:
+    if "handicap" in texto_n or "spread" in texto_n:
         m = _mercado("spread", "handicap")
         linea = None
         mm = re.search(r"([+-]?\d+(?:\.\d+)?)", str(selection))
@@ -601,10 +675,10 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return None
 
     # Over/Under (goles, carreras, puntos, corners, tarjetas)
-    if any(k in texto for k in ("over", "under", "total", "mas de", "menos de")):
-        es_corner = "corner" in texto
-        es_tarjeta = "tarjeta" in texto or "card" in texto
-        es_over = any(k in texto for k in ("over", "mas de"))
+    if any(k in texto_n for k in ("over", "under", "total", "mas de", "menos de")):
+        es_corner = "corner" in texto_n
+        es_tarjeta = "tarjeta" in texto_n or "card" in texto_n
+        es_over = any(k in texto_n for k in ("over", "mas de"))
         linea = None
         mm = re.search(r"(\d+(?:\.\d+)?)", str(selection))
         if mm:
@@ -615,6 +689,8 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         for m in mercados:
             n = (m.get("name") or "").lower()
             if not any(k in n for k in ("over/under", "totals", "total")):
+                continue
+            if _mitad_del_mercado(n) != mitad:
                 continue
             if es_corner and "corner" not in n:
                 continue
@@ -637,7 +713,7 @@ def _precio_en_mercados(mercados, sport, home_name, away_name, market,
         return None
 
     # Ambos equipos marcan (BTTS)
-    if "ambos" in texto or "btts" in texto:
+    if "ambos" in texto_n or "btts" in texto_n:
         m = _mercado("both teams", "btts")
         sel = (selection or "").strip().lower()
         es_si = sel in ("si", "sí", "yes") or "si" in lado_txt.split()

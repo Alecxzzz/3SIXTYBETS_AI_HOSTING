@@ -18,6 +18,20 @@ import "./Dashboard.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
 
+/**
+ * Motivos por los que el comparador no devuelve precios. Se muestran como
+ * texto, NUNCA como cuota: si no hay dato real, no se pinta ningun numero.
+ */
+const MOTIVOS_CMP = {
+  sin_precios: "Las casas no publican este mercado",
+  evento_no_encontrado: "Partido no encontrado en el comparador",
+  sin_datos: "Faltan datos del pronostico",
+  datos_insuficientes: "Faltan datos del pronostico",
+  error_evento: "Comparador no disponible ahora",
+  error_comparacion: "Comparador no disponible ahora",
+};
+
+
 async function apiGet(path) {
   const token = localStorage.getItem("access_token");
   const res = await fetch(`${API_URL}${path}`, {
@@ -280,7 +294,9 @@ export default function Dashboard() {
   /** Pide al backend la comparacion de cuotas de un pronostico (bajo demanda). */
   const pedirComparacion = async (p) => {
     const id = String(p.id);
-    if (comparaciones[id] || cmpCargando[id]) return;
+    // No se repite si ya hay datos validos o si esta en curso: cada llamada
+    // consume cuota de odds-api.io. Si no habia datos, el boton reintenta.
+    if (cmpCargando[id] || comparaciones[id]?.disponible) return;
     setCmpCargando((actual) => ({ ...actual, [id]: true }));
     try {
       const r = await apiGet(
@@ -427,7 +443,16 @@ export default function Dashboard() {
                     ? ` · +${comparaciones[String(p.id)].mejora_pct}%`
                     : ""}
                 </span>
+              ) : comparaciones[String(p.id)] ? (
+                /* Sin precios reales no se pinta ninguna cuota: solo el aviso. */
+                <span
+                  className="dash-cmp dash-cmp-sin"
+                  title={MOTIVOS_CMP[comparaciones[String(p.id)].motivo] || "Sin cuotas publicadas para este mercado"}
+                >
+                  Sin comparación
+                </span>
               ) : null}
+
             </div>
             <button
               className="dash-share"

@@ -294,3 +294,11 @@
   border-color: rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.04);
 }
+
+/* Sin precios reales: solo el aviso. Nunca se pinta una cuota inventada. */
+.dash-cmp-sin {
+  color: rgba(255, 255, 255, 0.5);
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  font-weight: 600;
+}
