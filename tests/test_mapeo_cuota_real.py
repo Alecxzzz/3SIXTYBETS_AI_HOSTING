@@ -1,9 +1,10 @@
 """
-Pruebas del mapeo pick -> precio del comparador de cuotas.
+Pruebas del mapeo pick -> precio (cuota real que se publica en el pick).
 
-Contexto: el comparador mapea el mercado/seleccion de un pronostico a los
-mercados de odds-api.io para leer el precio de cada casa. Ese mapeo tenia
-tres fallos que mostraban al usuario la cuota de OTRO mercado:
+Contexto: `_precio_en_mercados` traduce el mercado/seleccion de un pronostico
+(que viene en texto libre del catalogo) a los mercados de odds-api.io para
+leer el precio de Bet365. Ese mapeo tenia tres fallos que asignaban al pick
+la cuota de OTRO mercado:
 
 - Ignoraba la mitad del partido: un pick de 2ª mitad se comparaba con el
   mercado de partido completo ("Double Chance" en vez de "Double Chance 2H").
