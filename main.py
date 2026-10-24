@@ -3826,8 +3826,8 @@ FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal principal pedida para /espn-gratis (Stream 1)
-FREE_ESPN_STREAM_PRINCIPAL = "http://190.61.101.11:7050/play/a04g/index.m3u8"
-FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # Stream 2 (se mantiene)
+FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_2/ESPN_2.isml/ESPN_2.m3u8"
+FREE_ESPN_STREAM_URL = "http://45.228.234.9:8000/play/a07r/index.m3u8"  # Stream 2
 # Respaldo extra ya probado: ESPN COLOMBIA
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
 
