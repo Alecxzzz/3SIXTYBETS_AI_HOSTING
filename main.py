@@ -3815,12 +3815,12 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN COLOMBIA + marcador y estadisticas del
-# partido destacado del dia (Tottenham vs Chelsea). Disponible
+# partido destacado del dia (Atlético Madrid vs Deportivo). Disponible
 # solo durante la ventana de 2 horas alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("tottenham", "chelsea")   # equipos del partido destacado
-FREE_ESPN_LEAGUE = "eng.1"                   # Premier League (donde juegan los equipos)
+FREE_ESPN_MATCH = ("atlético madrid", "deportivo")  # equipos del partido destacado
+FREE_ESPN_LEAGUE = "esp.1"                    # LaLiga (donde juegan los equipos)
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
@@ -3830,7 +3830,7 @@ FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream 
 
 
 def _free_espn_buscar_partido():
-    """Busca el partido destacado (Tottenham vs Chelsea) en la agenda de hoy."""
+    """Busca el partido destacado (Atlético Madrid vs Deportivo) en la agenda de hoy."""
     import sports
 
     data = sports.get_sport_games("soccer", FREE_ESPN_LEAGUE)
@@ -3906,7 +3906,7 @@ def free_espn_match():
         "estado": game.get("state"),
         "reloj": detail.get("clock") or game.get("clock") or "",
         "status": detail.get("status") or game.get("status") or "",
-        "liga": detail.get("league") or game.get("league") or "Premier League",
+        "liga": detail.get("league") or game.get("league") or "LaLiga",
         "event_id": str(game.get("id")),
         "teams": teams,
         "suscripcion": {
