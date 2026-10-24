@@ -1528,7 +1528,10 @@ def _backfill_async():
         try:
             reparados = dashboard.backfill_picks_metadata()
             if reparados:
-                print(f"[Dashboard] Picks reparados con equipos/logos: {reparados}", flush=True)
+                print(f"[Dashboard] Picks reparados con equipos/logos (hoy): {reparados}", flush=True)
+            historico = dashboard.backfill_picks_metadata_historico()
+            if historico:
+                print(f"[Dashboard] Picks reparados con equipos/logos (historico): {historico}", flush=True)
         except Exception:
             print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
 

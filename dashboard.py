@@ -3093,6 +3093,58 @@ def backfill_picks_metadata() -> int:
     return reparados
 
 
+def backfill_picks_metadata_historico() -> int:
+    """Repara picks viejos sin nombres/logos usando el detalle historico de ESPN
+    por event_id (no solo partidos de hoy).
+
+    Para cada pick sin home_name o con logo invalido, consulta
+    sports.get_game_detail(sport, event_id) que llama al endpoint /summary de
+    ESPN y devuelve nombres y logos de ambos equipos aunque el partido ya
+    haya finalizado.
+    """
+    import sports as _sports
+
+    viejos = db.picks_sin_equipo() or []
+    if not viejos:
+        return 0
+
+    reparados = 0
+    fallidos = 0
+    for pick in viejos:
+        sport = pick.get("sport")
+        event_id = pick.get("eventId")
+        if not sport or not event_id:
+            fallidos += 1
+            continue
+        try:
+            detalle = _sports.get_game_detail(sport, str(event_id))
+            if detalle.get("error"):
+                fallidos += 1
+                continue
+            teams = detalle.get("teams", [])
+            if len(teams) < 2:
+                fallidos += 1
+                continue
+            home = teams[0]
+            away = teams[1]
+            if db.update_pick_metadata(
+                pick["id"],
+                home.get("name", "?"),
+                away.get("name", "?"),
+                home.get("logo") or None,
+                away.get("logo") or None,
+                detalle.get("league"),
+            ):
+                reparados += 1
+            else:
+                fallidos += 1
+        except Exception as exc:
+            print(f"[Backfill historico] Error pick {pick['id']} event {event_id}: {exc}")
+            fallidos += 1
+    print(f"[Backfill historico] Reparados={reparados} Fallidos={fallidos} Total={len(viejos)}")
+    return reparados
+
+
 def _resolver_deterministico(pick: dict, detail: dict):
     """Resuelve el pick con reglas directas sobre el marcador final (sin IA).
 
