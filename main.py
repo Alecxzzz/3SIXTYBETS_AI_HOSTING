@@ -3972,12 +3972,9 @@ def free_espn_stream(request: Request):
         raise
 
     # --- Candidatos (en orden de preferencia) ---
-    # 1) Stream 1 (190.61.101.11) señal pedida. 2) Stream 2 (admin2, el que
-    # se mantiene). 3) ESPN COLOMBIA. 4) Stream fijo. 5) HTML embed.
     candidatos = [
         (FREE_ESPN_STREAM_PRINCIPAL, None),
         (FREE_ESPN_STREAM_URL, None),
-        (FREE_ESPN_STREAM_ESPN_COLOMBIA, None),
         (url_fija, None),
     ]
     # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
