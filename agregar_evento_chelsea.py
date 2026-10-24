@@ -26,7 +26,7 @@ if existing:
     print(f"[INFO] Evento '{evento['name']}' ya existe (id={existing['id']})")
     # Actualizar el stream
     ok = db.run_query(
-        "UPDATE events SET stream = %s, updated_at = %s WHERE id = %s",
+        "UPDATE events SET stream = %s, created_at = %s WHERE id = %s",
         (evento["stream"], db.now_utc(), existing["id"])
     )
     if ok:
