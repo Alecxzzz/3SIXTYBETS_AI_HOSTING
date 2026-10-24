@@ -3824,9 +3824,11 @@ FREE_ESPN_LEAGUE = "esp.1"                    # LaLiga (donde juegan los equipos
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
-# Señal principal: ESPN COLOMBIA (la que se pide en /espn-gratis)
+# Señal principal pedida para /espn-gratis (Stream 1)
+FREE_ESPN_STREAM_PRINCIPAL = "http://190.61.101.11:7050/play/a04g/index.m3u8"
+FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # Stream 2 (se mantiene)
+# Respaldo extra ya probado: ESPN COLOMBIA
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
-FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream de respaldo
 
 
 def _free_espn_buscar_partido():
@@ -3969,11 +3971,12 @@ def free_espn_stream(request: Request):
         raise
 
     # --- Candidatos (en orden de preferencia) ---
-    # 1) ESPN COLOMBIA (señal pedida para /espn-gratis). 2) Stream principal
-    # (admin2). 3) Stream fijo de respaldo. 4) HTML embed.
+    # 1) Stream 1 (190.61.101.11) señal pedida. 2) Stream 2 (admin2, el que
+    # se mantiene). 3) ESPN COLOMBIA. 4) Stream fijo. 5) HTML embed.
     candidatos = [
-        (FREE_ESPN_STREAM_ESPN_COLOMBIA, None),
+        (FREE_ESPN_STREAM_PRINCIPAL, None),
         (FREE_ESPN_STREAM_URL, None),
+        (FREE_ESPN_STREAM_ESPN_COLOMBIA, None),
         (url_fija, None),
     ]
     # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
@@ -4060,8 +4063,8 @@ def free_espn_stream(request: Request):
             })
 
     if not opciones:
-        # Nada validado ahora mismo: entregar ESPN COLOMBIA de todos modos
-        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_ESPN_COLOMBIA, proxy_base)})
+        # Nada validado ahora mismo: entregar el Stream 1 de todos modos
+        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_PRINCIPAL, proxy_base)})
 
     ahora2 = datetime.now(timezone.utc)
     tiempo_restante = max(0, int((cierre - ahora2).total_seconds())) if cierre else 0
