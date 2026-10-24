@@ -3815,12 +3815,13 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN COLOMBIA + marcador y estadisticas del
-# partido destacado del dia (Atlético Madrid vs Deportivo). Disponible
+# partido destacado del dia (MLB Juego 2: Rays vs Brewers). Disponible
 # solo durante la ventana de 2 horas alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("atlético madrid", "deportivo")  # equipos del partido destacado
-FREE_ESPN_LEAGUE = "esp.1"                    # LaLiga (donde juegan los equipos)
+FREE_ESPN_MATCH = ("tampa bay rays", "milwaukee brewers")  # MLB Juego 2 (id 401908043)
+FREE_ESPN_SPORT = "mlb"                    # deporte del partido destacado
+FREE_ESPN_LEAGUE = "mlb"                    # MLB (ambos equipos del Juego 2)
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
@@ -3832,10 +3833,10 @@ FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8
 
 
 def _free_espn_buscar_partido():
-    """Busca el partido destacado (Atlético Madrid vs Deportivo) en la agenda de hoy."""
+    """Busca el partido destacado (MLB Juego 2: Rays vs Brewers) en la agenda de hoy."""
     import sports
 
-    data = sports.get_sport_games("soccer", FREE_ESPN_LEAGUE)
+    data = sports.get_sport_games(FREE_ESPN_SPORT, FREE_ESPN_LEAGUE)
     busqueda = [t.lower() for t in FREE_ESPN_MATCH]
     for g in data.get("games", []):
         home = (g.get("home") or {}).get("name") or ""
@@ -3880,7 +3881,7 @@ def free_espn_match():
     detail = {}
     try:
         import sports
-        detail = sports.get_game_detail("soccer", str(game.get("id"))) or {}
+        detail = sports.get_game_detail(FREE_ESPN_SPORT, str(game.get("id"))) or {}
     except Exception:
         detail = {}
 
