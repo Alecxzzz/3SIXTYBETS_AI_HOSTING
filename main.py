@@ -2742,8 +2742,12 @@ _HOP = {
 
 def _proxy_base(request: Request) -> str:
     """URL canónica del propio endpoint /hls-proxy (para reescritura de manifests)."""
-    scheme = request.headers.get("x-forwarded-proto", "https")
+    scheme = request.headers.get("x-forwarded-proto")
     host = request.headers.get("host", request.url.netloc)
+    if not scheme:
+        # En produccion siempre hay proxy TLS; en local (dev) hay que respetar
+        # el esquema real o el navegador rechazaria http:// como contenido mixto.
+        scheme = "http" if host.startswith(("localhost", "127.0.0.1")) else "https"
     return f"{scheme}://{host}/hls-proxy"
 
 def _wrap(abs_url: str, proxy_base: str, referer: str | None = None) -> str:
@@ -3810,23 +3814,26 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ============================================================
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
-# Reproductor de ESPN Deportes + marcador y estadisticas del
-# partido destacado del dia (Atlético Madrid vs Real Madrid). Disponible
+# Reproductor de ESPN COLOMBIA + marcador y estadisticas del
+# partido destacado del dia (Tottenham vs Chelsea). Disponible
 # solo durante la ventana de 2 horas alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("atlético madrid", "real madrid")   # equipos del partido destacado
+FREE_ESPN_MATCH = ("tottenham", "chelsea")   # equipos del partido destacado
+FREE_ESPN_LEAGUE = "eng.1"                   # Premier League (donde juegan los equipos)
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
-FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream principal
+# Señal principal: ESPN COLOMBIA (la que se pide en /espn-gratis)
+FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
+FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream de respaldo
 
 
 def _free_espn_buscar_partido():
-    """Busca el partido destacado (Atlético Madrid vs Real Madrid) en la agenda de hoy."""
+    """Busca el partido destacado (Tottenham vs Chelsea) en la agenda de hoy."""
     import sports
 
-    data = sports.get_sport_games("soccer", "esp.1")
+    data = sports.get_sport_games("soccer", FREE_ESPN_LEAGUE)
     busqueda = [t.lower() for t in FREE_ESPN_MATCH]
     for g in data.get("games", []):
         home = (g.get("home") or {}).get("name") or ""
@@ -3899,7 +3906,7 @@ def free_espn_match():
         "estado": game.get("state"),
         "reloj": detail.get("clock") or game.get("clock") or "",
         "status": detail.get("status") or game.get("status") or "",
-        "liga": detail.get("league") or game.get("league") or "LaLiga",
+        "liga": detail.get("league") or game.get("league") or "Premier League",
         "event_id": str(game.get("id")),
         "teams": teams,
         "suscripcion": {
@@ -3961,9 +3968,14 @@ def free_espn_stream(request: Request):
     except HTTPException:
         raise
 
-    # --- Candidatos (fubo18 del partido, en orden de preferencia) ---
-    # 1) Stream principal (admin2). 2) Stream fijo de respaldo. 3) HTML embed
-    candidatos = [(FREE_ESPN_STREAM_URL, None), (url_fija, None)]
+    # --- Candidatos (en orden de preferencia) ---
+    # 1) ESPN COLOMBIA (señal pedida para /espn-gratis). 2) Stream principal
+    # (admin2). 3) Stream fijo de respaldo. 4) HTML embed.
+    candidatos = [
+        (FREE_ESPN_STREAM_ESPN_COLOMBIA, None),
+        (FREE_ESPN_STREAM_URL, None),
+        (url_fija, None),
+    ]
     # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
     candidatos.append((FREE_ESPN_STREAM_EXTRA, None))
 
@@ -3990,6 +4002,11 @@ def free_espn_stream(request: Request):
                     )
                     if m:
                         candidatos.append((m.group(1), page))
+                    else:
+                        # Fallback: extract first .m3u8 URL from playlist response
+                        m2 = re.search(r'(https?://[^ "]+\\.m3u8)', resp.text)
+                        if m2:
+                            candidatos.append((m2.group(1), page))
                 except Exception:
                     pass
 
@@ -4016,6 +4033,11 @@ def free_espn_stream(request: Request):
                             # Avoid duplicate if already added
                             if not any(c[0] == m.group(1) for c in candidatos):
                                 candidatos.append((m.group(1), page))
+                            else:
+                                # Fallback: extract first .m3u8 URL from playlist response
+                                m2 = re.search(r'(https?://[^ "]+\\.m3u8)', resp.text)
+                                if m2 and not any(c[0] == m2.group(1) for c in candidatos):
+                                    candidatos.append((m2.group(1), page))
                     except Exception:
                         pass
     except Exception:
@@ -4038,8 +4060,8 @@ def free_espn_stream(request: Request):
             })
 
     if not opciones:
-        # Nada validado ahora mismo: entregar el stream principal de todos modos
-        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_URL, proxy_base)})
+        # Nada validado ahora mismo: entregar ESPN COLOMBIA de todos modos
+        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_ESPN_COLOMBIA, proxy_base)})
 
     ahora2 = datetime.now(timezone.utc)
     tiempo_restante = max(0, int((cierre - ahora2).total_seconds())) if cierre else 0
