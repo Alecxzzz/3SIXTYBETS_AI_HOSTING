@@ -3822,7 +3822,7 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 FREE_ESPN_MATCH = ("tottenham", "chelsea")   # equipos del partido destacado
 FREE_ESPN_LEAGUE = "eng.1"                   # Premier League (donde juegan los equipos)
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
-FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
+FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal principal: ESPN COLOMBIA (la que se pide en /espn-gratis)
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
