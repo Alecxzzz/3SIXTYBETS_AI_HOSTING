@@ -152,6 +152,23 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
         try:
             d = buscar_completo(p.get("sport") or "soccer", p.get("home_name") or "",
                                 p.get("away_name") or "", fecha, p.get("league"))
+            if not d.get("found") and fecha:
+                # Intentar con fechas adyacentes (caso juegos que cruzan medianoche UTC/ET)
+                try:
+                    from datetime import datetime, timedelta
+                    base = datetime.strptime(fecha, "%Y%m%d")
+                    for delta in (-1, 1):
+                        try:
+                            f2 = (base + timedelta(days=delta)).strftime("%Y%m%d")
+                            d2 = buscar_completo(p.get("sport") or "soccer", p.get("home_name") or "",
+                                                p.get("away_name") or "", f2, p.get("league"))
+                            if d2.get("found"):
+                                d = d2
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[resolve/picks] error buscar {p.get('id')}: {e}")
             sin_datos += 1

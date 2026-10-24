@@ -188,9 +188,26 @@ def resolver_mercado(market_type: str, d: Dict, selection: str, line_value=None)
         r = _over_under(sel, total, lv)
         return _no() if r is None else _ok(r, total, 0.75)
 
-    if mt in ("shots_on_target_home", "tiros a puerta local"):
-        r = _over_under(sel, _f(d.get("home_shots_on_target")), lv)
-        return _no() if r is None else _ok(r, _f(d.get("home_shots_on_target")), 0.75)
+    if mt in ("shots_on_target_home", "tiros a puerta local", "shots_on_target_away", "tiros a puerta visitante"):
+        if mt in ("shots_on_target_home", "tiros a puerta local"):
+            val = _f(d.get("home_shots_on_target"))
+        else:
+            val = _f(d.get("away_shots_on_target"))
+        r = _over_under(sel, val, lv)
+        return _no() if r is None else _ok(r, val, 0.75)
+
+    # ---- TIROS (generales) ----
+    if mt in ("shots", "tiros"):
+        hs = _f(d.get("home_shots")); as_ = _f(d.get("away_shots"))
+        total = (hs + as_) if hs is not None and as_ is not None else None
+        r = _over_under(sel, total, lv)
+        return _no() if r is None else _ok(r, total, 0.75)
+    if mt in ("shots_home", "tiros local"):
+        r = _over_under(sel, _f(d.get("home_shots")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("home_shots")), 0.75)
+    if mt in ("shots_away", "tiros visitante"):
+        r = _over_under(sel, _f(d.get("away_shots")), lv)
+        return _no() if r is None else _ok(r, _f(d.get("away_shots")), 0.75)
 
     # ---- ATAJADAS ----
     if mt in ("saves", "atajadas"):

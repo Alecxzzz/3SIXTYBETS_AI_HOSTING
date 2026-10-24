@@ -55,6 +55,11 @@ def _espn_path(sport: str, league: Optional[str]) -> str:
     if s == "nhl" or s == "hockey":
         return "hockey/nhl"
     if s == "tennis":
+        lg = (league or "").lower()
+        if lg in ("wta",):
+            return "tennis/wta"
+        if lg in ("atp", "mens",):
+            return "tennis/atp"
         return "tennis/atp"
     if s == "mma" or s == "ufc":
         return "mma/ufc"
@@ -113,21 +118,73 @@ def _parecido(a: str, b: str) -> bool:
     return bool(pa & pb)
 
 def _evento_coincide(ev: Dict, home: str, away: str) -> bool:
-    comps = (ev.get("competitions") or [{}])[0]
-    nombres = [c.get("team", {}).get("displayName", "") for c in comps.get("competitors", [])]
+    nombres = []
+    # Estructura normal (equipos)
+    comps = ev.get("competitions") or []
+    if comps:
+        for c in (comps[0].get("competitors") or []):
+            team = c.get("team") or c.get("athlete") or {}
+            nombres.append(team.get("displayName", "") or team.get("shortName", ""))
+    # Estructura tennis
+    if not nombres or len([n for n in nombres if n]) < 2:
+        nombres = []
+        for g in (ev.get("groupings") or []):
+            for comp in (g.get("competitions") or []):
+                for c in (comp.get("competitors") or []):
+                    athlete = c.get("athlete") or c.get("team") or {}
+                    nombres.append(athlete.get("displayName", "") or athlete.get("shortName", ""))
+                if len([n for n in nombres if n]) >= 2:
+                    break
+            if len([n for n in nombres if n]) >= 2:
+                break
+    nombres = [n for n in nombres if n]
+    if len(nombres) < 2:
+        return False
     return (any(_parecido(n, home) for n in nombres) and
             any(_parecido(n, away) for n in nombres))
 
 def buscar_partido(sport: str, home: str, away: str,
                    fecha: Optional[str] = None, league: Optional[str] = None) -> Optional[Dict]:
     """Busca un partido por nombres. Escanea las ligas conocidas si no se da una."""
-    ligas = [league] if league else (LIGAS_SOCCER if sport.lower() == "soccer" else [None])
-    for lg in ligas:
-        if not lg:
-            continue
-        for ev in scoreboard(sport, lg, dates=fecha):
-            if _evento_coincide(ev, home, away):
-                return {"event_id": ev.get("id"), "league": lg, "event": ev}
+    s = (sport or "").lower()
+    if s == "tennis":
+        ligas = [league] if league else ["atp", "wta", "tennis"]
+    else:
+        ligas = [league] if league else (LIGAS_SOCCER if s == "soccer" else [None])
+    fechas_a_probar = [fecha] if fecha else [None]
+    if fecha:
+        try:
+            from datetime import datetime, timedelta
+            base = datetime.strptime(fecha, "%Y%m%d")
+            for delta in (-1,1):
+                fechas_a_probar.append((base + timedelta(days=delta)).strftime("%Y%m%d"))
+        except Exception:
+            pass
+        fechas_a_probar.append(None)
+    for f in fechas_a_probar:
+        for lg in ligas:
+            if not lg and s != "tennis":
+                continue
+            try:
+                for ev in scoreboard(s, lg, dates=f):
+                    if _evento_coincide(ev, home, away):
+                        return {"event_id": ev.get("id"), "league": lg or "atp", "event": ev}
+                    # Para tenis, buscar dentro de groupings/competitions
+                    if s == "tennis":
+                        for g in (ev.get("groupings") or []):
+                            for comp in (g.get("competitions") or []):
+                                nombres = []
+                                for c in (comp.get("competitors") or []):
+                                    athlete = c.get("athlete") or c.get("team") or {}
+                                    nombres.append(athlete.get("displayName", "") or athlete.get("shortName", ""))
+                                nombres = [n for n in nombres if n]
+                                if len(nombres) == 2 and any(_parecido(n, home) for n in nombres) and any(_parecido(n, away) for n in nombres):
+                                    # Crear un evento sintetico con esta competencia
+                                    ev_c = dict(ev)
+                                    ev_c["competitions"] = [comp]
+                                    return {"event_id": comp.get("id") or ev.get("id"), "league": lg or "atp", "event": ev_c}
+            except Exception:
+                continue
     return None
 
 # ---------- DATOS COMPLETOS ----------

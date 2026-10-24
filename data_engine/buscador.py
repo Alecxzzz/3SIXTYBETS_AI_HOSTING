@@ -1,5 +1,5 @@
 """
-MOTOR DE BUSQUEDA DE DATOS COMPLETOS (ESPN).
+MOTOR DE BUSQUEDA DE DATOS COMPLETOS (ESPN + FotMob fallback).
 
 Junta todo lo disponible de un partido (marcador, stats de equipo,
 jugadores, eventos, odds) para que la IA se apoye 100% en datos reales.
@@ -10,15 +10,75 @@ from data_engine.espn import datos_completos_completo
 
 def buscar_completo(sport: str, home: str, away: str,
                     fecha: Optional[str] = None, league: Optional[str] = None) -> Dict[str, Any]:
-    """Datos COMPLETOS de un partido desde ESPN."""
+    """Datos COMPLETOS de un partido desde ESPN (con fallback a FotMob)."""
     try:
         d = datos_completos_completo(sport, home, away, fecha, league)
         if d.get("found"):
             d["fuentes_usadas"] = ["espn"]
-        return d
+            return d
     except Exception as e:
-        print(f"[buscador] error: {e}")
-        return {"found": False, "raw": {}, "fuentes_usadas": []}
+        print(f"[buscador] error espn: {e}")
+    # Fallback: FotMob para fútbol
+    try:
+        if (sport or "").lower() in ("soccer", "futbol", "football_soccer"):
+            import fotmob
+            from datetime import datetime
+            # intentar con fecha del partido si viene en formato YYYYMMDD
+            fecha_dt = None
+            if fecha and len(str(fecha)) == 8 and str(fecha).isdigit():
+                try:
+                    fecha_dt = datetime.strptime(str(fecha), "%Y%m%d").date()
+                except Exception:
+                    pass
+            elif fecha:
+                try:
+                    # intentar parsear ISO
+                    fecha_clean = str(fecha)[:10]
+                    fecha_dt = datetime.strptime(fecha_clean, "%Y-%m-%d").date()
+                except Exception:
+                    pass
+            # buscar equipos
+            he = fotmob.buscar_equipo(home)
+            ae = fotmob.buscar_equipo(away)
+            if he and ae:
+                partidos_h = fotmob.ultimos_partidos(he["id"], n=20)
+                for ph in partidos_h:
+                    if ph["home_id"] == ae["id"] or ph["away_id"] == ae["id"]:
+                        if fecha_dt and ph["date"] != fecha_dt.isoformat():
+                            # si hay fecha, intentar coincidir aunque sea aproximado
+                            pass
+                        out = {
+                            "found": True,
+                            "sport": sport,
+                            "league": league,
+                            "home_name": ph["home"],
+                            "away_name": ph["away"],
+                            "home_score": ph["gf"],
+                            "away_score": ph["ga"],
+                            "estado": "post",
+                            "home_corners": None, "away_corners": None,
+                            "home_fouls": None, "away_fouls": None,
+                            "home_yellow": None, "away_yellow": None,
+                            "home_red": None, "away_red": None,
+                            "home_shots": None, "away_shots": None,
+                            "home_shots_on_target": None, "away_shots_on_target": None,
+                            "home_saves": None, "away_saves": None,
+                            "home_possession": None, "away_possession": None,
+                            "total_goals": ph["gf"] + ph["ga"],
+                            "total_corners": None,
+                            "total_fouls": None,
+                            "total_cards": None,
+                            "eventos_clave": [],
+                            "jugadores": [],
+                            "leaders": [],
+                            "odds": [],
+                            "raw": ph,
+                            "fuentes_usadas": ["fotmob"],
+                        }
+                        return out
+    except Exception as e:
+        print(f"[buscador] error fotmob: {e}")
+    return {"found": False, "raw": {}, "fuentes_usadas": []}
 
 
 def contexto_para_ia(d: Dict[str, Any]) -> str:

@@ -59,6 +59,9 @@ def parsear_pick(pick):
         return None
 
     lado = _lado(sel_raw, home, away)
+    # Si la seleccion no apunta a un equipo, intentar con el mercado/titulo
+    if lado is None:
+        lado = _lado(market + " " + titulo, home, away)
 
     # linea over/under: puede venir en el titulo O en la seleccion ('Over 2.5')
     m = re.search(r'(?:mas de|más de|menos de|over|under)\s*([0-9]+(?:[.,][0-9]+)?)',
@@ -149,14 +152,45 @@ def parsear_pick(pick):
             return ("handicap_corners", lado, linea)
         if "1x2" in txt:
             return ("corners_1x2", lado, None)
-        if "mas de" in txt or "más de" in txt or "menos de" in txt:
-            return ("corners", "over" if ("mas de" in txt or "más de" in txt) else "under", linea)
+        if "mas de" in txt or "más de" in txt or "over" in txt:
+            return ("corners", "over", linea)
+        if "menos de" in txt or "under" in txt:
+            return ("corners", "under", linea)
         return ("corners_1x2", lado, None)
 
     # ---- REMATES / TIROS ----
     if "remates" in txt or "tiros" in txt or "shotes" in txt:
         if "porteria" in txt or "puerta" in txt:
+            if "handicap" in txt or "hándicap" in txt:
+                return ("handicap_shots_on_target", lado, linea)
+            if "1x2" in txt and not ("mas de" in txt or "más de" in txt or "menos de" in txt or "over" in txt or "under" in txt):
+                return ("shots_on_target_1x2", lado, None)
+            if "mas de" in txt or "más de" in txt or "over" in txt:
+                if lado:
+                    return ("shots_on_target_home" if lado == "home" else "shots_on_target_away", "over", linea)
+                return ("shots_on_target", "over", linea)
+            if "menos de" in txt or "under" in txt:
+                if lado:
+                    return ("shots_on_target_home" if lado == "home" else "shots_on_target_away", "under", linea)
+                return ("shots_on_target", "under", linea)
+            # Si tiene linea pero no se detecto claro, intentar por equipo
+            if linea is not None and lado:
+                return ("shots_on_target_home" if lado == "home" else "shots_on_target_away", "over" if ("mas de" in txt or "más de" in txt or "over" in sel) else ("under" if ("menos de" in txt or "under" in sel) else "over"), linea)
             return ("shots_on_target_1x2", lado, None)
+        if "handicap" in txt or "hándicap" in txt:
+            return ("handicap_shots", lado, linea)
+        if "1x2" in txt and not ("mas de" in txt or "más de" in txt or "menos de" in txt or "over" in txt or "under" in txt):
+            return ("shots_1x2", lado, None)
+        if "mas de" in txt or "más de" in txt or "over" in txt:
+            if lado:
+                return ("shots_home" if lado == "home" else "shots_away", "over", linea)
+            return ("shots", "over", linea)
+        if "menos de" in txt or "under" in txt:
+            if lado:
+                return ("shots_home" if lado == "home" else "shots_away", "under", linea)
+            return ("shots", "under", linea)
+        if linea is not None and lado:
+            return ("shots_home" if lado == "home" else "shots_away", "over" if ("mas de" in txt or "más de" in txt or "over" in sel) else "under", linea)
         return ("shots_1x2", lado, None)
 
     # ---- FALTAS / TARJETAS ----
