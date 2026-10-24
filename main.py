@@ -3968,6 +3968,32 @@ def free_espn_stream(request: Request):
     candidatos.append((FREE_ESPN_STREAM_EXTRA, None))
 
     try:
+        # 1) Process database events that have a valid stream (any event, not just the hardcoded match)
+        for ev in db.list_events() or []:
+            guardado = ev.get("stream") or ""
+            page = ev.get("referer") or ""
+            if guardado.startswith("http"):
+                candidatos.append((guardado, page))
+            # Also try to extract from referer if it's a valid page
+            if page.startswith("http"):
+                try:
+                    resp = http_requests.get(
+                        page,
+                        headers={
+                            "User-Agent": HLS_USER_AGENT,
+                            "Referer": "https://la18hd.su/",
+                        },
+                        timeout=12,
+                    )
+                    m = re.search(
+                        r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
+                    )
+                    if m:
+                        candidatos.append((m.group(1), page))
+                except Exception:
+                    pass
+
+        # 2) Also check the hardcoded FREE_ESPN_MATCH if needed (avoid duplicates)
         tokens = [t.lower() for t in FREE_ESPN_MATCH]
         for ev in db.list_events() or []:
             nombre = (ev.get("name") or "").lower()
@@ -3987,12 +4013,11 @@ def free_espn_stream(request: Request):
                             r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
                         )
                         if m:
-                            candidatos.append((m.group(1), page))
+                            # Avoid duplicate if already added
+                            if not any(c[0] == m.group(1) for c in candidatos):
+                                candidatos.append((m.group(1), page))
                     except Exception:
                         pass
-                guardado = ev.get("stream") or ""
-                if guardado.startswith("http"):
-                    candidatos.append((guardado, page))
     except Exception:
         pass
 
