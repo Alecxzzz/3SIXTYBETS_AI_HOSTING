@@ -38,8 +38,8 @@ export const channels = [
   {id: 38, name: "EUROSPORT 1", status: "ACTIVO", ads: false, stream: "http://200.115.120.1:8000/play/ca118/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 39, name: "EUROSPORT 2", status: "ACTIVO", ads: false, stream: "http://200.115.120.1:8000/play/ca119/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 14, name: "FOX DEPORTES (ESPAÑOL)", status: "ACTIVO", ads: false, stream: "http://23.237.104.106:8080/USA_FOX_DEPORTES/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
-  {id: 63, name: "FOX SPORT", status: "ACTIVO", ads: false, stream: "http://138.59.177.78:9999/play/a080/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
-  {id: 64, name: "FOX SPORT 2", status: "ACTIVO", ads: false, stream: "http://138.59.177.78:9999/play/a081/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 63, name: "FOX SPORT", status: "ACTIVO", ads: false, stream: "http://138.59.177.78:9999/play/a080/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://logo.clearbit.com/foxsports.com", alternatives: []},
+  {id: 64, name: "FOX SPORT 2", status: "ACTIVO", ads: false, stream: "http://138.59.177.78:9999/play/a081/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://logo.clearbit.com/foxsports.com", alternatives: []},
   {id: 15, name: "FOX SPORTS", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-5a74b8e1e22a61737979c6bf.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 41, name: "FOX SPORTS 2", status: "ACTIVO", ads: false, stream: "http://200.115.120.1:8000/play/ca126/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 16, name: "FOX SPORTS CENTROAMERICA", status: "ACTIVO", ads: false, stream: "http://168.228.44.241:9998/play/a09c/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
@@ -71,8 +71,6 @@ export const channels = [
   {id: 48, name: "UNIVISION", status: "ACTIVO", ads: false, stream: "https://5.ftlly.com/univision/mono.m3u8?token=8f7adfc81324276a4702734417807edd2bf03da9-9d-1788727751-1788709751", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
   {id: 42, name: "USA SPORTS", status: "ACTIVO", ads: false, stream: "https://tvsen3.aynaott.com/dbbcY6NG/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 35, name: "WIN SPORTS", status: "ACTIVO", ads: false, stream: "http://168.228.44.241:9998/play/a03o/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
-  {id: 68, name: "FOX SPORT", status: "ACTIVO", ads: false, stream: "", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://logo.clearbit.com/foxsports.com", alternatives: []},
-  {id: 69, name: "FOX SPORT 2", status: "ACTIVO", ads: false, stream: "", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://logo.clearbit.com/foxsports.com", alternatives: []}
-];
+  ];
 
 export default channels;
