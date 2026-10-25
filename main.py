@@ -4122,3 +4122,34 @@ try:
     print('[AUTO-RESOLVER] Iniciado cada 10 minutos')
 except Exception as e:
     print(f'[AUTO-RESOLVER] No se pudo iniciar: {e}')
+
+
+@app.get("/api/scores/live")
+def api_scores_live():
+    try:
+        import sports
+        out = []
+        for sport in ["soccer", "nfl", "nba", "mlb"]:
+            try:
+                games = sports.get_sport_games(sport, "all") or []
+                for g in games:
+                    try:
+                        if g.get("state") in ("in", "pre") or g.get("live"):
+                            out.append({
+                                "id": g.get("id"),
+                                "sport": sport,
+                                "home": g.get("homeTeam") or g.get("home"),
+                                "away": g.get("awayTeam") or g.get("away"),
+                                "homeScore": g.get("homeScore"),
+                                "awayScore": g.get("awayScore"),
+                                "state": g.get("state"),
+                                "clock": g.get("clock"),
+                                "league": g.get("league")
+                            })
+                    except:
+                        continue
+            except:
+                continue
+        return {"scores": out[:20]}
+    except Exception as e:
+        return {"scores": [], "error": str(e)}
