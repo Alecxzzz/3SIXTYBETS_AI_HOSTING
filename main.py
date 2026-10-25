@@ -3815,13 +3815,13 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN COLOMBIA + marcador y estadisticas del
-# partido destacado del dia (MLB Juego 2: Rays vs Brewers). Disponible
+# partido destacado del dia (El Clásico). Disponible
 # solo durante la ventana de 2 horas alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("tampa bay rays", "milwaukee brewers")  # MLB Juego 2 (id 401908043)
-FREE_ESPN_SPORT = "mlb"                    # deporte del partido destacado
-FREE_ESPN_LEAGUE = "mlb"                    # MLB (ambos equipos del Juego 2)
+FREE_ESPN_MATCH = ("real madrid", "barcelona")  # El Clásico
+FREE_ESPN_SPORT = "soccer"                  # deporte del partido destacado
+FREE_ESPN_LEAGUE = "esp.1"                  # LaLiga
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
