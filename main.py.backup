@@ -1,0 +1,4075 @@
+import copy
+import os
+import re
+import time
+import traceback
+from datetime import datetime, timedelta
+import requests as http_requests
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, RedirectResponse, Response, FileResponse, HTMLResponse
+from pydantic import BaseModel
+
+import db
+import sports
+import transcoder
+import dashboard
+import ipaddress
+import socket
+import threading
+from urllib.parse import urlparse, urljoin, quote
+try:
+    import sports_warming
+except Exception as _sw_err:
+    print(f"[WARN] sports_warming no disponible: {_sw_err}")
+    sports_warming = None
+from engine.search_engine import SearchEngine
+try:
+    from backend.player_stats.player_stats_service import player_stats_service
+except Exception as _pse:
+    print(f"[WARN] player_stats no disponible: {_pse}")
+    player_stats_service = None
+
+try:
+    from ddgs import DDGS
+except ImportError:
+    DDGS = None
+
+# ==============================
+# CONFIGURACION PARA HOSTING
+# ==============================
+# Demian y 365AI corren sobre OpenRouter (365AI puede caer a Groq). No hay
+# proveedores legacy.
+
+app = FastAPI(
+    title="3SIXTYBETS AI WORKSPOT",
+    description="IA deportiva con busqueda web automatica.",
+    version="2.0"
+)
+
+# CORS: permitir el frontend
+frontend_origins = os.getenv(
+    "FRONTEND_ORIGINS",
+    "http://localhost:5173,https://threesixtybets-chat.vercel.app"
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in frontend_origins],
+    # Los endpoints de streaming (/hls-proxy, /tv/cdnlivetv) son publicos y los
+    # consume hls.js desde cualquier dominio del sitio (vercel previews, dominio
+    # propio, etc.). Sin esto, un origen no listado rompe TODOS los canales
+    # dinamicos con manifestLoadError.
+    allow_origin_regex=r"https?://.*",
+    # NOTA de seguridad: allow_credentials=False es intencional. La auth va
+    # por header Authorization (Bearer), NUNCA por cookies, asi que ninguna
+    # llamada legitima necesita credenciales CORS. Con False, un sitio malo
+    # NO puede acompanar credenciales aunque el regex refleje su origen.
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ==============================
+# MOTOR DE DATOS REALES + VERIFICACION (data_engine)
+# ==============================
+# Endpoints: /data/partido, /data/contexto-ia, /search/match, /search/prop
+# Envuelto en try/except: si algo falla, el backend arranca igual.
+try:
+    from data_engine import router as data_engine_router
+    app.include_router(data_engine_router)
+    print("[data_engine] router montado OK")
+except Exception as _de_err:
+    print(f"[WARN] data_engine no disponible: {_de_err}")
+
+# ==============================
+# SEGURIDAD: rate limit y anti-SSRF
+# ==============================
+
+_rate_bucket: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _ip_del_cliente(request: Request) -> str:
+    """IP real del cliente (detras del proxy de Northflank usa X-Forwarded-For)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "desconocida"
+
+
+def _rate_limit(clave: str, max_eventos: int, ventana_s: int):
+    """Limitador simple en memoria (por proceso). Lanza 429 al exceder."""
+    global _rate_bucket
+    ahora = time.time()
+    with _rate_lock:
+        eventos = [t for t in _rate_bucket.get(clave, []) if ahora - t < ventana_s]
+        if len(eventos) >= max_eventos:
+            raise HTTPException(
+                429, "Demasiadas peticiones. Espera unos minutos e intenta de nuevo."
+            )
+        eventos.append(ahora)
+        _rate_bucket[clave] = eventos
+        # Poda barata para que el dict no crezaca sin limite
+        if len(_rate_bucket) > 5000:
+            _rate_bucket = {
+                k: v for k, v in _rate_bucket.items() if v and ahora - v[-1] < ventana_s
+            }
+
+
+_dns_cache: dict = {}
+_dns_lock = threading.Lock()
+
+
+def _url_tiene_host_publico(url: str) -> bool:
+    """True si el host de la URL resuelve SOLO a IPs publicas (anti-SSRF).
+
+    Bloquea localhost, IPs privadas (10.x, 192.168.x, 172.16-31.x), link-local
+    (169.254.x -> metadatos del cloud), loopback, reserved y multicast.
+    Resolucion cacheada 5 min por host para no agregar latencia al proxy HLS.
+    """
+    global _dns_cache
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
+        return False
+    ahora = time.time()
+    with _dns_lock:
+        cacheado = _dns_cache.get(host)
+        if cacheado and ahora - cacheado[1] < 300:
+            return cacheado[0]
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False
+    ok = True
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            ok = False
+            break
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            ok = False
+            break
+    with _dns_lock:
+        _dns_cache[host] = (ok, ahora)
+        if len(_dns_cache) > 1000:
+            _dns_cache = {
+                k: v for k, v in _dns_cache.items() if ahora - v[1] < 600
+            }
+    return ok
+
+
+class Chat(BaseModel):
+    mensaje: str
+    buscar: bool = True
+    modelo: str = "you"
+
+def limpiar_consulta(mensaje: str) -> str:
+    texto = mensaje.strip()
+    texto_lower = texto.lower()
+
+    frases = [
+        "analiza el partido",
+        "analiza partido",
+        "analiza",
+        "partido",
+        "juego",
+        "match",
+        "edge",
+        "apuesta",
+        "pronostico",
+        "pronóstico"
+    ]
+
+    for frase in frases:
+        if texto_lower.startswith(frase):
+            texto = texto[len(frase):].strip()
+            texto_lower = texto.lower()
+
+    return texto if texto else mensaje
+
+# Limite de seguridad para no exceder el TPM (tokens por minuto) del modelo.
+# Groq free/on_demand tiers suelen tener limites bajos (p.ej. 8000 TPM), asi
+# que recortamos el contexto web ANTES de enviarlo, en vez de dejar que la
+# API rechace la peticion por "Request too large".
+MAX_CHARS_CONTEXTO_WEB = int(os.getenv("MAX_CHARS_CONTEXTO_WEB", "3500"))
+MAX_CHARS_POR_RESULTADO = int(os.getenv("MAX_CHARS_POR_RESULTADO", "220"))
+
+def recortar(texto: str, limite: int) -> str:
+    texto = texto or ""
+    if len(texto) <= limite:
+        return texto
+    return texto[:limite].rstrip() + "..."
+
+def buscar_web(mensaje: str, max_resultados: int = 2) -> str:
+    partido = limpiar_consulta(mensaje)
+    search_engine = SearchEngine()
+
+    # Menos consultas y menos resultados por consulta = menos tokens.
+    consultas = [
+        f"{partido} odds betting lines",
+        f"{partido} recent form stats",
+        f"{partido} h2h injuries lineup"
+    ]
+
+    resultados = []
+
+    try:
+        for consulta in consultas:
+            resultados.append(f"\n=== BUSQUEDA WEB: {consulta} ===\n")
+
+            datos_busqueda = search_engine.buscar_ddgs(
+                consulta, cantidad=max_resultados
+            )
+
+            for r in datos_busqueda:
+                titulo = recortar(r.get("title", "Sin titulo"), 100)
+                url = r.get("url", "Sin URL")
+                contenido = recortar(r.get("body", "Sin contenido"), MAX_CHARS_POR_RESULTADO)
+
+                resultados.append(
+                    f"""Titulo: {titulo}
+URL: {url}
+Contenido: {contenido}
+"""
+                )
+
+    except Exception as e:
+        print(f"[busqueda-web] error: {e}", flush=True)
+        return "No se pudo completar la busqueda web en este momento."
+
+    if not resultados:
+        return "No se encontraron resultados web."
+
+    contexto_final = "\n".join(resultados)
+
+    # Tope duro global: pase lo que pase, nunca mandamos mas de esto.
+    if len(contexto_final) > MAX_CHARS_CONTEXTO_WEB:
+        contexto_final = contexto_final[:MAX_CHARS_CONTEXTO_WEB].rstrip() + "\n...(contexto recortado por limite de tokens)"
+
+    return contexto_final
+
+def _norm_txt(t: str) -> str:
+    """Normaliza texto para matching: sin acentos, minusculas, alfanumerico."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9 ]", " ", t.lower())
+
+def _variantes_equipo(equipo: dict) -> list:
+    """Nombres por los que puede aparecer un equipo: full, short y abbr."""
+    variantes = []
+    for clave in ("name", "short_name", "abbr", "displayName", "shortDisplayName"):
+        valor = (equipo or {}).get(clave)
+        if valor:
+            variantes.append(_norm_txt(valor))
+    return [v for v in variantes if v]
+
+
+def _coinciden_ambos_equipos(game: dict, tokens: set) -> bool:
+    """True si el partido encaja con lo que pidio el usuario.
+
+    CASO NORMAL (el que motivo la funcion): el usuario nombra LOS DOS equipos
+    ("dodgers vs orioles"). Sin esto se encontraba el juego Orioles-Yankees (por
+    "orioles") y la IA entregaba un pick de un partido inexistente.
+
+    EXCEPCION NFL/NBA: en estos deportes se nombra casi siempre UN solo equipo
+    ("el spread de broncos"), asi que exigir los dos hacia que 365AI pidiera al
+    usuario el rival que el sistema ya tiene. Aqui se acepta el partido si el
+    equipo nombrado aparece Y, en la jornada, no hay otro juego del mismo equipo
+    que sea mas especifico (o sea: no hay ambiguedad real).
+
+    'es_americano' lo activa solo para deportes donde el calendario diario trae
+    un unico juego por equipo; en futbol se mantiene la exigencia estricta.
+    """
+    local = _variantes_equipo(game.get("home"))
+    visita = _variantes_equipo(game.get("away"))
+    if not local or not visita:
+        return False
+
+    def _tiene(equipo_variantes):
+        return any(
+            any(t in variante for t in tokens) or variante in tokens
+            for variante in equipo_variantes
+        )
+
+    coincide_local = _tiene(local)
+    coincide_visita = _tiene(visita)
+
+    if coincide_local and coincide_visita:
+        return True
+    # Un solo equipo: solo vale en deportes de partido unico por jornada.
+    # OJO: 'game' es un DICT, asi que la bandera se lee con .get(). Con getattr()
+    # sobre un dict sale siempre el default y la excepcion nunca se aplicaba
+    # (bug real: "el spread de broncos" seguia pidiendo el rival).
+    return bool(game.get("_match_unico") and (coincide_local or coincide_visita))
+
+
+def contexto_espn(mensaje: str) -> str:
+    """Busca el partido del mensaje en ESPN y devuelve estadisticas reales.
+
+    Es la base de datos de estadisticas que usan las dos IAs (Demian y 365AI):
+    estado, cuotas, record, ultimos 5 partidos de cada equipo y stats del juego.
+    Nunca lanza excepcion: devuelve '' si no hay datos.
+    """
+    try:
+        import sports
+
+        norm_msg = _norm_txt(mensaje)
+        tokens = {t for t in norm_msg.split() if len(t) >= 4}
+        if not tokens:
+            return ""
+
+        mejor, mejor_score, mejor_sport = None, 0, None
+        # Deportes con UN solo partido por equipo y jornada. En estos el usuario
+        # nombra un unico equipo ("el spread de broncos") y exigir los dos
+        # provocaba que la IA pidiera un rival que el sistema ya tenia.
+        _UNICO_POR_EQUIPO = ("nfl", "nba", "mlb")
+        for sport in sports.SPORTS:
+            try:
+                data = sports.get_sport_games(sport)
+            except Exception:
+                continue
+            juegos = data.get("games", [])
+            for g in juegos:
+                nombre = _norm_txt(g.get("name", ""))
+                if not nombre:
+                    continue
+                score = sum(1 for t in tokens if t in nombre)
+                if score > mejor_score:
+                    mejor, mejor_score, mejor_sport = g, score, sport
+            # Marca los partidos de estos deportes como "unico por equipo".
+            # Solo si el equipo NO aparece en dos juegos de la misma jornada:
+            # si aparece en dos, hay ambiguedad real y se exige los dos equipos.
+            if sport in _UNICO_POR_EQUIPO and juegos:
+                por_equipo = {}
+                for g in juegos:
+                    for lado in ("home", "away"):
+                        for v in _variantes_equipo(g.get(lado)):
+                            por_equipo.setdefault(v, []).append(g)
+                for g in juegos:
+                    claves = _variantes_equipo(g.get("home")) + _variantes_equipo(g.get("away"))
+                    g["_match_unico"] = all(len(por_equipo.get(k, [])) <= 1 for k in claves)
+
+        if not mejor or mejor_score < 1:
+            return ""
+
+        # REGLA CRITICA 2: NUNCA dar un pick de un partido ya empezado o
+        # terminado. Antes se aceptaba cualquiera y se recommenia apostar sobre
+        # un juego que ya se habia jugado (ESPN lo marcaba "post"/"Final").
+        # Si el usuario lo pide explicitamente, se informa el resultado en vez
+        # de inventar una apuesta.
+        estado = (mejor.get("state") or "").strip().lower()
+        if estado and estado != "pre":
+            return (
+                "AVISO: ESE PARTIDO YA NO ESTA POR JUGARSE.\n"
+                f"Partido: {mejor.get('name')}\n"
+                f"Estado: {mejor.get('status') or estado}\n"
+                "No se genera pick porque apostar sobre un partido ya "
+                "iniciado o terminado no tiene sentido. Si quieres, pregunta "
+                "por otro partido de la agenda de hoy."
+            )
+
+        # REGLA CRITICA: el partido debe implicar a LOS DOS equipos que pidio
+        # el usuario. Antes solo se exigia 1 coincidencia, asi que al pedir
+        # "dodgers vs orioles" se aceptaba el juego Orioles-Yankees (coincidia
+        # "orioles") y la IA analizaba un partido que no era el solicitado,
+        # inventando la equivalencia. Un pick sobre un partido inexistente es
+        # peor que no dar pick.
+        if not _coinciden_ambos_equipos(mejor, tokens):
+            return (
+                "NO SE ENCONTRO EL PARTIDO EXACTO QUE PIDISTE. Los datos "
+                "disponibles son de otro partido, asi que NO se usan para no "
+                "darte un analisis equivocado. Pregunta por un partido que "
+                "esté en la agenda de hoy."
+            )
+
+        lineas = [
+            f"Partido encontrado en ESPN: {mejor.get('name')}",
+            f"Liga: {mejor.get('league') or '-'} | Fecha: {mejor.get('date')} | "
+            f"Estado: {mejor.get('state')} | {mejor.get('status') or ''} {mejor.get('clock') or ''}".rstrip(),
+        ]
+        odds = mejor.get("odds") or {}
+        if odds.get("details") or odds.get("over_under") or odds.get("home_odds"):
+            lineas.append(
+                f"Cuotas ESPN: linea={odds.get('details') or 'N/A'}, "
+                f"total={odds.get('over_under') or 'N/A'}, "
+                f"ML local={odds.get('home_odds') or 'N/A'}, "
+                f"ML visitante={odds.get('away_odds') or 'N/A'}"
+            )
+
+        try:
+            detail = sports.get_game_detail(mejor_sport, mejor["id"])
+        except Exception:
+            detail = {}
+
+        for t in (detail.get("teams") or []):
+            nombre = t.get("name") or "?"
+            records = ", ".join(r for r in (t.get("records") or []) if r) or "N/A"
+            lineas.append(f"\n{nombre} (record: {records})")
+            for s in (t.get("statistics") or [])[:8]:
+                if s.get("displayValue"):
+                    lineas.append(f"  - {s.get('name')}: {s.get('displayValue')}")
+
+            # Los partidos recientes se procesan aqui (no se pasan crudos) porque
+            # "Rays 6 @ Yankees 1" es ambiguo y el modelo lo interpretaba mal:
+            # tomaba el marcador del rival como propio y terminaba inventando
+            # promedios. Se entrega YA SEPARADO (anotados/recibidos/total) y con
+            # los promedios calculados, para que no tenga nada que deducir.
+            partidos = []
+            for r in (t.get("recent_games") or [])[:5]:
+                a = r.get("away") or {}
+                h = r.get("home") or {}
+                a_nombre = a.get("name") or "?"
+                h_nombre = h.get("name") or "?"
+                a_s = a.get("score")
+                h_s = h.get("score")
+                if a_s is None or h_s is None:
+                    continue
+                try:
+                    a_s, h_s = int(a_s), int(h_s)
+                except (TypeError, ValueError):
+                    continue
+                es_local = h_nombre == nombre
+                propios = h_s if es_local else a_s
+                rival = a_nombre if es_local else h_nombre
+                condicion = "en casa" if es_local else "fuera de casa"
+                partidos.append((rival, propios, h_s + a_s, condicion))
+
+            if partidos:
+                for rival, propios, total, condicion in partidos:
+                    lineas.append(
+                        f"  - vs {rival} ({condicion}): {nombre} anoto "
+                        f"{propios}, total del partido {total}"
+                    )
+                prom_pro = round(sum(p[1] for p in partidos) / len(partidos), 1)
+                prom_tot = round(sum(p[2] for p in partidos) / len(partidos), 1)
+                lineas.append(
+                    f"  PROMEDIO {nombre} (ultimos {len(partidos)}): "
+                    f"anota {prom_pro}, partidos con {prom_tot} carreras en total"
+                )
+
+        if detail.get("head_to_head"):
+            try:
+                h2h = detail["head_to_head"]
+                if isinstance(h2h, list) and h2h:
+                    lineas.append("\nHead-to-head reciente (ESPN):")
+                    for m in h2h[:3]:
+                        lineas.append(f"  - {str(m)[:160]}")
+            except Exception:
+                pass
+
+        # PROMEDIOS de corners/tarjetas/faltas por equipo (cadena FotMob ->
+        # ESPN). Antes el contexto de la conversacion solo traia goles y H2H,
+        # asi que la IA razonaba sobre corners de memoria. Con estos numeros
+        # puede contrastar una linea de mercado contra la media real.
+        try:
+            from backend.apuestas.fotmob_stats import contexto_para_ia
+
+            m = re.search(r"(.+?)\s+vs\.?\s+(.+)", mensaje or "", re.I)
+            if m:
+                extra = contexto_para_ia(m.group(1).strip(), m.group(2).strip())
+                if extra:
+                    lineas.append(extra)
+        except Exception:
+            pass
+
+        if not lineas:
+            return ""
+        return "\n".join(lineas)
+    except Exception as exc:
+        print(f"[ESPN-contexto] error: {exc}", flush=True)
+        return ""
+
+@app.get("/", response_class=PlainTextResponse)
+def inicio():
+    return "Test"
+
+@app.get("/models")
+def listar_modelos():
+    """Lista las IAs disponibles en el backend (para que el frontend las seleccione)."""
+    from ai.model import modelos_disponibles
+    return {"modelos": modelos_disponibles()}
+
+def get_current_user_optional(authorization: str = Header(None)):
+    """Igual que get_current_user pero sin fallar: None si no hay sesion."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization[7:].strip()
+    return db.get_user_by_token(token)  # None si el token es invalido/expire
+
+# ---- Token de conversacion de chat (anti-abuso de la IA) ----
+#
+# /chat SOLO responde con un token de conversacion valido. El token se emite
+# en /chat/iniciar (requiere sesion valida) y expira a los CHAT_CONV_TTL_S de
+# INACTIVIDAD: cada mensaje lo renueva, asi que dura "hasta que el usuario
+# deja de usarlo". Evita que scripts externos golpeen /chat directo (el costo
+# de la IA es dinero real) sin afectar el flujo normal del frontend.
+
+import secrets as _secrets
+import hmac as _hmac
+import hashlib as _hashlib
+import base64 as _b64
+
+CHAT_CONV_TTL_S = 30 * 60   # 30 min de inactividad
+
+# El token de conversacion se firma con HMAC en vez de guardarse en memoria.
+# Motivo: Northflank corre VARIAS instancias del backend. Con un dict en
+# memoria, /chat/iniciar podia caer en la instancia A y /chat en la B, donde el
+# token no existe -> 403 "Conversacion expirada o invalida" aunque acabase de
+# emitirse. Un token autocontenido se valida igual en cualquier instancia.
+_CHAT_SECRET = (
+    os.getenv("CHAT_CONV_SECRET")
+    or os.getenv("JWT_SECRET")
+    or os.getenv("SECRET_KEY")
+    or _secrets.token_hex(32)   # fallback: valido mientras el proceso no reinicie
+)
+# Si el proceso se reinicia y no hay secret fijo, los tokens firmados con el
+# secret aleatorio dejan de validar. Por eso avisamos en los logs.
+if not any(
+    os.getenv(k) for k in ("CHAT_CONV_SECRET", "JWT_SECRET", "SECRET_KEY")
+):
+    print(
+        "[WARN] CHAT_CONV_SECRET no configurado: se genera uno aleatorio. "
+        "Si Northflank corre mas de una instancia o reinicia seguido, "
+        "define CHAT_CONV_SECRET en el panel para que los tokens sobrevivan.",
+        flush=True,
+    )
+
+
+def _chat_conv_firmar(user_id: str | None) -> str:
+    """Token firmado y autocontenido: <usuario>.<emitido>.<firma> en base64url.
+
+    La firma va en base64url (no en crudo) porque un digest HMAC puede contener
+    el byte 0x2E ('.') y romperia el split al verificar.
+    """
+    usuario = (user_id or "anon").encode("utf-8")
+    emitido = str(int(time.time())).encode("ascii")
+    firma = _hmac.new(
+        _CHAT_SECRET.encode("utf-8"),
+        usuario + b"." + emitido,
+        _hashlib.sha256,
+    ).digest()
+    firma_b64 = _b64.urlsafe_b64encode(firma).decode("ascii").rstrip("=")
+    crudo = usuario + b"." + emitido + b"." + firma_b64.encode("ascii")
+    return _b64.urlsafe_b64encode(crudo).decode("ascii").rstrip("=")
+
+
+def _chat_conv_verificar(token: str, user_id: str | None) -> bool:
+    """Valida firma y vigencia. No toca memoria: funciona en cualquier instancia."""
+    if not token:
+        return False
+
+    try:
+        padding = "=" * (-len(token) % 4)
+        crudo = _b64.urlsafe_b64decode(token + padding)
+        usuario, emitido, firma_b64 = crudo.split(b".")
+        # firma_b64 son bytes: el padding debe ser bytes o el concat falla.
+        firma = _b64.urlsafe_b64decode(firma_b64 + b"=" * (-len(firma_b64) % 4))
+    except Exception:
+        return False
+
+    esperado = _hmac.new(
+        _CHAT_SECRET.encode("utf-8"),
+        usuario + b"." + emitido,
+        _hashlib.sha256,
+    ).digest()
+    if not _hmac.compare_digest(firma, esperado):
+        return False
+
+    try:
+        edad = time.time() - int(emitido)
+    except (TypeError, ValueError):
+        return False
+    if edad < 0 or edad >= CHAT_CONV_TTL_S:
+        return False
+
+    # El token queda amarrado al usuario que lo inicio (si lo hubo).
+    if usuario != b"anon" and user_id and usuario.decode("utf-8") != user_id:
+        return False
+
+    return True
+
+
+def _chat_conv_crear(user_id: str | None) -> str:
+    """Emite un token firmado (sin estado)."""
+    return _chat_conv_firmar(user_id)
+
+
+def _chat_conv_validar(token: str | None, user_id: str | None) -> bool:
+    """True si el token firmado es valido y sigue vigente.
+
+    El TTL deslizante ya no necesita memoria: cada mensaje valido reemite su
+    token al frontend, que lo renueva. Aqui solo se comprueba firma y edad.
+    """
+    return _chat_conv_verificar(token or "", user_id)
+
+
+@app.post("/chat/iniciar")
+def chat_iniciar(request: Request, user=Depends(get_current_user_optional)):
+    """Emite un token de conversacion para usar /chat (solo frontend).
+
+    Con sesion valida: 20 tokens/hora (cambio de conversacion normal).
+    Invitado: 3/hora por IP (el chat invitado existe pero cuesta; un script
+    no puede farmear tokens). El token expira a los 30 min de inactividad.
+    """
+    _rate_limit(f"chatini:{_ip_del_cliente(request)}", 20, 3600)
+    return {
+        "conv_token": _chat_conv_crear(user["id"] if user else None),
+        "ttl_s": CHAT_CONV_TTL_S,
+    }
+
+@app.get("/debug/gemini")
+def debug_gemini():
+    """Endpoint obsoleto. Se conserva para que los clientes viejos no den 404."""
+    return {"ok": False, "motivo": "Gemini fue eliminado del proyecto"}
+
+
+def _responder_groq(mensaje: str, contexto: str = "", es_partido: bool = False):
+    """Responde con Groq (365AI). None si no hay key o no contesta.
+
+    Unico motor tras eliminar Gemini: por eso recorre TODOS los modelos
+    disponibles de la cuenta en vez de quedarse con el primero.
+    """
+    try:
+        from ai.ia36 import (
+            GROQ_API_KEY,
+            obtener_modelos_disponibles,
+            procesar_36ai,
+            responder_conversacion_36ai,
+        )
+        from engine.prompt_builder import construir_prompt_conversacional
+
+        if not GROQ_API_KEY:
+            return None
+
+        if es_partido:
+            respuesta = procesar_36ai(
+                mensaje + (f"\n\nDATOS REALES DEL PARTIDO:\n{contexto}" if contexto else "")
+            )
+        else:
+            respuesta = responder_conversacion_36ai(
+                mensaje, construir_prompt_conversacional("365AI")
+            )
+
+        if respuesta and str(respuesta).strip():
+            return respuesta.replace("*", "").replace("#", "")
+
+        # Sin respuesta: se informa el motivo real para poder diagnosticarlo.
+        modelos = obtener_modelos_disponibles() or ["(ninguno)"]
+        print(
+            f"[chat/groq] sin respuesta. Modelos en la cuenta: {modelos}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[chat/groq] fallo: {exc}", flush=True)
+    return None
+
+
+@app.post("/chat", response_class=PlainTextResponse)
+def chat(request: Request, data: Chat,
+         x_chat_token: str | None = Header(None, alias="X-Chat-Token"),
+         user=Depends(get_current_user_optional)):
+    # SOLO con token de conversacion vigente (emitido en /chat/iniciar).
+    # Amarrado a la sesion que lo inicio; expira por inactividad.
+    if not _chat_conv_validar(x_chat_token, user["id"] if user else None):
+        raise HTTPException(
+            403,
+            "Conversacion expirada o invalida. Reinicia el chat (el frontend lo hace solo).",
+        )
+    # Anti abuso: la IA cuesta dinero real. Invitados 10/hora por IP;
+    # usuarios 30/hora (ademas del limite freemium de mensajes de abajo).
+    try:
+        _rate_limit(f"chat:{_ip_del_cliente(request)}", 10, 3600)
+    except HTTPException:
+        raise
+    # Chat freemium: tambien bloquear la generacion de respuesta si el usuario
+    # gratuito ya uso su limite (defensa en profundidad).
+    if user and not db.es_premium_row(user):
+        usados = db.count_user_messages(user["id"])
+        if usados >= CHAT_GRATIS_MENSAJES:
+            raise HTTPException(
+                402,
+                "Limite gratuito alcanzado. Desbloquea Premium para seguir "
+                "charlando con la IA.",
+            )
+    modelo_id = (data.modelo or "you").strip().lower()
+    # MEMORIA DE CONVERSACION: si hay sesion, se inyecta el historial reciente
+    # (24 h, ultimos 10 mensajes) para que AMBAS IAs recuerden el contexto.
+    bloque_memoria = ""
+    if user:
+        try:
+            recientes = db.list_messages(user["id"])[-11:]
+            # El frontend guarda el mensaje actual ANTES de llamar a /chat:
+            # se excluye de la memoria para no duplicarlo.
+            if recientes and recientes[-1]["role"] == "user" and (recientes[-1].get("text") or "").strip() == (data.mensaje or "").strip():
+                recientes = recientes[:-1]
+            lineas = []
+            for m in recientes[-10:]:
+                rol = "Usuario" if m["role"] == "user" else "IA"
+                texto = (m.get("text") or "").replace("\n", " ")[:200]
+                if texto:
+                    lineas.append(f"{rol}: {texto}")
+            if lineas:
+                bloque_memoria = (
+                    "\n\nCONVERSACION PREVIA (memoria; continua de forma natural "
+                    "teniendo en cuenta este contexto):\n" + "\n".join(lineas) + "\n\n"
+                )
+        except Exception as exc:
+            print(f"[Chat-memoria] error: {exc}", flush=True)
+    # Contexto ESPN (estadisticas reales) compartido por las dos IAs.
+    # Solo se busca cuando el mensaje parece de un partido: evita escanear
+    # todos los scoreboards de ESPN en saludos/preguntas generales.
+    msg_norm = (data.mensaje or "").strip().lower()
+    parece_partido = "vs" in msg_norm or len(msg_norm.split()) >= 3
+    ctx_espn = ""
+    if parece_partido:
+        try:
+            ctx_espn = contexto_espn(data.mensaje)
+        except Exception:
+            ctx_espn = ""
+    bloque_espn = (
+        f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
+        if ctx_espn else ""
+    )
+    # Investigacion profunda del partido (competicion, motivacion, forma,
+    # H2H y noticias) desde fuente oficial. Impide que la IA se invente que
+    # un jugador juega en un equipo donde no juega (bug real: "Texas Rangers
+    # (Tyler Mahle)", cuando Mahle esta en Atlanta Braves) y le da el
+    # contexto de POR QUE importa el partido.
+    bloque_verif = ""
+    if parece_partido:
+        try:
+            from ai.verificacion import construir_investigacion
+            bloque_verif = construir_investigacion(data.mensaje)
+        except Exception as exc:
+            bloque_verif = ""
+            print(f"[Chat-investigacion] no disponible: {exc}", flush=True)
+    # "groq" es el id que usa el frontend para la IA -> ahora corre 365AI
+    fallo_365 = False
+    if modelo_id in ("36ai", "36", "ia36", "groq"):
+        from ai.ia36 import procesar_36ai
+        # procesar_36ai clasifica solo: conversación -> respuesta natural,
+        # partido -> análisis agéntico con formato EDGE.
+        # Se inyectan las estadisticas reales de ESPN como base del análisis.
+        # OJO: no se le pasa bloque_verif aqui. analizar_36ai ya inyecta la
+        # verificacion por su cuenta; pasarsela dos veces duplicaria el
+        # contexto y las alertas de plantilla en el prompt.
+        respuesta_36 = procesar_36ai(bloque_memoria + data.mensaje + bloque_espn)
+        if respuesta_36 and str(respuesta_36).strip():
+            return respuesta_36
+        # 365AI (Groq) se queda sin respuesta tras agotar sus reintentos y
+        # modelos. Sin Gemini ya no hay segundo motor: se avisa con honestidad
+        # en vez de inventar una respuesta o colgar la peticion.
+        fallo_365 = True
+        if fallo_365:
+            return (
+                "365AI esta saturada en este momento (limite de peticiones del "
+                "proveedor). Espera unos segundos e intenta de nuevo."
+            )
+
+    if modelo_id in ("gemini", "google", "googleai"):
+        # Gemini se elimino del proyecto. Si un cliente guardado lo pide, se
+        # cae a 365AI en vez de devolver un error seco.
+        return (
+            "El modelo Gemini ya no esta disponible. Usa '365AI Tipster' o "
+            "'Demian tipster' en el selector de modelo."
+        )
+
+    from ai.model import DEMIAN_API_KEY
+
+    if not DEMIAN_API_KEY:
+        # Sin key de Demian, 365AI es el relevo para no dejar el chat mudo.
+        alternativa = _responder_groq(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=parece_partido,
+        )
+        if alternativa:
+            return alternativa
+        if fallo_365:
+            return (
+                "ERROR: 365AI no respondio (saturada o sin respuesta) y tampoco hay "
+                "DEMIAN_AI_API_KEY configurada para Demian. Revisa las API keys en Northflank."
+            )
+        return (
+            "ERROR: Falta DEMIAN_AI_API_KEY (OpenRouter) para Demian.\n"
+            "En Northflank agrega la clave de OpenRouter y la variable DEMIAN_AI_MODEL."
+        )
+
+    # Demian (OpenRouter): clasificar para diferenciar conversación de análisis.
+    # Usamos el clasificador de 365AI (una llamada corta) para decidir.
+    # Ruido sin palabras reales ("..", "??", "123"): NUNCA es analisis de
+    # partido (bug real: '..' disparaba el analisis de los partidos de hoy).
+    if re.search(r"[a-záéíóúüñ]{2,}", (data.mensaje or "").lower()):
+        try:
+            from ai.ia36 import clasificar_36ai
+            tipo = clasificar_36ai(data.mensaje)
+        except Exception:
+            tipo = "SPORTS_MATCH"  # si falla la clasificación, comportamiento anterior
+    else:
+        tipo = "CONVERSACION"
+
+    if tipo != "SPORTS_MATCH":
+        # Modo conversación: sin formato EDGE, respuesta natural de asistente.
+        from engine.prompt_builder import construir_prompt_conversacional
+        from ai.model import generar_respuesta_demian
+
+        respuesta = generar_respuesta_demian(
+            construir_prompt_conversacional("Demian tipster"),
+            bloque_memoria + data.mensaje,
+        )
+        if not respuesta:
+            # Demian (OpenRouter) no respondio: 365AI es el relevo.
+            alternativa = _responder_groq(
+                bloque_memoria + data.mensaje,
+                contexto=ctx_espn,
+                es_partido=parece_partido,
+            )
+            if alternativa:
+                return alternativa
+            return "Demian no pudo responder en este momento. Intenta de nuevo en unos segundos."
+        return respuesta.replace("*", "").replace("#", "")
+
+    # Modo análisis de partido: reglas EDGE + búsqueda web (comportamiento anterior).
+    reglas = """
+Eres 3SIXTYBETS AI WORKSPOT - Analista cuantitativo de apuestas deportivas.
+
+═══════════════════════════════════════════════════════════════════════════════
+🎯 METODOLOGIA DE RAZONAMIENTO
+═══════════════════════════════════════════════════════════════════════════════
+
+PASO 1: EVIDENCIA DISPONIBLE
+- Enumera los datos que SÍ tienes (cuotas reales, forma reciente, H2H, lesiones,
+  rendimiento, alineaciones probables) como números concretos, SIN nombrar
+  sitios web ni fuentes: preséntalos como análisis propio.
+- ¿Qué NO aparece? (xG, modelos probabilísticos)
+
+PASO 2: ANÁLISIS CUANTITATIVO
+- Forma reciente: últimos 10 partidos (goles, corneres, tarjetas anotados/recibidos)
+- Ritmo ofensivo/defensivo: promedio goles, corneres, tiros, tarjetas por partido
+- Tendencia: ¿va en alza o baja?
+- Contexto: lesiones, rotaciones, importancia del partido, conferencia de prensa, motivación, clima, localía, rivalidad, arbitraje
+
+PASO 3: EVALUACIÓN DE MERCADO
+- Cuota implícita = probabilidad según el mercado
+- ¿Es realista la cuota vs el rendimiento real?
+- Balance: ¿vale la pena el riesgo vs la ganancia?
+
+PASO 4: DECISIÓN CON CONFIANZA
+- Si confianza >= 65%: pick recomendado
+- Si confianza 50-65%: doble revisar antes
+- NUNCA respondas "SIN PICK" ni digas que no hay pick.
+- Si los datos no alcanzan para un mercado, NO te rindas: VUELVE A BUSCAR con
+  buscar_web y buscar_cuotas usando consultas distintas (alineaciones, forma
+  reciente, cuotas 1x2, corners promedio, H2H, lesiones) y CAMBIA a un mercado
+  para el que SI tengas datos reales (doble oportunidad, under bajo, handicap
+  amplio, over pequeño), bajandole al stake
+- PROHIBIDO INVENTAR datos o estadisticas que no esten en la informacion entregada: usa SOLO numeros reales
+- Si falta un dato (alineaciones, xG, corners), mencionarlo solo en CONSIDERACIONES y bajar la confianza, pero SIEMPRE entregar el pick
+
+═══════════════════════════════════════════════════════════════════════════════
+📊 TIPOS DE PICKS - FÚTBOL
+═══════════════════════════════════════════════════════════════════════════════
+
+VARÍA ENTRE ESTOS (NO SIEMPRE LO MISMO):
+Fútbol:
+- `1x2`, ya sea equipo A o B
+- `over de goles`, con mínimo de `1.25` goles dependiendo la cuota
+- `DOBLE OPORTUNIDAD` (1X, X2, 12, 21)
+- `TOTAL TIROS DE EQUINA, MINIMO 7.5 CORNERS CUOTA MINIMA 1.25`
+- `TOTAL TIROS DE ESQUINA`, equipo a o b, con mínimo recomendado de `3.5`
+- `primera mitad tiros de esquina`, con mínimo recomendado de `3.5`
+- `AMBOS EQUIPOS +4 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TIROS DE ESQUINA`, `SI`, `NO`
+- `AMBOS EQUIPOS +1 TARJETAS CADA UNO`, `SI`, `NO`
+- `AMBOS EQUIPOS +2 TARJETAS CADA UNO`, `SI`, `NO`
+- `ambos marcan`
+- `apuesta sin empate`
+- `handicap europeo o asiático` para equipo A o B:
+  - mínimo positivo: `+3.5`
+  - mínimo negativo: `-2.5`
+- `equipo A total de goles`, mínimo `0.5` goles over
+- `equipo B total de goles`, mínimo `0.5` goles over
+- `multigoles`
+- `equipo A gana cualquier mitad` (`SI`, `NO`)
+- `equipo B gana cualquier mitad` (`SI`, `NO`)
+- `cualquier equipo gana`
+- `ambos equipos marcan o 2.5 goles`
+- `TOTAL FUERAS DE JUEGO`, equipo A o B, mínimo recomendado `2.5`
+- `tiros a puerta del jugador`, mínimo `0.5` o `1.5`
+- `tiros en general del jugador`
+- `jugador que marca o asiste`
+- `over de tarjetas`
+- `goleador en cualquier momento`
+- `equipo A o B gana la primera mitad`
+- Props jugadores
+- `UNDER/OVER DE TIROS GENERALES`, equipo A o B
+- `UNDER/OVER DE TIROS A PUERTA`, equipo A o B
+- `TOTAL DE FALTAS`, equipo A o B
+- `UNDER/OVER DE TARJETAS`, equipo A o B
+
+NBA:
+- `Ganador (inc. prórroga)`
+- `handicap`:
+  - mínimo positivo: `+25.5`
+  - mínimo negativo: `-1`
+- `total de puntos (incl. prórroga)`, O SIEMPRE USA EL UNDER MAS BAJO DEL PARTIDO COMO PRIORIDAD, EJEMPLO: SI EL UNDER MAS BAJO ES 210.5, USA ESE, NO 220.5
+- `total de puntos del equipo A`
+- `total de puntos del equipo B`
+- `mínimo de puntos del jugador`
+- `mínimo de rebotes del jugador`
+- `mínimo de asistencias del jugador`
+- `mínimo de triples anotados del jugador`
+- `mínimo puntos+rebotes del jugador`
+- `mínimo puntos+asistencias del jugador`
+- `mínimo asistencias+rebotes del jugador`
+- `mínimo asistencias+puntos del jugador`
+- `mínimo de puntos+rebotes+asistencias del jugador`
+- `jugador hace un doble-doble` (`si`, `no`)
+- `jugador hace un triple-doble` (`si`, `no`)
+- `ambos equipos anotarán 100 puntos` (`si`, `no`)
+- `ambos equipos anotarán 110 puntos` (`si`, `no`)
+- `ambos equipos anotarán OVER 100 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán OVER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `ambos equipos anotarán UNDER 110 puntos Y EQUIPO A O B GANA` (`si`, `no`)
+- `total asistencias del equipo A o B`
+- `total robos del equipo A o B`
+- `total triples del equipo A o B`
+- `total rebotes del equipo A o B`
+- `1er cuarto total de puntos`
+- `equipo A o B gana la primera mitad`
+- `carrera a 10 puntos`, equipo A o B
+- `carrera a 20 puntos`, equipo A o B
+- `PRIMERA MITAD - TOTAL DE PUNTOS`
+- `PRIMERA MITAD - EQUIPO A O B TOTAL DE PUNTOS`
+- `PRIMER CUARTO TOTAL DE PUNTOS`
+- `PRIMER CUARTO - HANDICAP`
+
+
+**MLB:**
+* Ganador incl extra innings
+* Totales incl extra innings
+* Handicap incl extra innings (positivo o negativo)
+* Ganador y total incl extra innings
+* Hits más de/menos de incl extra innings
+* Equipo A hits más de/menos de incl extra innings
+* Equipo B hits más de/menos de incl extra innings
+* Bases totales por jugador incl extra innings
+* Hits totales del jugador incl extra innings
+* HR totales del jugador incl extra innings
+* SO (Strikeouts) del jugador incl extra innings
+* Equipo A totales de runs over/under
+* Equipo B totales de runs over/under
+* Hits + Carreras + RBIs del jugador incl extra innings
+* Lanzador total hits permitidos incl extra innings
+
+**TENIS:**
+
+* Ganador
+* Juegos
+* Sets
+* Hándicap
+* Primer set ganador
+* Segundo set ganador
+* Handicap de sets
+* Handicap de juego
+* Total juegos *(priorizar siempre el under más bajo del mercado)*
+* Marcador exacto
+* Jugador A total juegos
+* Jugador B total juegos
+* Gana un set jugador A
+* Gana un set jugador B
+* Ambos jugadores ganan un set
+* Doble resultado (1° set/partido)
+* Sets exactos
+* Hitos de aces totales
+* Aces totales por jugador A
+* Aces totales por jugador B
+* Breaks totales
+* Jugador A total de breaks
+* Jugador B total de breaks
+* Hitos de doble faltas
+* Hitos de doble faltas jugador A
+* Hitos de doble faltas jugador B
+* Primer set handicap de juego
+* Primer set total juegos under/over
+* Segundo set total juegos under/over
+* Encuentro total tie breaks
+
+NOTA FINAL: TIENES QUE USAR TODOS LOS MERCADOS LISTADOS AQUI, NUNCA REPETIR EL MISMO MERCADO EN LOS DIFERENTES O MISMOS PARTIDOS.
+
+
+SIEMPRE VE VARIANDO LAS OPCIONES,  NO SOLO TE CENTRES EN 1X2 O GOLES, BUSCA SIEMPRE LA APUESTA MÁS FÁCIL DE ACERTAR CON VALOR.
+
+
+REGLA DE ORO:
+- Si equipo fuerte vs débil → handicap o over goles equipo fuerte
+- Si partido cerrado → doble oportunidad o over 1.5
+- Si dudas → corners (menos variables)
+
+═══════════════════════════════════════════════════════════════════════════════
+🧮 EQUILIBRIO PROBABILIDAD + CUOTA
+═══════════════════════════════════════════════════════════════════════════════
+
+70% PICKS = Alta probabilidad + equivale a cuota decente (1.30-1.60)
+30% PICKS = Media probabilidad + equivale a cuota mejor (1.60-2.50)
+
+NUNCA: cuota 1.15 en over 4.5 goles (muy arriesgado)
+NUNCA: cuota 1.08 en under alto (ROI negativo)
+SÍ: cuota 1.25 o mas (probabilidad + valor)
+SÍ: cuota 1.50 o mas (riesgo compensado)
+
+═══════════════════════════════════════════════════════════════════════════════
+⚠️ DATOS NO CONFIRMADOS
+═══════════════════════════════════════════════════════════════════════════════
+
+Cuando algo NO aparece en las fuentes web:
+❌ NO inventar: cuotas, alineaciones definitivas, xG, probabilidades exactas
+❌ NO asumir: que las bajas confirmadas afectan (hay suplentes)
+✓ SÍ reconocer: "Alineaciones definitivas no confirmadas" → reduce confianza
+✓ SÍ usar: datos que SÍ aparecen en web (forma, goles, cuotas visibles)
+✓ PROHIBIDO inventar estadísticas: usa SOLO números reales de los datos entregados
+✓ PROHIBIDO nombrar fuentes ni sitios web (ni "la web confirma"): presenta
+  TODO como análisis propio, con números concretos (forma V/E/D, promedios,
+  H2H, cuota real del bookmaker).
+✓ NUNCA respondas "SIN PICK" ni digas que no hay pick.
+✓ Si los datos no alcanzan, VUELVE A BUSCAR (otras consultas en web, cuotas de
+  otra fuente) y CAMBIA a un mercado con datos reales disponibles (doble
+  oportunidad, under bajo, handicap amplio, over pequeño), baja la confianza
+  y entrega el pick.
+✓ Si no hay cuota real del bookmaker, OMITE la línea de cuota por completo.
+  PROHIBIDO inventar una cuota ni escribir "(estimada)"; si falta un dato,
+  nota solo en CONSIDERACIONES.
+
+═══════════════════════════════════════════════════════════════════════════════
+📋 FORMATO OBLIGATORIO
+═══════════════════════════════════════════════════════════════════════════════
+
+🧠 RAZONAMIENTO:
+[Paso 1 - 2: análisis cuantitativo del partido, con números concretos: forma
+reciente (V/E/D), goles/corners/tarjetas promedio, H2H. Sin nombrar fuentes.]
+
+💡 EDGE DETECTADO:
+[Ventaja estadística encontrada]
+
+🎯 PICK RECOMENDADO:
+[Mercado + lógica]
+
+- Cuota real: [X.XX] (SOLO si es la del bookmaker; si no hay, omite esta línea) | Probabilidad implícita: [XX%] | Confianza: [XX%]
+
+❓ CONSIDERACIONES:
+[Riesgos, datos faltantes, condiciones, conferencia de prensa, lesiones, motivación, localía, rivalidad, arbitraje]
+
+
+═══════════════════════════════════════════════════════════════════════════════
+🚨 REGLA CLAVE
+═══════════════════════════════════════════════════════════════════════════════
+
+PIENSA COMO MATEMÁTICO, NO COMO HINCHA.
+Cuota baja = todos lo ven → poco valor.
+Cuota buena + tendencia clara = EDGE.
+Dudas = reduce confianza, pero no descartes si hay evidencia.
+"""
+
+    # Si se solicita búsqueda web, obtener contexto
+    contexto_web = ""
+    if data.buscar:
+        contexto_web = buscar_web(data.mensaje)
+        # Agregar contexto de búsqueda al prompt del sistema
+        reglas = reglas + f"\n\nCONTEXTO DE BUSQUEDA WEB OBTENIDO:\n{contexto_web}"
+
+    # Estadisticas reales de ESPN como base de datos del analisis
+    if ctx_espn:
+        reglas = reglas + (
+            f"\n\nESTADISTICAS ESPN (datos reales, USALAS COMO BASE DEL ANALISIS):\n{ctx_espn}"
+            "\n\nUSA ESTAS ESTADISTICAS ESPN como fuente principal (forma reciente, "
+            "records, cuotas). Basa tu pick en estos datos reales."
+        )
+
+    # Plantilla y competicion verificadas: la verdad oficial va por delante
+    # de la memoria del modelo (evita inventar que un jugador juega en un
+    # equipo donde no juega).
+    if bloque_verif:
+        reglas = reglas + (
+            f"\n\n{bloque_verif}"
+            "\n\nEstos datos son oficiales: mandan sobre lo que recuerdes. Si un "
+            "jugador no esta en la plantilla del equipo nombrado, esa "
+            "combinacion no existe: no la analices como si fuera real."
+        )
+
+    from ai.model import generar_respuesta_demian
+
+    respuesta = generar_respuesta_demian(
+        reglas, bloque_memoria + data.mensaje + bloque_verif
+    )
+    # Demian sin respuesta en el analisis EDGE: 365AI es el motor de relevo.
+    if not respuesta:
+        alternativa = _responder_groq(
+            bloque_memoria + data.mensaje,
+            contexto=ctx_espn,
+            es_partido=True,
+        )
+        if alternativa:
+            return alternativa
+    # Limpiar asteriscos de formato markdown
+    if respuesta:
+        respuesta = respuesta.replace("*", "").replace("#", "")
+    if fallo_365:
+        if respuesta:
+            return (
+                f"{respuesta}\n\n"
+                "(Nota: 365AI estaba saturada en este momento, el analisis fue "
+                "respondido por Demian tipster)."
+            )
+        return (
+            "365AI esta saturada y Demian tampoco pudo responder en este momento. "
+            "Intenta de nuevo en unos segundos."
+        )
+    return respuesta
+
+# ==============================
+# AUTH + DB ENDPOINTS
+# ==============================
+# Conecta MySQL (db.py) al backend: registro, login, keys, mensajes, health.
+
+@app.on_event("startup")
+def _init_database():
+    """Inicializa la BD, crea admin y una key por defecto si hace falta.
+
+    Reintenta 3 veces con delay (en producción el DB puede tardar en estar ready).
+    Si tras 3 intentos no hay DB, la app arranca de todos modos y los endpoints
+    fallarán con 500 al hacer query.
+    """
+    import time
+
+    # True si la BD conecto en el primer intento. Si no, los hilos de fondo
+    # se arrancan igual y un hilo aparte reintenta la BD hasta que conecte.
+    db_ok = False
+    for attempt in range(1, 4):
+        try:
+            db.init_db()  # crea tablas + admin user (ensure_admin_user internamente)
+
+            # Verificar conectividad real con un ping
+            ok = db.run_query("SELECT 1 AS ok", fetchone=True)
+            if not ok:
+                raise Exception("DB query returned None")
+
+            # Crear una key por defecto si no hay ninguna disponible
+            existing = db.run_query(
+                "SELECT COUNT(*) AS cnt FROM redeem_keys "
+                "WHERE claimed_by IS NULL "
+                "AND (key_expires_at IS NULL OR key_expires_at > NOW())"
+            )
+            count = existing[0]["cnt"] if existing else 0
+
+            if count == 0:
+                key = db.create_redeem_key(duration_days=30)
+                if key:
+                    print(f"[startup] Created default redeem key: {key['code']}", flush=True)
+                else:
+                    print("[startup] Failed to create default key", flush=True)
+            else:
+                print(f"[startup] DB ready, {count} available key(s)", flush=True)
+
+            print("[startup] Database initialized successfully", flush=True)
+            db_ok = True
+
+            # Limpieza de legado: picks guardados con mercados prohibidos
+            # (ej. "apuesta sin empate" = DNB). Se anulan para que no salgan
+            # en el dashboard y el partido pueda regenerarse con mercado valido.
+            try:
+                n = db.purgar_picks_prohibidos()
+                if n:
+                    print(f"[startup] {n} pick(s) borrados por mercado prohibido", flush=True)
+            except Exception as exc:
+                print(f"[startup] Purga de picks prohibidos fallo: {exc}", flush=True)
+
+            # Historial legacy: picks ANULADO (fantasmas que no cuentan ni como
+            # acierto ni como fallo). La politica actual es BORRARlos; se
+            # limpian los viejos al arrancar.
+            try:
+                n_anul = db.borrar_anulados_legacy()
+                if n_anul:
+                    print(f"[startup] {n_anul} pick(s) ANULADO legacy borrados", flush=True)
+            except Exception as exc:
+                print(f"[startup] Borrado de ANULADO legacy fallo: {exc}", flush=True)
+
+            break
+
+        except Exception as exc:
+            print(f"[startup] DB init attempt {attempt}/3 failed: {exc}", flush=True)
+            if attempt < 3:
+                time.sleep(5)
+            else:
+                print("[startup] DB not available — app continues without DB", flush=True)
+
+    # ------------------------------------------------------------------
+    # HILOS DE FONDO: se arrancan SIEMPRE, con BD o sin ella.
+    # Antes vivian dentro del try del loop de la BD: si Aiven tardaba en
+    # estar ready al arrancar Northflank, el scheduler de picks NO se
+    # creaba nunca y el dashboard se quedaba mudo hasta el proximo
+    # reinicio ("la IA no analiza"). Los hilos toleran fallos de BD (cada
+    # ciclo reintenta y los errores quedan en _salud), asi que arrancarlos
+    # sin BD es inocuo y se recuperan solos cuando la BD vuelva.
+    # ------------------------------------------------------------------
+    try:
+        dashboard.iniciar_scheduler()
+    except Exception as exc:
+        print(f"[startup] Scheduler dashboard no iniciado: {exc}", flush=True)
+
+    if db_ok:
+        # Cache caliente desde el arranque (asi el primer usuario que entra
+        # no espera los ~30s del armado del payload).
+        try:
+            _refrescar_dashboard_async()
+        except Exception as exc:
+            print(f"[startup] Cache del dashboard no precalentado: {exc}", flush=True)
+    else:
+        # La BD no conecto: un hilo aparte reintenta hasta que conecte y
+        # entonces precachear el dashboard. Sin esto el panel podria quedar
+        # vacio para siempre aunque la BD se recupere a los 30s.
+        threading.Thread(
+            target=_reintentar_db_y_precachear,
+            daemon=True,
+            name="startup-db-retry",
+        ).start()
+
+    # Partidos del dia: refrescador automatico (agenda la18hd.su).
+    # Cada 30 min re-scrapea la agenda y actualiza la TV; si la fuente
+    # falla, conserva la lista anterior. No depende de la BD para arrancar.
+    try:
+        import event_scheduler
+
+        event_scheduler.iniciar_scheduler()
+    except Exception as exc:
+        print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
+
+    # Estadisticas: calentador de cache (scoreboards frescos y
+    # respuestas instantaneas; el trafico a ESPN queda centralizado).
+    if sports_warming:
+        try:
+            sports_warming.iniciar_calentador()
+        except Exception as exc:
+            print(f"[startup] Calentador de stats no iniciado: {exc}", flush=True)
+
+
+def _reintentar_db_y_precachear():
+    """Reintenta la BD en background y precachea el dashboard al conectar."""
+    import time
+
+    for intento in range(1, 31):  # hasta ~5 min (10 s entre intentos)
+        time.sleep(10)
+        try:
+            ok = db.run_query("SELECT 1 AS ok", fetchone=True)
+            if not ok:
+                raise Exception("DB query returned None")
+            print(f"[startup] BD disponible tras {intento} intento(s); "
+                  "precalentando dashboard", flush=True)
+            _refrescar_dashboard_async()
+            return
+        except Exception as exc:
+            print(f"[startup] Reintento de BD {intento}/30 fallo: {exc}", flush=True)
+    print("[startup] BD no disponible tras 30 reintentos; los endpoints "
+          "seguiran reintentando por su cuenta", flush=True)
+
+# ---- Freemium ----
+PICKS_GRATIS = 2  # picks completos que ve un usuario sin premium
+CHAT_GRATIS_MENSAJES = 2  # conversaciones (mensajes del usuario) gratis en el chat
+
+# ---- Pydantic models ----
+class AuthSignup(BaseModel):
+    username: str
+    password: str
+    redeem_code: str | None = None  # opcional: sin key se crea cuenta GRATIS
+
+class AuthSignin(BaseModel):
+    username: str
+    password: str
+
+class MessageIn(BaseModel):
+    role: str
+    text: str
+
+class RedeemIn(BaseModel):
+    redeem_code: str
+
+class AdminKeyIn(BaseModel):
+    duration_days: int
+    quantity: int = 1
+    expires_in_days: int | None = None
+
+# ---- Auth dependency ----
+def get_current_user(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Necesitas iniciar sesion.")
+    token = authorization[7:].strip()
+    user = db.get_user_by_token(token)
+    if not user:
+        raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
+    return user
+
+def get_admin(user=Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Acceso restringido a administradores.")
+    return user
+
+
+# ==============================
+# ANALISTA DE PICKS (IA propia, aislada del chat)
+# ==============================
+# Motor: ai/analista_picks.py
+#   Capa 1 CUANTITATIVA: Poisson sobre la forma real de ESPN. Siempre activa,
+#           no necesita API key ni gasta cuota de ningun proveedor.
+#   Capa 2 LLM: PROVEEDOR PROPIO (ANALISTA_AI_API_KEY / _BASE_URL / _MODEL),
+#           deliberadamente distinto al del chat para no competir por cuota.
+try:
+    from ai import analista_picks as analista
+    _analista_ok = True
+    print("[analista] modulo cargado OK")
+except Exception as _an_err:  # noqa: BLE001
+    analista = None
+    _analista_ok = False
+    print(f"[WARN] analista_picks no disponible: {_an_err}")
+
+
+class AnalisisIn(BaseModel):
+    """Entrada del analista. Acepta el pick completo o solo su id."""
+    pick: dict | None = None
+    pick_id: str | None = None
+    con_llm: bool = False
+    limite: int = 10
+    # El modelo cuantitativo es de goles: por defecto solo futbol. Con
+    # sport="" se analizan todos y se informa de los que no se pueden modelar.
+    sport: str = "soccer"
+
+
+@app.get("/analisis/estado")
+def analisis_estado():
+    """Estado del analista: proveedor, modelo y si la capa LLM esta activa."""
+    if not _analista_ok:
+        return {"ok": False, "motivo": "modulo analista_picks no disponible"}
+    return {"ok": True, **analista.estado()}
+
+
+@app.post("/analisis/pick")
+def analisis_un_pick(data: AnalisisIn, user=Depends(get_admin)):
+    """Analiza UN pick: probabilidad justa, edge, EV y veredicto."""
+    if not _analista_ok:
+        raise HTTPException(503, "El analista no esta disponible.")
+
+    pick = data.pick
+    if not pick and data.pick_id:
+        encontrados = db.list_picks_por_ids([data.pick_id]) or []
+        if not encontrados:
+            raise HTTPException(404, "Ese pick no existe o no es de hoy.")
+        pick = encontrados[0]
+    if not pick:
+        raise HTTPException(400, "Falta 'pick' o 'pick_id'.")
+
+    return analista.analizar_pick(pick, con_llm=bool(data.con_llm))
+
+
+@app.post("/analisis/pendientes")
+def analisis_pendientes(data: AnalisisIn, user=Depends(get_admin)):
+    """Analiza los picks PENDIENTES y devuelve el veredicto del modelo."""
+    if not _analista_ok:
+        raise HTTPException(503, "El analista no esta disponible.")
+
+    limite = max(1, min(int(data.limite or 10), 60))
+    sport = (data.sport or "").strip().lower()
+    if sport:
+        # Solo el deporte pedido y los mas recientes: el modelo es de goles y
+        # los pendientes mas viejos suelen ser de otros deportes.
+        picks = db.list_picks_pendientes_sport(sport, limite=60) or []
+    else:
+        picks = db.list_picks_pendientes() or []
+
+    return analista.analizar_lote(picks, con_llm=bool(data.con_llm),
+                                  limite=limite)
+
+# ---- Endpoints ----
+
+@app.get("/health")
+def health():
+    """Estado del backend y la base de datos."""
+    return db.health_status()
+
+@app.post("/auth/signup")
+def auth_signup(data: AuthSignup, request: Request):
+    # Anti fuerza bruta / creacion masiva de cuentas (el registro es gratis).
+    _rate_limit(f"signup:{_ip_del_cliente(request)}", 5, 3600)
+    try:
+        user = db.create_user(data.username, data.password, data.redeem_code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    token = db.create_session(user["id"])
+    return {"access_token": token, "user": user}
+
+@app.post("/auth/signin")
+def auth_signin(data: AuthSignin, request: Request):
+    # Anti fuerza bruta: 10 intentos por IP cada 15 min. Antes no habia limite
+    # y /health confirmaba ademas si el admin existia.
+    _rate_limit(f"signin:{_ip_del_cliente(request)}", 10, 900)
+    if data.username:
+        _rate_limit(f"signin-user:{data.username.strip().lower()}", 10, 900)
+    user = db.get_user_by_username(data.username)
+    if not user or not db.verify_password(data.password, user["password_hash"]):
+        raise HTTPException(401, "Usuario o contrasena incorrecta.")
+    token = db.create_session(user["id"])
+    return {"access_token": token, "user": db.public_user(user)}
+
+@app.post("/auth/signout")
+def auth_signout(request: Request, user=Depends(get_current_user)):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        db.delete_session(token)
+    return {"ok": True}
+
+@app.get("/auth/me")
+def auth_me(user=Depends(get_current_user)):
+    return db.public_user(user)
+
+@app.get("/messages")
+def get_messages(user=Depends(get_current_user)):
+    messages = db.list_messages(user["id"])
+    return {"messages": messages}
+
+@app.post("/messages")
+def post_message(data: MessageIn, user=Depends(get_current_user)):
+    # Chat freemium: usuarios sin premium tienen limite de conversaciones.
+    if data.role == "user" and not db.es_premium_row(user):
+        usados = db.count_user_messages(user["id"])
+        if usados >= CHAT_GRATIS_MENSAJES:
+            raise HTTPException(
+                402,
+                f"Limite gratuito alcanzado ({CHAT_GRATIS_MENSAJES} conversaciones). "
+                "Desbloquea Premium para seguir charlando con la IA.",
+            )
+    msg = db.create_message(user["id"], data.role, data.text)
+    return msg
+
+@app.post("/redeem")
+def redeem_key(request: Request, data: RedeemIn, user=Depends(get_current_user)):
+    # Los codigos tienen formato predecible: sin este tope se podrian adivinar
+    # por fuerza bruta. 5 intentos/hora por usuario.
+    _rate_limit(f"redeem:{user['id']}", 5, 3600)
+    try:
+        result = db.redeem_key_for_user(user["id"], data.redeem_code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return result
+
+
+# ==============================
+# DASHBOARD (pronosticos IA)
+# ==============================
+
+# ==============================
+# CACHE DEL DASHBOARD (respuesta instantanea)
+# ==============================
+# Armar el payload del dashboard cuesta decenas de segundos: varias consultas a
+# Aiven (cada conexion nueva paga handshake TLS) + el backfill de equipos/logos
+# que consulta ESPN. Antes cada carga del dashboard pagaba ese costo y el
+# frontend se quedaba en el skeleton ("Analizando partidos..."). Ahora:
+#   1. La respuesta se sirve SIEMPRE desde cache (nunca bloquea).
+#   2. El recálculo corre en segundo plano (stale-while-revalidate).
+#   3. El backfill de metadata (ESPN) tambien corre en segundo plano.
+_DASHBOARD_TTL_S = 60
+_dashboard_cache: dict = {"ts": 0.0, "data": None}
+_dashboard_lock = threading.Lock()
+_dashboard_refrescando = threading.Event()
+_BACKFILL_MIN_S = 300  # el backfill (ESPN) como maximo cada 5 min
+_backfill_ts = 0.0
+
+
+def refrescar_dashboard_cache():
+    """Recalcula el payload base del dashboard (llamada bloqueante)."""
+    try:
+        data = dashboard.resumen_dashboard("Invitado")
+    except Exception:
+        print("[Dashboard] Error refrescando cache del dashboard:\n" + traceback.format_exc(), flush=True)
+        return
+    _dashboard_cache["data"] = data
+    _dashboard_cache["ts"] = time.time()
+
+
+def _refrescar_dashboard_async():
+    """Lanza el recalculo en segundo plano (una sola vez a la vez)."""
+    if _dashboard_refrescando.is_set():
+        return
+    _dashboard_refrescando.set()
+
+    def _trabajo():
+        try:
+            refrescar_dashboard_cache()
+        finally:
+            _dashboard_refrescando.clear()
+
+    threading.Thread(target=_trabajo, daemon=True, name="dashboard-refresh").start()
+
+
+def _backfill_async():
+    """Repara equipos/logos de picks viejos sin bloquear la peticion."""
+    global _backfill_ts
+    if time.time() - _backfill_ts < _BACKFILL_MIN_S:
+        return
+    _backfill_ts = time.time()
+
+    def _trabajo():
+        try:
+            reparados = dashboard.backfill_picks_metadata()
+            if reparados:
+                print(f"[Dashboard] Picks reparados con equipos/logos (hoy): {reparados}", flush=True)
+            historico = dashboard.backfill_picks_metadata_historico()
+            if historico:
+                print(f"[Dashboard] Picks reparados con equipos/logos (historico): {historico}", flush=True)
+        except Exception:
+            print("[Dashboard] Error en backfill de metadata:\n" + traceback.format_exc(), flush=True)
+
+    threading.Thread(target=_trabajo, daemon=True, name="dashboard-backfill").start()
+
+
+def _dashboard_base():
+    """Payload base del dashboard (comun a todos los usuarios), desde cache.
+
+    Si aun no hay cache (arranque en frio) se calcula una vez; despues todas
+    las peticiones responden al instante mientras un hilo refresca los datos.
+    """
+    data = _dashboard_cache["data"]
+    if data is None:
+        with _dashboard_lock:
+            if _dashboard_cache["data"] is None:
+                refrescar_dashboard_cache()
+        return _dashboard_cache["data"] or {}
+    if time.time() - _dashboard_cache["ts"] >= _DASHBOARD_TTL_S:
+        _refrescar_dashboard_async()
+    return data
+
+
+@app.get("/dashboard")
+def dashboard_home(user=Depends(get_current_user_optional)):
+    """Bienvenida + stats + picks del dia y acertados (solo ACIERTO se muestra).
+
+    MODO INVITADO: si no hay sesion, el dashboard se abre igual pero con el
+    freemium aplicado (2 picks gratis, el resto bloqueado). El chat/TV/stats
+    siguen requiriendo cuenta.
+    """
+    # Backfill de equipos/logos: en segundo plano (ESPN tarda y no debe
+    # bloquear la carga del dashboard).
+    _backfill_async()
+
+    username = user["username"] if user else "Invitado"
+    # Copia por peticion: el freemium modifica los picks (no contaminar cache).
+    data = copy.deepcopy(_dashboard_base())
+    data["welcome"] = f"Bienvenido, {username}"
+
+    # Favoritos del usuario: marca cada pick con `favorito` para que el
+    # frontend pueda pintar la estrella sin pedir los favoritos aparte.
+    if user:
+        try:
+            fav_ids = dashboard.ids_favoritos_picks(user["id"])
+        except Exception:  # noqa: BLE001
+            fav_ids = set()
+        if fav_ids:
+            for lista in (
+                data.get("pronosticos_del_dia") or [],
+                data.get("pronosticos_manana") or [],
+                data.get("pronosticos_acertados") or [],
+            ):
+                for pick in lista:
+                    if str(pick.get("id")) in fav_ids:
+                        pick["favorito"] = True
+
+    # FREEMIUM (incluye invitados): los GOLDEN PICK son SIEMPRE premium y las
+    # 2 gratis son picks NORMALES (antes los 2 gratis eran los golden, porque
+    # el orden los pone primero). El resto llega sin datos sensibles: el
+    # frontend pinta el candado y el boton de desbloqueo.
+    if not user or not db.es_premium_row(user):
+        gratis_restantes = PICKS_GRATIS
+        for lista in (
+            data.get("pronosticos_del_dia") or [],
+            data.get("pronosticos_manana") or [],
+        ):
+            for pick in lista:
+                gratis = False
+                if not pick.get("golden") and gratis_restantes > 0:
+                    gratis = True
+                    gratis_restantes -= 1
+                if gratis:
+                    continue
+                for campo in (
+                    "titulo", "selection", "odds", "porque", "rationale",
+                    "stats", "market", "confidence", "tier", "verificado",
+                ):
+                    pick[campo] = None
+                pick["bloqueado"] = True
+    return data
+
+
+@app.get("/dashboard/catalogo")
+def dashboard_catalogo(user=Depends(get_current_user)):
+    """Catalogo UNICO de mercados del dashboard.
+
+    El frontend y el backend leen de aqui, de modo que lo que la IA puede
+    proponer y lo que se muestra al usuario son exactamente los mismos
+    mercados, y todos son veros: cada entrada viene con su peso (prioridad) y
+    la efectividad medida en produccion.
+    """
+    return {
+        "catalogo": dashboard.catalogo_mercados(),
+        "deportes_activos": list(dashboard.MERCADOS_POR_DEPORTE.keys()),
+        "deportes_en_bookmaker": list(dashboard.DEPORTES_EN_BOOKMAKER),
+    }
+
+
+@app.get("/dashboard/picks")
+def dashboard_picks(user=Depends(get_current_user)):
+    """Pronosticos del dia: solo pendientes vigentes y con datos reales."""
+    picks = db.list_picks_hoy() or []
+    validos = [
+        p for p in picks
+        if p.get("result") == "PENDIENTE"
+        and dashboard._pick_calidad_ok(p)
+        and dashboard._evento_vigente(p)
+    ]
+    return {"picks": validos}
+
+
+@app.get("/dashboard/acertados")
+def dashboard_acertados(user=Depends(get_current_user)):
+    """Aciertos de las ultimas 24h (ventana corrida), sin cuotas bajas."""
+    return {"acertados": dashboard.aciertos_visibles()}
+
+
+@app.get("/dashboard/salud")
+def dashboard_salud(user=Depends(get_current_user)):
+    """Idea 20: monitoreo del scheduler (vigilante, Sofascore, archivo BD)."""
+    return dashboard.salud_scheduler()
+
+
+@app.post("/dashboard/generate")
+def dashboard_generate(max_partidos: int = 120, forzar: bool = False,
+                       user=Depends(get_admin)):
+    """Fuerza la generacion de picks ahora (admin).
+
+    max_partidos acota el lote para que la peticion HTTP no muera por
+    timeout: los partidos de las 5 mejores ligas de Europa van SIEMPRE
+    primero, asi un lote corto cubre las grandes ligas antes.
+    """
+    return dashboard.generar_picks_dia(max_partidos=max_partidos, forzar=forzar)
+
+
+@app.post("/dashboard/resolve")
+def dashboard_resolve(user=Depends(get_admin)):
+    """Resuelve los picks pendientes cuyos partidos ya terminaron (admin)."""
+    return dashboard.resolver_picks_finalizados()
+
+
+@app.get("/dashboard/revisar")
+def dashboard_revisar(user=Depends(get_admin), corregir: bool = False):
+    """Re-verifica los picks de hoy contra el marcador/estadisticas reales.
+
+    corregir=true corrige automaticamente los resultados mal guardados.
+    """
+    return dashboard.revisar_picks_hoy(corregir=corregir)
+
+
+@app.post("/dashboard/reset")
+def dashboard_reset(user=Depends(get_admin)):
+    """Borra TODOS los picks para regenerarlos con equipos/logos (admin)."""
+    db.run_query("delete from ai_picks")
+    return {"ok": True, "message": "Picks borrados. Se regeneraran en el proximo ciclo."}
+
+
+# ==============================
+# EXTRAS: track record / pick del dia / parlay / paginas
+# ==============================
+
+import extras
+
+
+class ParlayIn(BaseModel):
+    ids: list[str]
+    stake: float = 10.0
+
+
+class SoporteIn(BaseModel):
+    mensaje: str
+
+
+@app.post("/support/chat")
+def soporte_chat_endpoint(data: SoporteIn, user=Depends(get_current_user)):
+    """Soporte con IA: responde amable con datos reales del usuario (BD)."""
+    return extras.soporte_chat(user, data.mensaje)
+
+
+@app.get("/admin/soporte/historial")
+def admin_soporte_historial(user=Depends(get_admin), limit: int = 100):
+    """Conversaciones de soporte (dataset para mejorar/fine-tunear la IA)."""
+    return {"conversaciones": db.list_support_chats(limit=min(limit, 500))}
+
+
+@app.get("/admin/soporte/kb")
+def admin_soporte_kb(user=Depends(get_admin)):
+    """Base de conocimiento actual del soporte."""
+    return extras._kb()
+
+
+@app.post("/admin/soporte/kb")
+def admin_soporte_kb_update(data: dict, user=Depends(get_admin)):
+    """Actualiza la base de conocimiento del soporte (planes, faq, reglas)."""
+    import json as _json
+
+    with open(extras.KB_FILE, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "kb": extras._kb()}
+
+
+@app.get("/dashboard/track-record")
+def track_record_publico():
+    """Track record agregado por mercado/deporte/liga (publico: es marketing)."""
+    return db.track_record()
+
+
+@app.get("/dashboard/pick-del-dia")
+def pick_del_dia_endpoint(user=Depends(get_current_user)):
+    """El pick estrella del dia elegido y justificado por la IA (cache 1h)."""
+    return extras.pick_del_dia()
+
+
+@app.post("/dashboard/parlay")
+def parlay_simular(data: ParlayIn, user=Depends(get_current_user)):
+    """Simulador de parlay: cuota combinada + probabilidad + pago potencial."""
+    return extras.simular_parlay(data.ids, data.stake)
+
+
+@app.post("/dashboard/parlay/opinion")
+def parlay_opinion(data: ParlayIn, user=Depends(get_current_user)):
+    """Veredicto corto de la IA sobre el parlay armado."""
+    r = extras.simular_parlay(data.ids, data.stake)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "Parlay invalido"))
+    return {"opinion": extras.opinion_ia_parlay(r)}
+
+
+@app.get("/perfil", response_class=HTMLResponse)
+def pagina_perfil():
+    """Pagina de perfil: plan, expiracion e historial de pagos."""
+    return HTMLResponse(extras.html_perfil())
+
+
+@app.get("/parlay", response_class=HTMLResponse)
+def pagina_parlay():
+    """Simulador de parlay (pagina propia)."""
+    return HTMLResponse(extras.html_parlay())
+
+
+@app.get("/track", response_class=HTMLResponse)
+def pagina_track():
+    """Track record de la IA (pagina publica)."""
+    return HTMLResponse(extras.html_track())
+
+
+# ==============================
+# PAGADITO (pasarela de pagos)
+# ==============================
+# Flujo: el frontend llama a /pagadito/create-payment, obtiene la URL de
+# checkout y redirige al usuario. Al terminar el pago, Pagadito devuelve
+# al usuario a /pagadito/return (return URL configurada en el panel de
+# Pagadito). Ahi se consulta el estado real con get_status() y, si la
+# transaccion esta COMPLETED, se activa/renueva la suscripcion en MySQL.
+#
+# Variables de entorno:
+#   PAGADITO_UID / PAGADITO_WSK  credenciales del comercio
+#   PAGADITO_SANDBOX             "true" para sandbox (default true)
+#   PAGADITO_PLANS               JSON con los planes (opcional)
+#   PAGADITO_RETURN_REDIRECT     URL del frontend a la que redirigir al
+#                                usuario tras procesar el retorno
+
+import json as _json
+
+import pagadito_client
+from pagadito_client import (
+    PagaditoAuthError,
+    PagaditoClient,
+    PagaditoConnectionError,
+    PagaditoError,
+    PagaditoTransactionError,
+)
+
+# Planes: sobreescribir con PAGADITO_PLANS='[{"code":"plan15","description":"...","amount":5,"days":15}, ...]'
+DEFAULT_PLANS = [
+    {"code": "plan15", "description": "BASICO 3SIXTYBETS - 15 dias", "amount": 10.00, "days": 15},
+    {"code": "plan30", "description": "PREMIUM 3SIXTYBETS - 30 dias", "amount": 15.00, "days": 30},
+    {"code": "plan60", "description": "VIP 3SIXTYBETS - 60 dias", "amount": 25.00, "days": 60},
+]
+
+class PagaditoPaymentIn(BaseModel):
+    plan_code: str
+
+
+class ChannelIn(BaseModel):
+    name: str
+    stream: str
+    type: str = "m3u8"
+    ads: bool = False
+    useProxy: bool = False
+    geoRestriction: str = "NONE"
+
+
+class ChannelUpdateIn(BaseModel):
+    name: str | None = None
+    stream: str | None = None
+    type: str | None = None
+    status: str | None = None
+    ads: bool | None = None
+    useProxy: bool | None = None
+    geoRestriction: str | None = None
+
+
+class EventIn(BaseModel):
+    sport: str
+    name: str
+    stream: str
+    referer: str | None = None
+
+
+class EventsIn(BaseModel):
+    """Lista completa de eventos del dia (el scraper la manda entera)."""
+    events: list[EventIn]
+
+
+def get_pagadito_plans():
+    raw = os.getenv("PAGADITO_PLANS", "").strip()
+    if raw:
+        try:
+            return _json.loads(raw)
+        except (ValueError, TypeError):
+            print("[WARN] PAGADITO_PLANS no es JSON valido, usando planes por defecto.")
+    return DEFAULT_PLANS
+
+
+@app.get("/pagadito/plans")
+def pagadito_plans():
+    """Lista de planes disponibles para el boton de compra del frontend."""
+    return {
+        "plans": get_pagadito_plans(),
+        "sandbox": os.getenv("PAGADITO_SANDBOX", "true").lower() in ("1", "true", "yes"),
+    }
+
+@app.get("/pagadito/debug")
+def pagadito_debug(user=Depends(get_admin)):
+    """
+    Diagnostico: prueba connect() contra Pagadito con las credenciales
+    configuradas y devuelve el resultado crudo (sin exponer el WSK).
+    SOLO ADMIN: revela detalles de la configuracion de pagos.
+    """
+    uid = os.getenv("PAGADITO_UID", "").strip()
+    wsk = os.getenv("PAGADITO_WSK", "").strip()
+    result = {
+        "uid_present": bool(uid),
+        "wsk_present": bool(wsk),
+        "sandbox": os.getenv("PAGADITO_SANDBOX", "true").lower() in ("1", "true", "yes"),
+        "endpoint": None,
+        "ok": False,
+        "code": None,
+        "message": None,
+    }
+    if not uid or not wsk:
+        result["message"] = "Faltan PAGADITO_UID y/o PAGADITO_WSK en las variables de entorno."
+        return result
+    try:
+        client = PagaditoClient(uid=uid, wsk=wsk)
+        result["endpoint"] = client.endpoint
+        token = client.connect()
+        result["ok"] = True
+        result["message"] = "connect() OK, token recibido."
+        result["token_prefix"] = token[:8] + "..."
+    except Exception as exc:  # noqa: BLE001 - diagnostico
+        result["message"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+
+@app.post("/pagadito/create-payment")
+def pagadito_create_payment(data: PagaditoPaymentIn, user=Depends(get_current_user)):
+    """
+    Recibe el plan elegido, registra la transaccion en Pagadito
+    (connect + exec_trans) y devuelve la URL de checkout.
+    El frontend debe redirigir al usuario a esa URL.
+    """
+    plan = next(
+        (p for p in get_pagadito_plans() if p.get("code") == data.plan_code), None
+    )
+    if not plan:
+        raise HTTPException(400, "Plan invalido.")
+
+    try:
+        order = db.create_pagadito_order(
+            user["id"], plan["code"], plan["amount"], currency="USD"
+        )
+    except RuntimeError as exc:
+        print(f"[pagos] create_pagadito_order fallo: {exc}", flush=True)
+        raise HTTPException(500, "No se pudo registrar la orden de pago. Intenta de nuevo.")
+
+    client = PagaditoClient()
+    try:
+        checkout_url = client.exec_trans(
+            amount=plan["amount"],
+            ern=order["ern"],
+            details=[{
+                "quantity": 1,
+                "description": plan.get("description", plan["code"]),
+                "price": float(plan["amount"]),
+                "url_product": os.getenv(
+                    "PAGADITO_PRODUCT_URL",
+                    "https://threesixtybets-chat.vercel.app",
+                ),
+            }],
+            currency="USD",
+        )
+    except PagaditoAuthError as exc:
+        print(f"[pagos] Pagadito auth: {exc}", flush=True)
+        raise HTTPException(502, "La pasarela de pago no esta disponible en este momento.")
+    except PagaditoConnectionError as exc:
+        print(f"[pagos] Pagadito conexion: {exc}", flush=True)
+        raise HTTPException(502, "La pasarela de pago no esta disponible en este momento.")
+    except PagaditoTransactionError as exc:
+        print(f"[pagos] Pagadito transaccion: {exc}", flush=True)
+        raise HTTPException(400, "La pasarela rechazo la transaccion. Verifica los datos.")
+    except PagaditoError as exc:
+        print(f"[pagos] Pagadito inesperado: {exc}", flush=True)
+        raise HTTPException(500, "Error procesando el pago. Intenta de nuevo.")
+
+    # La URL de checkout contiene el token de la TRANSACCION
+    # (necesario para get_status en el retorno), ej:
+    # https://sandbox.pagadito.com/.../index.php?token=<token_trans>
+    token_trans = ""
+    try:
+        from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+        token_trans = _parse_qs(_urlparse(checkout_url).query).get("token", [""])[0]
+    except Exception:
+        pass
+    if token_trans:
+        db.attach_pagadito_token(order["ern"], token_trans)
+    return {
+        "ok": True,
+        "ern": order["ern"],
+        "checkout_url": checkout_url,
+        "token_trans": token_trans,
+        "sandbox": client.sandbox,
+    }
+
+
+@app.get("/pagadito/return")
+def pagadito_return(request: Request):
+    """
+    URL de retorno configurada en el panel de Pagadito. Pagadito regresa
+    al usuario aqui con el token de la transaccion en el query string.
+    Consulta el estado real (get_status) y activa la suscripcion si el
+    pago esta COMPLETED. Redirige al frontend con el resultado.
+    """
+    from urllib.parse import urlencode
+
+    frontend = os.getenv(
+        "PAGADITO_RETURN_REDIRECT",
+        "https://threesixtybets-chat.vercel.app",
+    ).rstrip("/")
+
+    params = dict(request.query_params)
+    # Return URL configurada en el panel de Pagadito:
+    #   /pagadito/return?token={value}&ern={ern_value}
+    # Pagadito reemplaza {value} por el token de la transaccion y
+    # {ern_value} por el ERN enviado en exec_trans.
+    token_trans = (
+        params.get("token", params.get("token_trans", "")).strip()
+    )
+    ern = params.get("ern", params.get("ern_value", "")).strip()
+    print(f"[PAGADITO] return recibido con params: {params}")
+
+    def redirect(status_key):
+        query = urlencode({"payment": status_key, "ern": ern or ""})
+        # El frontend no tiene ruta /subscription: volver a la raiz con
+        # el resultado en el query string (?payment=success|rejected|...).
+        return RedirectResponse(f"{frontend}/?{query}", status_code=302)
+
+    # Localizar la orden: por ERN (si Pagadito lo devuelve) o por el
+    # token_trans guardado al crear el pago.
+    order = None
+    if ern:
+        order = db.get_pagadito_order_by_ern(ern)
+    if order is None and token_trans:
+        order = db.run_query(
+            "select * from pagadito_orders where token_trans = %s",
+            (token_trans,),
+            fetchone=True,
+        )
+
+    if order is None or not token_trans:
+        return redirect("not_found")
+
+    client = PagaditoClient()
+    try:
+        status = client.get_status(token_trans)
+    except (PagaditoAuthError, PagaditoConnectionError, PagaditoTransactionError, PagaditoError) as exc:
+        print(f"[PAGADITO] Error consultando estado de {order['ern']}: {exc}")
+        return redirect("error")
+
+    print(f"[PAGADITO] get_status de {order['ern']}: {status}")
+
+    if status["status"] == "COMPLETED":
+        plan_days = next(
+            (
+                int(p.get("days", 30))
+                for p in get_pagadito_plans()
+                if p.get("code") == order["plan_code"]
+            ),
+            30,
+        )
+        try:
+            result = db.activate_subscription(
+                order["ern"], plan_days, reference=status.get("reference") or None
+            )
+        except ValueError as exc:
+            print(f"[PAGADITO] Error activando suscripcion {order['ern']}: {exc}")
+            return redirect("error")
+        except Exception as exc:
+            print(f"[PAGADITO] Excepcion activando suscripcion {order['ern']}: {exc!r}")
+            return redirect("error")
+        print(
+            f"[PAGADITO] Pago aprobado: ern={order['ern']} ref={status['reference']} "
+            f"user={result.get('username')} hasta={result.get('access_expires_at')}"
+        )
+        return redirect("success")
+
+    # REGISTERED (pendiente), CANCELED, EXPIRED, REJECTED u otro estado.
+    db.mark_pagadito_order_status(
+        order["ern"],
+        "failed" if status["status"] not in ("REGISTERED",) else "pending",
+        reference=status["reference"],
+    )
+    status_map = {
+        "REGISTERED": "pending",
+        "CANCELED": "canceled",
+        "EXPIRED": "expired",
+        "REJECTED": "rejected",
+    }
+    return redirect(status_map.get(status["status"], "failed"))
+
+
+# ==============================
+# HISTORIAL DE TRANSACCIONES + FACTURA PDF
+# ==============================
+
+_TX_STATUS_LABELS = {
+    "completed": "APROBADO",
+    "approved": "APROBADO",
+    "pending": "PENDIENTE",
+    "registered": "PENDIENTE",
+    "canceled": "CANCELADO",
+    "cancelled": "CANCELADO",
+    "expired": "EXPIRADO",
+    "rejected": "RECHAZADO",
+    "failed": "FALLIDO",
+}
+
+
+def _tx_label(status: str) -> str:
+    return _TX_STATUS_LABELS.get((status or "").lower(), (status or "DESCONOCIDO").upper())
+
+
+def _tx_public(order) -> dict:
+    created = order.get("created_at")
+    updated = order.get("updated_at")
+    return {
+        "ern": order["ern"],
+        "plan_code": order["plan_code"],
+        "amount": float(order["amount"]),
+        "currency": order.get("currency") or "USD",
+        "status": order["status"],
+        "status_label": _tx_label(order["status"]),
+        "reference": order.get("reference"),
+        "approval_number": (order.get("reference") or "").strip()
+        if isinstance(order.get("reference"), str)
+        else (order.get("reference") or None),
+        "created_at": created.isoformat() if created else None,
+        "updated_at": updated.isoformat() if updated else None,
+    }
+
+
+def _simple_pdf(title: str, lines: list[tuple[str, str]]) -> bytes:
+    """
+    Genera un PDF de una pagina (Helvetica) sin dependencias externas.
+    lines: lista de (texto, tamano_fuente).
+    """
+    import zlib
+
+    def esc(s: str) -> str:
+        return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+    y = 780
+    parts = ["BT"]
+    for text, size in lines:
+        parts.append(f"/F1 {size} Tf")
+        parts.append(f"1 0 0 1 60 {y} Tm")
+        parts.append(f"({esc(text)}) Tj")
+        y -= size + 10
+    parts.append("ET")
+    content = " ".join(parts).encode("latin-1", "replace")
+    compressed = zlib.compress(content)
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(compressed)).encode()
+        + b" /Filter /FlateDecode >>\nstream\n" + compressed + b"\nendstream",
+    ]
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + obj + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+@app.get("/transactions")
+def list_transactions(user=Depends(get_current_user)):
+    """Historial de pagos (Pagadito) del usuario autenticado."""
+    orders = db.list_pagadito_orders_for_user(user["id"]) or []
+    return {"transactions": [_tx_public(o) for o in orders]}
+
+
+@app.get("/transactions/{ern}/invoice")
+def transaction_invoice(ern: str, request: Request):
+    """
+    Factura PDF de una transaccion del usuario. Acepta el token por
+    header Authorization Bearer o por query string (?token=...) para
+    permitir descarga directa por link.
+    """
+    token = request.query_params.get("token", "").strip()
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+    user = db.get_user_by_token(token) if token else None
+    if not user:
+        raise HTTPException(401, "Necesitas iniciar sesion.")
+
+    order = db.get_pagadito_order_by_ern(ern)
+    if not order or order["user_id"] != user["id"]:
+        raise HTTPException(404, "Transaccion no encontrada.")
+
+    info = _tx_public(order)
+    created = info["created_at"] or ""
+    lines: list[tuple[str, str]] = [
+        ("3SIXTYBETS AI", 20),
+        ("FACTURA DE SUSCRIPCION", 14),
+        ("", 10),
+        (f"Factura / ERN: {info['ern']}", 11),
+        (f"Fecha: {created.replace('T', ' ')[:19]}", 11),
+        (f"Cliente: {user['username']}", 11),
+        ("", 10),
+        (f"Plan: {info['plan_code']}", 11),
+        (f"Monto: {info['currency']} {info['amount']:.2f}", 11),
+        (f"Estado: {_tx_label(info['status'])}", 11),
+    ]
+    if info.get("approval_number"):
+        lines.append((f"Numero de aprobacion: {info['approval_number']}", 11))
+    lines += [
+        ("", 10),
+        ("Gracias por tu compra.", 10),
+        ("Este documento es un comprobante generado electronicamente.", 9),
+    ]
+
+    pdf = _simple_pdf("Factura", lines)
+    from urllib.parse import quote
+
+    filename = quote(f"factura-{info['ern']}.pdf")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
+@app.post("/pagadito/backfill-approvals")
+def pagadito_backfill_approvals(admin=Depends(get_admin)):
+    """
+    Recupera el numero de aprobacion (PG approval number) de ordenes
+    completadas que quedaron sin referencia guardada: consulta get_status
+    con el token_trans almacenado y actualiza la orden.
+    Solo para administradores.
+    """
+    pending = db.pagadito_orders_missing_reference() or []
+    client = PagaditoClient()
+    updated, errors = [], []
+    for row in pending:
+        ern, token_trans = row["ern"], row["token_trans"]
+        try:
+            status = client.get_status(token_trans)
+            print(f"[PAGADITO] backfill {ern}: {status}")
+        except PagaditoError as exc:
+            errors.append({"ern": ern, "error": str(exc)})
+            continue
+        reference = status.get("reference") or ""
+        if reference:
+            db.set_pagadito_reference(ern, reference)
+            updated.append({"ern": ern, "approval_number": reference})
+        else:
+            errors.append({"ern": ern, "error": "Pagadito no devolvio reference"})
+    return {"checked": len(pending), "updated": updated, "errors": errors}
+
+
+@app.get("/stats/summary")
+def stats_summary(user=Depends(get_current_user)):
+    """Resumen de todos los deportes: cuantos partidos hay y cuantos en vivo."""
+    return sports.get_all_sports_summary()
+
+@app.get("/stats/leagues")
+def stats_leagues(user=Depends(get_current_user)):
+    """Lista de ligas disponibles para el selector."""
+    return sports.get_available_leagues()
+
+@app.get("/stats/live")
+def stats_live(sport: str = "soccer", league: str = None,
+               dia: int = None, user=Depends(get_current_user)):
+    """Partidos de un deporte: en vivo, proximos y finalizados.
+
+    Deportes: soccer, nba, mlb, nfl, tennis, mma
+    Para soccer se puede filtrar por liga con ?league=esp.1
+    Filtro opcional por dia (hora Nicaragua): dia=-1 ayer, 0 hoy,
+    1 manana, 2 pasado manana. Los partidos EN VIVO siempre pasan el filtro.
+    """
+    try:
+        data = sports.get_sport_games(sport, league=league)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if dia is not None:
+        try:
+            data = sports.filtrar_por_dia(data, int(dia))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "dia debe ser un entero: -1, 0, 1 o 2")
+    return data
+
+# ---- Favoritos (equipos / ligas / picks) ----
+
+class FavoritoIn(BaseModel):
+    tipo: str          # "equipo" | "liga" | "pick"
+    ref_id: str
+    nombre: str
+    sport: str
+    logo: str | None = None
+    league_code: str | None = None
+    # Solo para tipo="pick": datos del pronostico guardado
+    market: str | None = None
+    selection: str | None = None
+    odds: float | None = None
+    event_id: str | None = None
+
+
+@app.get("/favoritos")
+def favoritos_listar(user=Depends(get_current_user)):
+    """Favoritos del usuario (equipos, ligas y pronosticos)."""
+    return {"favoritos": db.list_favoritos(user["id"])}
+
+
+@app.post("/favoritos")
+def favoritos_agregar(data: FavoritoIn, user=Depends(get_current_user)):
+    try:
+        ok = db.add_favorito(
+            user["id"], data.tipo, data.ref_id, data.nombre, data.sport,
+            logo=data.logo, league_code=data.league_code,
+            market=data.market, selection=data.selection,
+            odds=data.odds, event_id=data.event_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": ok}
+
+
+# ---- Favoritos de PRONOSTICOS (estrella del dashboard) ----
+#
+# Rutas separadas de /favoritos para no romper el contrato existente de
+# equipos/ligas (mismo prefijo, otro recurso).
+#
+# OJO CON EL ORDEN: `DELETE /favoritos/{tipo}/{ref_id}` matchearia tambien
+# `/favoritos/picks/{pick_id}` (FastAPI prueba las rutas en orden de
+# registro). Por eso la ruta de picks se declara ANTES que la genérica.
+
+class FavoritoPickIn(BaseModel):
+    pick_id: str
+    # Alternativa al pick_id: se resuelve el pick en la BD del servidor.
+    event_id: str | None = None
+
+
+@app.get("/favoritos/picks")
+def favoritos_picks_listar(user=Depends(get_current_user)):
+    """Pronosticos que el usuario guardo como favoritos."""
+    return {"favoritos": dashboard.listar_favoritos_picks(user["id"])}
+
+
+@app.post("/favoritos/picks")
+def favoritos_picks_agregar(data: FavoritoPickIn, user=Depends(get_current_user)):
+    """Guarda un pronostico como favorito.
+
+    El pick se resuelve SIEMPRE en la BD por id (o por evento+mercado): asi
+    el cliente no puede inventarse una cuota ni un mercado.
+    """
+    pick = db.get_pick_by_id(data.pick_id)
+    if not pick and data.event_id:
+        for p in (db.list_picks_hoy() or []):
+            if str(p.get("eventId")) == str(data.event_id):
+                pick = p
+                break
+    if not pick:
+        raise HTTPException(404, "Pronostico no encontrado")
+    try:
+        return dashboard.agregar_favorito_pick(user["id"], pick)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/favoritos/picks/{pick_id}")
+def favoritos_picks_quitar(pick_id: str, user=Depends(get_current_user)):
+    """Quita un pronostico de los favoritos del usuario."""
+    try:
+        return dashboard.quitar_favorito_pick(user["id"], pick_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/favoritos/picks/{pick_id}/toggle")
+def favoritos_picks_alternar(pick_id: str, user=Depends(get_current_user)):
+    """Alterna el favorito de un pronostico (toggle de la estrella)."""
+    pick = db.get_pick_by_id(pick_id)
+    if not pick:
+        raise HTTPException(404, "Pronostico no encontrado")
+    try:
+        return dashboard.alternar_favorito_pick(user["id"], pick)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/favoritos/{tipo}/{ref_id}")
+def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
+    """Quita un favorito de equipo o liga (y tambien de pick)."""
+    try:
+        ok = db.remove_favorito(user["id"], tipo, ref_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": ok}
+
+
+
+
+# NOTA: el SSE (/stats/stream) se retiro: el proxy de Northflank bufferiza la
+# respuesta y los eventos nunca llegan al cliente (verificado en produccion).
+# La actualizacion en vivo queda cubierta por el calentador de cache + el
+# polling de 60s del frontend.
+
+@app.get("/stats/game")
+def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
+    """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
+    try:
+        return sports.get_game_detail(sport, event_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        print(f"[stats/game] fallo {sport}/{event_id}: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener el detalle del partido.")
+
+# Terminos de casa de apuestas que NINGUN modelo puede mostrar en el
+# analisis del detalle del partido (se filtran a nivel de texto, no solo prompt).
+_TERMINOS_PROHIBIDOS_ANALISIS = (
+    "empate no apuesta", "dnb", "handicap", "hándicap", "spread",
+    "over/under", "o/u", "under ", "over ", "línea", "linea de apuesta",
+    "edge", "apuesta segura", "apuesta recomendada", "cuota",
+)
+
+def _limpiar_analisis_ia(texto: str) -> str:
+    """Sanitiza la respuesta del modelo para el analisis del detalle.
+
+    Garantiza (independiente de que el modelo obedezca el prompt):
+    - sin markdown (asteriscos, almohadillas)
+    - sin encabezados duplicados tipo 'Análisis IA' ni emojis de decoracion
+    - sin terminologia de casa de apuestas (DNB, handicap, edge, O/U, cuota...)
+    - lineas vacias o duplicadas eliminadas
+    """
+    if not texto:
+        return texto
+    import re as _re
+
+    t = texto.replace("*", "").replace("#", "")
+
+    lineas_limpias = []
+    for linea in t.splitlines():
+        l = linea.strip()
+        # quitar emojis y encabezados duplicados
+        l = _re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\s]*", "", l).strip()
+        if _re.match(r"^an[aá]lisis\s+ia\s*:?\s*$", l, _re.IGNORECASE):
+            continue
+        if not l:
+            continue
+        # Limpiar frase por frase: si una sentencia contiene terminologia
+        # prohibida (DNB, handicap, edge, O/U...), se elimina SOLO esa
+        # sentencia, no toda la linea.
+        frases = _re.split(r"(?<=[.!?])\s+", l)
+        frases_ok = [
+            f for f in frases
+            if not any(term in f.lower() for term in _TERMINOS_PROHIBIDOS_ANALISIS)
+        ]
+        l = " ".join(frases_ok).strip()
+        if not l:
+            continue
+        # sin lineas repetidas consecutivas
+        if lineas_limpias and lineas_limpias[-1] == l:
+            continue
+        lineas_limpias.append(l)
+
+    return "\n".join(lineas_limpias).strip()
+
+
+@app.get("/stats/ai-analysis")
+def stats_ai_analysis(sport: str, event_id: str, user=Depends(get_current_user)):
+    """Analisis de IA del partido: tendencias, jugador destacado y prediccion."""
+    try:
+        detail = sports.get_game_detail(sport, event_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        print(f"[stats/ai-analysis] detalle {sport}/{event_id} fallo: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener el detalle del partido.")
+
+    # Construir contexto para la IA
+    teams = detail.get("teams", [])
+    away = next((t for t in teams if t.get("homeAway") != "home"), teams[0] if teams else {})
+    home = next((t for t in teams if t.get("homeAway") == "home"), teams[1] if len(teams) > 1 else {})
+
+    context_parts = [
+        f"Deporte: {detail.get('label', sport)}",
+        f"Estado: {detail.get('status', 'N/A')}",
+        f"Partido: {away.get('name', '?')} ({away.get('score', '-')}) vs {home.get('name', '?')} ({home.get('score', '-')})",
+    ]
+
+    # Records
+    if away.get("records"):
+        context_parts.append(f"Racha {away.get('name')}: {away['records'][0]}")
+    if home.get("records"):
+        context_parts.append(f"Racha {home.get('name')}: {home['records'][0]}")
+
+    # H2H
+    h2h = detail.get("head_to_head", [])
+    if h2h:
+        context_parts.append("\nHistorial H2H (ultimos enfrentamientos):")
+        for h in h2h[:5]:
+            ha = h.get("away", {})
+            hh = h.get("home", {})
+            context_parts.append(
+                f"  {ha.get('name','?')} {ha.get('score','-')} - {hh.get('score','-')} {hh.get('name','?')} ({h.get('status','')})"
+            )
+
+    # Ultimos partidos
+    for t in [away, home]:
+        recent = t.get("recent_games", [])
+        if recent:
+            context_parts.append(f"\nUltimos partidos de {t.get('name','?')}:")
+            for r in recent[:3]:
+                ra = r.get("away", {})
+                rh = r.get("home", {})
+                context_parts.append(
+                    f"  {ra.get('name','?')} {ra.get('score','-')} - {rh.get('score','-')} {rh.get('name','?')} ({r.get('status','')})"
+                )
+
+    # Jugadores destacados
+    key_players = detail.get("key_players", [])
+    if key_players:
+        context_parts.append("\nJugadores destacados:")
+        for p in key_players[:4]:
+            stats_str = ", ".join(f"{s['name']}: {s['value']}" for s in p.get("stats", [])[:3])
+            context_parts.append(f"  {p.get('name','?')} - {stats_str}")
+
+    # Estadisticas del equipo
+    for t in [away, home]:
+        stats = t.get("statistics", [])
+        if stats:
+            context_parts.append(f"\nEstadisticas {t.get('name','?')}:")
+            for s in stats[:8]:
+                context_parts.append(f"  {s['name']}: {s['label']}")
+
+    contexto = "\n".join(context_parts)
+
+    prompt = f"""Eres 3SIXTYBETS AI, analista deportivo. Analiza este partido y responde
+UNICAMENTE con las 4 secciones numeradas de abajo, en este orden exacto, sin
+encabezados extra, sin repetir el titulo, sin asteriscos ni markdown:
+
+1) Momento del partido: una o dos frases sobre como llega cada equipo y quien domina.
+2) Dato clave: la estadistica o el historial que mas pesa (citando numeros concretos).
+3) Jugador destacado: nombre y razon breve (si hay datos).
+4) Pronostico: el resultado deportivo esperado y tu nivel de confianza (alto/medio/bajo), en una sola frase.
+
+PROHIBIDO:
+- No menciones mercados ni terminos de casa de apuestas: nunca digas "empate no
+  apuesta", "DNB", "handicap", "linea", "edge", "O/U", "spread" ni similar.
+- No repitas el titulo "Analisis IA" ni agregues emojis de encabezado.
+- No inventes datos que no esten en la informacion del partido.
+
+DATOS DEL PARTIDO:
+{contexto}
+
+Responde en espanol, maximo 150 palabras, empezando directamente por "1)."."""
+
+    # El análisis IA de estadísticas usa un modelo Groq DEDICADO (ai/stats_ia.py).
+    # Antes compartía modelo con 365AI y usaba max_tokens=500, insuficiente para
+    # los gpt-oss: el razonamiento se comia el presupuesto y llegaba content=""
+    # (el endpoint devolvia "No se pudo generar el analisis").
+    # Demian/You queda reservado exclusivamente para el chat principal.
+    try:
+        from ai.stats_ia import analizar_partido, stats_configurado
+        if not stats_configurado():
+            return {"analysis": "El análisis estadístico no está disponible: falta STATS_AI_API_KEY.", "context": contexto}
+
+        respuesta = analizar_partido(
+            prompt.split("DATOS DEL PARTIDO:")[0],
+            prompt,
+        )
+        if respuesta:
+            return {"analysis": _limpiar_analisis_ia(respuesta), "context": contexto}
+        return {"analysis": "No se pudo generar el análisis en este momento. Intenta de nuevo.", "context": contexto}
+    except Exception as exc:
+        print(f"[stats/ai-analysis] fallo: {exc}", flush=True)
+        return {"analysis": "No se pudo generar el analisis en este momento. Intenta de nuevo.", "context": contexto}
+
+@app.get("/admin/keys")
+def admin_list_keys(user=Depends(get_admin)):
+    keys = db.list_redeem_keys()
+    return {"keys": keys}
+
+@app.post("/admin/keys")
+def admin_create_keys(data: AdminKeyIn, user=Depends(get_admin)):
+    key_expires_at = None
+    if data.expires_in_days:
+        key_expires_at = db.now_utc() + timedelta(days=data.expires_in_days)
+    created = []
+    for _ in range(max(1, data.quantity)):
+        key = db.create_redeem_key(
+            duration_days=data.duration_days,
+            created_by=user["id"],
+            key_expires_at=key_expires_at,
+        )
+        created.append({
+            "code": key["code"],
+            "duration_days": key["duration_days"],
+            "status": "available",
+            "expires_at": key["key_expires_at"].isoformat() if key.get("key_expires_at") else None,
+        })
+    return {"keys": created}
+
+# ==============================
+# PROXY HLS
+# ==============================
+# En desarrollo Vite lo sirve con el plugin /vite-plugins/hls-proxy.js.
+# En producción (build estático) el browser no puede pedir streams
+# http:// desde https:// (mixed content) ni pasar el CORS de los servidores
+# IPTV.  Este endpoint las resuelve: el browser habla con nosotros por https
+# (mismo origen del API) y Python re-encamina el stream al servidor real.
+
+import time as _time
+import threading
+
+HLS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# Caché temporal de segmentos .ts para streams con tokens efímeros.
+_segment_cache = {}  # key: tsUrl -> { buffer, timestamp, contentType }
+_segment_cache_lock = threading.Lock()
+_SEGMENT_CACHE_TTL = 30  # segundos
+
+# Techo de entradas. Sin este tope la cache crece solo (TTL 30s) y guarda el
+# buffer completo de cada .ts en RAM: con varios usuarios simultaneos el
+# contenedor supera el limite de memoria, Northflank lo reinicia y TODA la TV
+# cae de golpe sin que el error apunte al proxy.
+_SEGMENT_CACHE_MAX = 400
+
+# Precargas en vuelo por manifiesto. hls.js vuelve a pedir el manifest cada
+# TARGETDURATION (~6s); sin este cerrojo cada peticion relanza el hilo que
+# descarga la ventana de segmentos, asi que el mismo .ts se descarga 2 veces y
+# los hilos se acumulan (de ahi la falta de estabilidad). Con el cerrojo solo
+# hay UNA precarga activa por base_url.
+_preload_lock = threading.Lock()
+_preload_en_curso = set()  # base_url
+
+# Maximo de segmentos a precargar por manifiesto. La ventana util para arrancar
+# son los primeros; bajar el resto duplicaba ancho de banda sin aportar al
+# time-to-first-frame.
+_PRELOAD_MAX_SEGMENTOS = 8
+
+def _clean_segment_cache():
+    """Elimina segmentos expirados del caché."""
+    now = _time.time()
+    with _segment_cache_lock:
+        expired = [k for k, v in _segment_cache.items() if now - v["timestamp"] > _SEGMENT_CACHE_TTL]
+        for k in expired:
+            del _segment_cache[k]
+        # Eviction por antiguedad si aun asi se supera el techo.
+        if len(_segment_cache) > _SEGMENT_CACHE_MAX:
+            orden = sorted(_segment_cache.items(), key=lambda kv: kv[1]["timestamp"])
+            for k, _v in orden[: len(_segment_cache) - _SEGMENT_CACHE_MAX]:
+                del _segment_cache[k]
+
+def _preload_segments(manifest_text, base_url, headers):
+    """
+    Extrae todas las URLs de segmentos de una media playlist y las descarga
+    en segundo plano, guardándolas en el caché. Esto es necesario porque algunos
+    servidores IPTV (como Astra) generan tokens efímeros que expiran en segundos.
+
+    Se ejecuta en un hilo daemon para NO bloquear la respuesta del manifest al
+    cliente: el manifest se sirve inmediatamente y los segmentos se cachean en
+    paralelo. Esto reduce drásticamente el tiempo al primer cuadro (TTFF).
+    """
+    def _fetch_all():
+        ts_urls = []
+        for line in manifest_text.split("\n"):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                abs_url = urljoin(base_url, stripped)
+                if abs_url.endswith(".ts") or abs_url.endswith(".aac") or abs_url.endswith(".m4s"):
+                    ts_urls.append(abs_url)
+            except Exception:
+                pass
+
+        # Solo la ventana de arranque: descargar toda la lista multiplicaba el
+        # trafico sin mejorar el time-to-first-frame.
+        ts_urls = ts_urls[:_PRELOAD_MAX_SEGMENTOS]
+
+        for url in ts_urls:
+            with _segment_cache_lock:
+                if url in _segment_cache:
+                    continue
+            try:
+                resp = http_requests.get(url, headers=headers, stream=True, timeout=(5, 30))
+                if resp.ok:
+                    buffer = resp.content
+                    # No cachear .ts corruptos/HTML: envenenarian el buffer y
+                    # provocarian fragParsingError en el cliente. (server.py)
+                    if url.lower().endswith(".ts") and not _ts_valido(buffer):
+                        continue
+                    content_type = resp.headers.get("content-type", "video/mp2t")
+                    with _segment_cache_lock:
+                        _segment_cache[url] = {
+                            "buffer": buffer,
+                            "timestamp": _time.time(),
+                            "contentType": content_type,
+                        }
+            except Exception:
+                pass
+
+        _clean_segment_cache()
+
+    # Lanzar la precarga en segundo plano: no bloquea la respuesta del manifest.
+    # El cerrojo evita que dos peticiones del mismo manifest (hls.js refresca cada
+    # ~6s) lancen dos descargas de los MISMOS segmentos a la vez.
+    with _preload_lock:
+        if base_url in _preload_en_curso:
+            return
+        _preload_en_curso.add(base_url)
+
+    def _run():
+        try:
+            _fetch_all()
+        finally:
+            with _preload_lock:
+                _preload_en_curso.discard(base_url)
+
+    _t = threading.Thread(target=_run, daemon=True)
+    _t.start()
+
+def _ts_valido(body: bytes) -> bool:
+    """Valida que 'body' sea MPEG-TS real, no HTML/error/paquete corrupto.
+
+    Portado de server.py: un segmento puede empezar con 0x47 y aun estar
+    corrupto por dentro (fragParsingError en hls.js). Ademas, cuando la fuente
+    falla a veces devuelve HTML o texto con status 200, que hls.js intenta
+    decodificar como video y revienta. Verificando VARIOS sync-bytes (0x47)
+    descartamos eso antes de servir o cachear el segmento.
+    """
+    if not body:
+        return False
+    if body[:1] == b"<":  # HTML en vez de video
+        return False
+    if len(body) < 188 or body[0] != 0x47:
+        return False
+    n = len(body) // 188
+    for i in range(min(n, 8)):  # hasta 8 paquetes consecutivos bien formados
+        if body[i * 188] != 0x47:
+            return False
+    return True
+
+
+
+# Cabeceras que no deben retransmitirse al cliente
+_HOP = {
+    "connection", "keep-alive", "transfer-encoding", "upgrade",
+    "proxy-authenticate", "proxy-authorization", "te", "trailer",
+    "content-encoding", "content-length",
+}
+
+def _proxy_base(request: Request) -> str:
+    """URL canónica del propio endpoint /hls-proxy (para reescritura de manifests)."""
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    host = request.headers.get("host", request.url.netloc)
+    return f"{scheme}://{host}/hls-proxy"
+
+def _wrap(abs_url: str, proxy_base: str, referer: str | None = None) -> str:
+    """Construye una URL *hacia nuestro proxy* a partir de una URL absoluta."""
+    out = f"{proxy_base}?url={quote(abs_url, safe='')}"
+    if referer:
+        out += f"&referer={quote(referer, safe='')}"
+    return out
+
+def _is_manifest(path: str, content_type: str = "") -> bool:
+    low = path.lower()
+    return (
+        low.endswith(".m3u8")
+        or low.endswith(".m3u")
+        or "mpegurl" in content_type
+        or "x-mpegurl" in content_type
+        or "vnd.apple.mpegurl" in content_type
+    )
+
+def _rewrite_manifest(text: str, base_url: str, proxy_base: str, referer: str | None) -> str:
+    """
+    Reescribe todas las URLs del m3u8 para que pasen por nuestro proxy.
+    No toca etiquetas que no contengan URI.
+    """
+    out_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            out_lines.append(line)
+            continue
+
+        if stripped.startswith("#"):
+            # #EXT-X-KEY:URI="..."  #EXT-X-MAP:URI="..." etc.
+            def _repl(m):
+                uri = m.group(1)
+                if not uri:
+                    return m.group(0)
+                try:
+                    abs_url = urljoin(base_url, uri)
+                    return f'URI="{_wrap(abs_url, proxy_base, referer)}"'
+                except Exception:
+                    return m.group(0)
+
+            line = re.sub(r'URI="([^"]+)"', _repl, line)
+            out_lines.append(line)
+        else:
+            try:
+                abs_url = urljoin(base_url, stripped)
+                out_lines.append(_wrap(abs_url, proxy_base, referer))
+            except Exception:
+                out_lines.append(line)
+
+    return "\n".join(out_lines)
+
+def _is_master_playlist(text: str) -> bool:
+    """Detecta si un manifiesto es un master playlist (contiene #EXT-X-STREAM-INF)."""
+    return "#EXT-X-STREAM-INF" in text
+
+def _extract_first_variant_url(text: str, base_url: str) -> str | None:
+    """
+    Extrae la URL de la primera variante de un master playlist.
+    Devuelve None si no hay variantes.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#EXT-X-STREAM-INF"):
+            # La siguiente línea no vacía y sin # es la URL de la variante
+            for j in range(i + 1, len(lines)):
+                next_line = lines[j].strip()
+                if next_line and not next_line.startswith("#"):
+                    try:
+                        return urljoin(base_url, next_line)
+                    except Exception:
+                        return None
+    return None
+
+@app.get("/hls-proxy")
+def hls_proxy(request: Request, url: str, referer: str = None):
+    """Proxy transparente para streams HLS (.m3u8, .ts, .key, .aac)."""
+    if not url or not re.match(r"^https?://", url.strip()):
+        raise HTTPException(400, "Parámetro ?url= inválido o ausente")
+
+    target = url.strip()
+    # Anti-SSRF: bloquear hosts internos (localhost, IPs privadas, metadatos)
+    if not _url_tiene_host_publico(target):
+        raise HTTPException(400, "Host no permitido")
+
+    headers = {"User-Agent": HLS_USER_AGENT}
+    if referer:
+        headers["Referer"] = referer
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+
+    try:
+        resp = http_requests.get(
+            target, headers=headers, stream=True, timeout=(5, 30)
+        )
+    except http_requests.RequestException as exc:
+        # No exponer detalles internos (URLs/hosts de origen) al cliente.
+        print(f"[hls-proxy] upstream fallo: {exc}", flush=True)
+        raise HTTPException(502, "La fuente de video no responde.")
+
+    content_type = resp.headers.get("content-type", "")
+    final_url = resp.url  # refleja redirects -> base correcta para rewrite
+    proxy_base = _proxy_base(request)
+
+    # --- Segmentos .ts: servir desde caché si existe ---
+    _clean_segment_cache()
+    with _segment_cache_lock:
+        cached = _segment_cache.get(target)
+    if cached:
+        return PlainTextResponse(
+            cached["buffer"],
+            media_type=cached.get("contentType", "video/mp2t"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # --- Manifest reescrito ---
+    if _is_manifest(final_url, content_type) and resp.status_code == 200:
+        text = resp.text
+
+        # Si es un master playlist, resolver la sub-playlist inmediatamente.
+        # Algunos servidores IPTV (como Astra) generan tokens de sesión efímeros
+        # en la URL de la sub-playlist que expiran en segundos. Si hls.js la pide
+        # después, el token ya no es válido (404). Resolviéndola aquí garantizamos
+        # que se pide en el mismo instante.
+        if _is_master_playlist(text):
+            variant_url = _extract_first_variant_url(text, final_url)
+            if variant_url and _url_tiene_host_publico(variant_url):
+                try:
+                    sub_resp = http_requests.get(
+                        variant_url, headers=headers, stream=True, timeout=(5, 30)
+                    )
+                    if sub_resp.ok:
+                        sub_text = sub_resp.text
+                        sub_final_url = sub_resp.url or variant_url
+
+                        # Precargar segmentos inmediatamente (tokens efímeros)
+                        _preload_segments(sub_text, sub_final_url, headers)
+
+                        rewritten = _rewrite_manifest(sub_text, sub_final_url, proxy_base, referer)
+                        return PlainTextResponse(
+                            rewritten,
+                            media_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-store"},
+                        )
+                    print(f"[hls-proxy] sub-playlist {sub_resp.status_code} {variant_url}")
+                except http_requests.RequestException as exc:
+                    print(f"[hls-proxy] sub-playlist error: {exc}")
+
+        # Si es media playlist, precargar segmentos antes de servir
+        if not _is_master_playlist(text):
+            _preload_segments(text, final_url, headers)
+
+        rewritten = _rewrite_manifest(text, final_url, proxy_base, referer)
+        return PlainTextResponse(
+            rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # --- Segmentos / llaves: passthrough en streaming ---
+    # Forward del código de estado
+    if not resp.ok:
+        body = resp.text[:500] if resp.text else ""
+        return PlainTextResponse(
+            f"Upstream {resp.status_code}: {body}",
+            status_code=resp.status_code,
+            media_type="text/plain",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    out_headers = {}
+    for key, val in resp.headers.items():
+        if key.lower() not in _HOP:
+            out_headers[key] = val
+    if not content_type:
+        out_headers["Content-Type"] = "video/mp2t"
+
+    # --- Segmentos .ts: validar cabecera MPEG-TS antes de transmitir ---
+    # Portado de server.py. Si la fuente devuelve HTML/texto o un .ts corrupto
+    # con status 200, hls.js intenta decodificarlo y revienta (fragParsingError
+    # / bufferAppendError -> "Problema tecnico"). Leyendo los primeros bytes y
+    # comprobando VARIOS sync-bytes 0x47 lo detectamos y devolvemos 502 para que
+    # el reproductor reintente o escale, en vez de envenenar su buffer.
+    es_ts = target.split("?")[0].lower().endswith(".ts")
+    head = b""
+    it = None
+    if es_ts:
+        it = resp.iter_content(chunk_size=8192)
+        try:
+            while len(head) < 8 * 188:  # ~8 paquetes para validar varios sync-bytes
+                chunk = next(it)
+                if not chunk:
+                    break
+                head += chunk
+        except StopIteration:
+            pass
+        if not _ts_valido(head):
+            return PlainTextResponse(
+                "Segmento TS corrupto aguas arriba",
+                status_code=502,
+                media_type="text/plain",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        def _stream():
+            if head:
+                yield head
+            for chunk in it:
+                if chunk:
+                    yield chunk
+    else:
+        def _stream():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type=out_headers.get("Content-Type", "application/octet-stream"),
+        headers=out_headers,
+    )
+
+
+# ==============================
+# CDN LIVE TV (canales con token temporal)
+# ==============================
+# cdnlivetv.tv re-empaqueta canales premium (Sportsnet, TSN, equipos MLB, etc.)
+# y entrega el m3u8 con un token firmado que expira (~4 h). Este endpoint
+# resuelve un token FRESCO en cada sintonizada y entrega el stream a traves
+# del /hls-proxy existente (mismo origen -> sin CORS ni mixed content).
+
+import base64 as _b64
+
+_CDN_TTL = 45 * 60  # el token dura ~4 h; refrescamos antes por seguridad
+_cdn_cache = {}  # (name, code) -> {"url": str, "ts": float}
+_cdn_lock = threading.Lock()
+# Cache del catalogo de canales: 10 min es suficiente para el estado online/offline.
+_CDN_CAT_TTL = 10 * 60
+_cdn_cat_cache = {}  # "catalogo" -> {"data": list, "ts": float}
+# Agenda de dlive.sx (canal REAL de cada partido). 30 min: la agenda cambia
+# pocas veces al dia y parsear el HTML de ~700 KB en cada carga es caro.
+_DLIVE_TTL = 30 * 60
+_dlive_cache = {}  # "agenda" -> {"data": list, "ts": float}
+
+
+def _cdn_b64d(s: str) -> str:
+    s = s.replace("-", "+").replace("_", "/")
+    s += "=" * (-len(s) % 4)
+    try:
+        return _b64.b64decode(s).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def cdnlivetv_resolve(name: str, code: str):
+    """
+    Descarga la pagina del player de cdnlivetv.tv y extrae el m3u8 directo.
+    El player ofusca la URL como una suma de fragmentos base64 con nombres
+    de variable aleatorios por pagina:  var X = dec(a) + dec(b) + ... ; source:{src:X}
+    """
+    from urllib.parse import quote as _q
+
+    player_url = (
+        "https://cdnlivetv.tv/api/v1/channels/player/"
+        f"?name={_q(name)}&code={code}&user=cdnlivetv&plan=free"
+    )
+    try:
+        html = http_requests.get(
+            player_url, headers={"User-Agent": HLS_USER_AGENT}, timeout=(5, 20)
+        ).text
+    except http_requests.RequestException as exc:
+        print(f"[cdnlivetv] player error {name} ({code}): {exc}")
+        return None
+
+    m = re.search(r"var\s+(\w+)=((?:\w+\(\w+\)\+)+\w+\(\w+\))\s*;", html)
+    if not m:
+        print(f"[cdnlivetv] no se encontro la URL ofuscada de {name} ({code})")
+        return None
+    out = ""
+    for var in re.findall(r"\w+\((\w+)\)", m.group(2)):
+        vm = re.search(rf"var\s+{var}='([^']+)'", html)
+        if vm:
+            out += _cdn_b64d(vm.group(1))
+    # cdnlivetv ahora devuelve la URL SIN esquema ("cdnlivetv.tv/secure/...")
+    # en vez de "https://...": sin el prefijo, el probe revienta con
+    # MissingSchema, el endpoint se cuelga y el player da manifestLoadError.
+    if out and not out.startswith("http"):
+        out = "https://" + out
+    return out or None
+
+
+def cdnlivetv_fresh(name: str, code: str):
+    """Devuelve un m3u8 vivo; cachea 45 min y reintenta (su API tiene rate-limit).
+
+    cdnlivetv.tv limita las reproducciones por pais: un canal puede estar
+    saturado en 'ca' y funcionar en 'us'. Por eso se prueban varios codigos
+    antes de rendirse. El 503 'provider-cap' significa que el canal no se
+    puede servir AHORA (limite del proveedor), no que este roto el codigo.
+    """
+    with _cdn_lock:
+        cached = _cdn_cache.get((name, code))
+    if cached and _time.time() - cached["ts"] < _CDN_TTL:
+        return cached["url"]
+
+    # El codigo pedido primero, despues alternativas (el mismo canal puede
+    # estar capado en un pais y libre en otro).
+    codigos = [code] + [c for c in ("us", "ca", "uk", "mx") if c != code]
+    ultimo_motivo = "sin stream"
+
+    # Presupuesto de tiempo: 3 intentos x 4 codigos con probes de 15s podian
+    # tardar minutos, y para entonces el token ya habia expirado. Cortamos el
+    # bucle al pasar el presupuesto y devolvemos lo que haya (o el ultimo
+    # cacheado), que es lo que el player puede usar de verdad.
+    deadline = _time.time() + 25
+
+    for attempt in range(3):
+        for c in codigos:
+            if _time.time() > deadline:
+                break
+            stream = cdnlivetv_resolve(name, c)
+            if not stream:
+                ultimo_motivo = "no se encontro URL del canal"
+                continue
+            try:
+                probe = http_requests.get(
+                    stream,
+                    headers={"User-Agent": HLS_USER_AGENT},
+                    stream=True,
+                    timeout=(5, 15),
+                )
+                ok = probe.status_code == 200
+                cuerpo = "" if ok else probe.text[:80]
+                probe.close()
+                if ok:
+                    with _cdn_lock:
+                        _cdn_cache[(name, c)] = {"url": stream, "ts": _time.time()}
+                    return stream
+                # 'provider-cap' = limite de reproducciones del proveedor.
+                if "provider-cap" in str(cuerpo):
+                    ultimo_motivo = "provider-cap (limite de reproducciones)"
+                else:
+                    ultimo_motivo = f"HTTP {probe.status_code}"
+            except http_requests.RequestException as exc:
+                ultimo_motivo = f"conexion: {exc}"
+        if _time.time() > deadline:
+            break
+        _time.sleep(2 * (attempt + 1))
+
+    # Ultimo recurso: devolver el viejo aunque pueda estar por expirar
+    for c in codigos:
+        with _cdn_lock:
+            cached = _cdn_cache.get((name, c))
+        if cached:
+            return cached["url"]
+    return None, ultimo_motivo
+
+
+def cdnlivetv_catalogo():
+    """Canales desde la API publica de cdnlivetv.tv, con estado en vivo.
+
+    La API (https://api.cdnlivetv.tv/api/v1/channels/?user=cdnlivetv&plan=free)
+    devuelve ~414 canales con 'status' online/offline. Usarla evita mantener una
+    lista fija a mano que se queda obsoleta: el cap por canal es dinamico.
+    Se cachea porque es una llamada por carga de la pagina de TV.
+    """
+    url = "https://api.cdnlivetv.tv/api/v1/channels/?user=cdnlivetv&plan=free"
+    with _cdn_lock:
+        cached = _cdn_cat_cache.get("catalogo")
+    if cached and _time.time() - cached["ts"] < _CDN_CAT_TTL:
+        return cached["data"]
+
+    try:
+        r = http_requests.get(url, headers={"User-Agent": HLS_USER_AGENT}, timeout=15)
+        if not r.ok:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        canales = (r.json() or {}).get("channels") or []
+        data = [
+            {
+                "name": c.get("name"),
+                "code": c.get("code"),
+                "status": c.get("status"),
+                "viewers": c.get("viewers"),
+            }
+            for c in canales
+            if c.get("name") and c.get("code")
+        ]
+    except Exception as exc:
+        print(f"[cdnlivetv] catalogo no disponible: {exc}", flush=True)
+        with _cdn_lock:
+            cached = _cdn_cat_cache.get("catalogo")
+        return cached["data"] if cached else []
+
+    with _cdn_lock:
+        _cdn_cat_cache["catalogo"] = {"data": data, "ts": _time.time()}
+    return data
+
+
+def dlive_agenda():
+    """Agenda REAL de dlive.sx: partido -> canal exacto que lo emite.
+
+    cdnlivetv NO expone su agenda (401 sin plan de 500 EUR/mes), asi que antes
+    se INFERIA el canal por deporte: todos los partidos de una liga salian con
+    los mismos canales (DAZN para todo el futbol, etc.), lo cual es falso --
+    un partido de Nations League no va por DAZN F1.
+
+    dlive.sx publica su agenda en el HTML principal, sin clave y con el canal
+    real de cada evento. Se parsea con regex y se cachea 30 min.
+
+    Estructura detectada (verificada en produccion):
+      <div class="schedule__event" ...>
+        <div ... data-title="... event ... HH:MM">
+          <span class="schedule__time">23:00</span>
+          <span class="schedule__eventTitle">...</span>
+          <div class="schedule__channels">
+            <a href="/watch.php?id=112" title="TSN2">TSN2</a>
+    """
+    url = "https://dlive.sx/"
+    with _cdn_lock:
+        cached = _dlive_cache.get("agenda")
+    if cached and _time.time() - cached["ts"] < _DLIVE_TTL:
+        return cached["data"]
+
+    headers = {"User-Agent": HLS_USER_AGENT}
+    try:
+        r = http_requests.get(url, headers=headers, timeout=20)
+        if not r.ok:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        html = r.text
+    except Exception as exc:
+        print(f"[dlive] agenda no disponible: {exc}", flush=True)
+        with _cdn_lock:
+            cached = _dlive_cache.get("agenda")
+        return cached["data"] if cached else []
+
+    eventos = []
+
+    # Un evento por bloque. NO se corta en el siguiente "schedule__event"
+    # (eso se comia los canales del evento anterior); se corta en la
+    # estructura que cierra el bloque: "schedule__channels" seguida de otro
+    # bloque o de un cierre de contenedor.
+    for bloque in re.findall(
+        r'class="schedule__event"(.*?)(?=class="schedule__event"|'
+        r'class="schedule__(?:day|cat|section)|</table>|\Z)',
+        html, re.DOTALL,
+    ):
+        m_hora = re.search(r'data-title="[^"]*?\s(\d{1,2}:\d{2})"', bloque)
+        m_titulo = re.search(
+            r'class="schedule__eventTitle">(.*?)</span>', bloque, re.DOTALL
+        )
+        if not m_hora or not m_titulo:
+            continue
+
+        titulo = re.sub(r"<[^>]+>", "", m_titulo.group(1))
+        titulo = re.sub(r"\s+", " ", titulo).strip()
+        titulo_limpio = re.sub(r"[^\w\s:.\-áéíóúñÁÉÍÓÚÑ()']", " ", titulo)
+        titulo_limpio = re.sub(r"\s+", " ", titulo_limpio).strip()
+        if len(titulo_limpio) < 4:
+            continue
+
+        # Canales: solo los DENTRO de schedule__channels de este bloque.
+        m_cans = re.search(
+            r'class="schedule__channels"(.*?)(?=</div>|\Z)', bloque, re.DOTALL
+        )
+        if not m_cans:
+            continue
+
+        canales = []
+        vistos = set()
+        for m_can in re.finditer(
+            r'href="(/watch\.php\?id=\d+)"[^>]*title="([^"]+)"', m_cans.group(1)
+        ):
+            nombre = m_can.group(2).strip()
+            # "Event Stream" es un placeholder generico, no un canal real.
+            if not nombre or nombre.lower() == "event stream" or nombre in vistos:
+                continue
+            vistos.add(nombre)
+            canales.append({
+                "nombre": nombre,
+                "url": f"{url.rstrip('/')}{m_can.group(1)}",
+            })
+        if not canales:
+            continue
+
+        eventos.append({
+            "hora": m_hora.group(1),
+            "titulo": titulo,
+            "titulo_limpio": titulo_limpio,
+            "canales": canales,
+        })
+
+    print(f"[dlive] agenda parseada: {len(eventos)} eventos", flush=True)
+    with _cdn_lock:
+        _dlive_cache["agenda"] = {"data": eventos, "ts": _time.time()}
+    return eventos
+
+
+def _norm_agenda(txt: str) -> str:
+    """Normaliza un nombre de evento para poder emparejarlo entre fuentes."""
+    txt = (txt or "").lower()
+    txt = re.sub(r"[^\w\s]", " ", txt)
+    return re.sub(r"\s+", " ", txt).strip()
+
+
+def dlive_buscar_canales(home: str, away: str, hora_iso: str = None):
+    """Canales REALES de un partido concreto en la agenda de dlive.
+
+    Empareja por nombre de equipos y, si se conoce, por hora. Devuelve la lista
+    de canales si encuentra el partido, o None si no.
+    """
+    eventos = dlive_agenda()
+    if not eventos:
+        return None
+
+    # Palabras clave de AMBOS equipos. dlive escribe "A vs B" con los mismos
+    # nombres que ESPN, asi que basta con que aparezcan las dos.
+    palabras = [
+        p
+        for p in _norm_agenda(f"{away} {home}").split()
+        if len(p) >= 4
+    ]
+    if len(palabras) < 2:
+        return None
+
+    mejor, mejor_puntaje = None, 0
+
+    for ev in eventos:
+        texto = _norm_agenda(ev["titulo_limpio"])
+        if not texto:
+            continue
+
+        # Ambas partes deben aparecer: si no, es otro partido.
+        if not all(p in texto for p in palabras):
+            continue
+
+        # Emparejar por hora. La agenda de dlive va en hora UK y el partido de
+        # ESPN trae su propio ISO date; se comparan en el mismo eje.
+        puntaje = 10
+        if hora_iso:
+            try:
+                dt_ev = datetime.fromisoformat(str(hora_iso).replace("Z", "+00:00"))
+                hh, mm = (int(x) for x in ev["hora"].split(":"))
+                # dlive usa UK/GMT; en horario de verano britanico va +1.
+                dif = abs(
+                    (hh * 60 + mm)
+                    - (dt_ev.hour * 60 + dt_ev.minute + 60)
+                )
+                dif = min(dif, 24 * 60 - dif)
+                if dif > 120:  # mas de 2h de diferencia: no es este partido
+                    continue
+                puntaje += max(0, 6 - dif // 30)
+            except (ValueError, TypeError):
+                pass
+
+        if puntaje > mejor_puntaje:
+            mejor, mejor_puntaje = ev, puntaje
+
+    return mejor["canales"] if mejor else None
+
+
+def _canales_por_liga(equipo_local: str, equipo_visita: str, sport: str) -> list:
+    """Canales cdnlivetv que probablemente emiten este partido, de mayor a menor.
+
+    cdnlivetv.tv NO expone el API de sports (devuelve 401 sin plan Premium), asi
+    que no hay forma de saber el broadcaster exacto. Se infiere por el deporte y
+    se filtran los que estan ONLINE ahora mismo, para no ofrecer canales caidos.
+    """
+    cat = cdnlivetv_catalogo()
+    if not cat:
+        return []
+
+    # Solo canales online: el cap es dinamico y un canal saturado solo falla.
+    online = [c for c in cat if c.get("status") == "online"]
+
+    # Palabras clave del deporte, en orden de preferencia (mas especifico antes).
+    # El nombre del partido se usa como desempate: si el canal comparte palabras
+    # con el equipo (p.ej. "Dodgers" -> "Sportsnet Dodgers"), sube de prioridad.
+    reglas = {
+        "mlb": ["mlb network", "sportsnet", "fox sports", "espn"],
+        "nba": ["nba tv", "espn", "tnt", "sky sports", "sportsnet"],
+        "nfl": ["nfl network", "espn", "cbs", "fox sports", "sportsnet"],
+        "nhl": ["nhl network", "sportsnet", "tnt", "espn"],
+        "soccer": ["dazn", "bein", "fox sports", "tudn", "espn", "premier sports",
+                   "la liga", "sky sports", "canal+", "tnt sports"],
+        "tennis": ["tennis", "espn"],
+    }
+    claves = reglas.get(sport, ["espn", "fox sports", "sportsnet", "dazn"])
+
+    texto_partido = f"{equipo_local} {equipo_visita}".lower()
+
+    def _prioridad(canal):
+        n = (canal.get("name") or "").lower()
+        puntaje = 0
+        # 1) Coincidencia con una palabra clave del deporte.
+        for i, clave in enumerate(claves):
+            if clave in n:
+                puntaje += 100 - i * 5
+                break
+        # 2) Bonus si el canal menciona al equipo (emisor dedicado).
+        for palabra in re.findall(r"[a-z]{4,}", texto_partido):
+            if palabra in n:
+                puntaje += 40
+                break
+        return puntaje
+
+    candidatos = [
+        {"name": c["name"], "code": c["code"], "score": _prioridad(c)}
+        for c in online
+    ]
+    candidatos = [c for c in candidatos if c["score"] > 0]
+    candidatos.sort(key=lambda c: -c["score"])
+
+    return [
+        {
+            "name": c["name"],
+            "code": c["code"],
+        }
+        for c in candidatos[:3]
+    ]
+
+
+# Cache de la agenda. Antes cada carga de "Partidos de hoy" llamaba a
+# sports.get_sport_games() para 5 deportes y a dlive_buscar_canales() por cada
+# partido: con varios usuarios a la vez eso es una avalancha al upstream y la
+# pantalla se sentia lenta/inestable (y era carga, no video).
+_AGENDA_TTL = 5 * 60
+_agenda_cache = {}  # clave -> {"data": dict, "ts": float}
+_agenda_lock = threading.Lock()
+
+
+@app.get("/tv/agenda")
+def tv_agenda(
+    sport: str = None,
+    solo_pre: bool = True,
+):
+    """Agenda de HOY con el canal de cada partido.
+
+    Reemplaza a la lista de canales: el usuario ve que se juega, y al pulsar
+    abre el canal que lo emite. Los partidos ya terminados se omiten por
+    defecto (no tiene sentido ver un partido acabado).
+    """
+    clave = f"{sport or 'todos'}|{bool(solo_pre)}"
+    with _agenda_lock:
+        hit = _agenda_cache.get(clave)
+    if hit and _time.time() - hit["ts"] < _AGENDA_TTL:
+        return hit["data"]
+
+    try:
+        import sports
+    except Exception:
+        raise HTTPException(503, "Servicio de deportes no disponible.")
+
+    deportes = [sport] if sport else ["mlb", "nba", "nfl", "nhl", "soccer"]
+    agenda = []
+
+    for s in deportes:
+        try:
+            data = sports.get_sport_games(s)
+        except Exception as exc:
+            print(f"[agenda] {s} fallo: {exc}", flush=True)
+            continue
+
+        for g in (data.get("games") or []):
+            estado = (g.get("state") or "").lower()
+            if solo_pre and estado != "pre":
+                continue
+
+            local = ((g.get("home") or {}).get("name")) or ""
+            visita = ((g.get("away") or {}).get("name")) or ""
+            if not local or not visita:
+                continue
+
+            # 1) Canal REAL segun la agenda de dlive. Si lo sabemos, mandan sus
+            #    datos sobre cualquier inferencia.
+            reales = None
+            try:
+                reales = dlive_buscar_canales(local, visita, g.get("date"))
+            except Exception as exc:
+                print(f"[agenda] dlive fallo: {exc}", flush=True)
+
+            if reales:
+                canales = [
+                    {
+                        "name": c["nombre"],
+                        "code": "",
+                        "dlive": c["url"],
+                    }
+                    for c in reales[:3]
+                ]
+                fuente = "dlive"
+            else:
+                # 2) Sin dato real: se infiere por deporte y se MARCA como
+                #    estimado. Antes se mostraba como si fuera exacto y era
+                #    falso (todos los partidos de una liga con los mismos).
+                canales = _canales_por_liga(local, visita, s)
+                fuente = "estimado"
+
+            if not canales:
+                continue
+
+            odds = g.get("odds") or {}
+            agenda.append({
+                "sport": s,
+                "home": local,
+                "away": visita,
+                "name": g.get("name"),
+                "date": g.get("date"),
+                "state": estado,
+                "status": g.get("status") or "",
+                "league": g.get("league") or "",
+                "total": odds.get("over_under"),
+                "linea": odds.get("details"),
+                "canales": canales,
+                "fuente": fuente,
+            })
+
+    # Ordenar por hora de inicio.
+    agenda.sort(key=lambda a: (a.get("date") or ""))
+
+    payload = {
+        "total": len(agenda),
+        "partidos": agenda,
+        "generado": int(_time.time()),
+    }
+    with _agenda_lock:
+        _agenda_cache[clave] = {"data": payload, "ts": _time.time()}
+    return payload
+
+
+@app.get("/tv/canales-cdn")
+def tv_canales_cdn():
+    """Catalogo de canales cdnlivetv con su estado en vivo.
+
+    Publico (como /hls-proxy) para que la UI pueda pintar solo los que estan
+    online y no ofrezca canales que el proveedor tiene capeados.
+    """
+    cat = cdnlivetv_catalogo()
+    if not cat:
+        raise HTTPException(503, "Catalogo de canales no disponible ahora mismo.")
+
+    Deportivo = (
+        "espn", "tsn", "sportsnet", "mlb", "nfl", "nba", "nhl", "cbs", "fox",
+        "nbc", "abc", "dazn", "ufc", "btn", "bein", "tnt", "sky sport",
+        "premier sport", "laliga", "serie a", "bundesliga", "canal+",
+        "pga", "golf", "f1", "formula", "racing", "tennis", "cricket",
+    )
+
+    def _es_deportivo(nombre):
+        n = (nombre or "").lower()
+        return any(k in n for k in Deportivo)
+
+    todos = sorted(
+        (
+            {
+                "name": c["name"],
+                "code": c["code"],
+                "online": c.get("status") == "online",
+            }
+            for c in cat
+        ),
+        key=lambda c: (c["code"], c["name"].lower()),
+    )
+    deps = [c for c in todos if _es_deportivo(c["name"])]
+
+    return {
+        "total": len(todos),
+        "online": sum(1 for c in todos if c["online"]),
+        "deportivos": deps,
+        "deportivos_online": sum(1 for c in deps if c["online"]),
+        "todos": todos,
+    }
+
+
+@app.get("/tv/cdnlivetv/{name}/{code}")
+def tv_cdnlivetv(request: Request, name: str, code: str):
+    """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy."""
+    resultado = cdnlivetv_fresh(name, code)
+    # cdnlivetv_fresh devuelve solo la URL, o (None, motivo) si no pudo.
+    stream, motivo = resultado if isinstance(resultado, tuple) else (resultado, None)
+    if not stream:
+        raise HTTPException(
+            503,
+            f"El canal {name} no esta disponible ahora mismo "
+            f"({motivo or 'proveedor saturado'}). cdnlivetv.tv limita las "
+            f"reproducciones simultaneas; prueba en unos minutos o usa otro canal.",
+        )
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(_wrap(stream, _proxy_base(request)), status_code=302)
+
+
+# === Player Stats API (MLB + Football) ===
+@app.get("/api/player/{sport}/{player_id}/last5")
+async def api_get_player_last5(
+    sport: str,
+    player_id: int,
+    season: int = 2024,
+    league: str = None,
+    team_ids: str = None,
+):
+    """
+    Obtiene las últimas 5 actuaciones de un jugador.
+    sport: "mlb" o "football"
+    player_id: ID del jugador
+    season: año de la temporada (opcional, default 2024)
+    league: slug de liga ESPN para futbol (ej. esp.1) — usado por el fallback ESPN
+    team_ids: ids de equipos ESPN separados por coma — usado por el fallback ESPN
+    """
+    tid_list = [t.strip() for t in team_ids.split(",") if t.strip()] if team_ids else None
+    if player_stats_service is None:
+        return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
+    result = player_stats_service.get_last5(sport, player_id, season, league=league, team_ids=tid_list)
+    if result.get("error"):
+        return {"error": True, "message": result.get("message", "Error desconocido")}
+    if not result.get("last_5_games"):
+        return {"error": True, "message": "No hay estadísticas disponibles para este jugador todavía."}
+    return result
+
+# ==============================
+# PANEL ADMIN (solo administradores)
+# ==============================
+
+@app.get("/api/standings/{league}")
+def api_standings(league: str, user=Depends(get_current_user)):
+    """Tabla de posiciones de una liga de futbol (ESPN), con grupos por zona."""
+    import sports
+
+    try:
+        return sports.get_standings(league)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        print(f"[standings] {league} fallo: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener la tabla de posiciones.")
+
+
+@app.get("/api/game/{sport}/{game_id}/players")
+def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(get_current_user)):
+    """Lista de jugadores clickeables de un partido (boxscore MLB / lineup futbol)."""
+    if player_stats_service is None:
+        return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
+    return player_stats_service.get_clickable_players(sport, game_id, season)
+
+
+# ==============================
+# TRANSCODIFICADOR HLS (fallback universal)
+# ==============================
+@app.get("/live/index.m3u8")
+def live_index(request: Request, url: str, referer: str = None):
+    """
+    Inicia (o reutiliza) un transcodificador FFmpeg para la fuente indicada
+    y devuelve una playlist H.264/AAC universal que reproduce cualquier
+    navegador. Tercer fallback del reproductor de TV.
+    """
+    if not url or not re.match(r"^https?://", url.strip()):
+        raise HTTPException(400, "URL invalida")
+    # Anti-SSRF: FFmpeg descargaria la URL desde el servidor. Sin este filtro
+    # cualquiera podia apuntarlo a localhost / metadatos de la nube / red
+    # interna y usar el backend como proxy ciego.
+    if not _url_tiene_host_publico(url.strip()):
+        raise HTTPException(403, "Host no permitido")
+    # Coste alto (proceso FFmpeg): limite por IP ademas del tope global.
+    _rate_limit(f"transcode:{_ip_del_cliente(request)}", 12, 600)
+    try:
+        key = transcoder.start_session(url.strip(), (referer or "").strip() or None)
+        playlist = transcoder.get_playlist(key)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    return PlainTextResponse(
+        playlist,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/live/{key}/{name}")
+def live_segment(key: str, name: str):
+    """Sirve segmentos .ts del transcodificador y mantiene la sesion viva."""
+    if not re.match(r"^[a-f0-9]{16}$", key):
+        raise HTTPException(400, "Sesion invalida")
+    path = transcoder.get_segment_path(key, name)
+    if not path:
+        raise HTTPException(404, "Segmento no disponible")
+    media_type = (
+        "application/vnd.apple.mpegurl" if name.endswith(".m3u8")
+        else "video/mp2t"
+    )
+    return FileResponse(path, media_type=media_type)
+
+
+@app.get("/admin/channel-test")
+def admin_channel_test(url: str, user=Depends(get_admin)):
+    """Prueba un m3u8/canal desde el servidor: status, content-type y si es HLS."""
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "URL invalida")
+    if not _url_tiene_host_publico(url):
+        raise HTTPException(400, "Host no permitido.")
+    try:
+        resp = http_requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        ct = (resp.headers.get("content-type") or "")
+        body = resp.text[:200]
+        is_hls = ("mpegurl" in ct.lower()) or body.startswith("#EXTM3U")
+        return {
+            "url": url,
+            "status": resp.status_code,
+            "content_type": ct,
+            "is_hls": bool(is_hls),
+            "ok": resp.status_code == 200 and is_hls,
+        }
+    except Exception as exc:
+        print(f"[channel-test] {url[:80]} fallo: {exc}", flush=True)
+        return {"url": url, "status": 0, "ok": False,
+                "error": "La fuente no respondio."}
+
+
+@app.delete("/admin/keys/{code}")
+def admin_delete_key(code: str, user=Depends(get_admin)):
+    """Borra una key SOLO si no ha sido reclamada."""
+    ok = db.delete_unclaimed_key(code)
+    if not ok:
+        raise HTTPException(400, "La key no existe o ya fue reclamada.")
+    return {"ok": True, "message": f"Key {code.upper()} eliminada."}
+
+
+# ==============================
+# CANALES DE TV (gestion admin)
+# ==============================
+
+@app.get("/channels")
+def list_public_channels(user=Depends(get_current_user)):
+    """Canales ACTIVOS para la pagina de TV (usuarios autenticados)."""
+    return {"channels": db.list_channels(active_only=True)}
+
+
+@app.get("/admin/channels")
+def admin_list_channels(user=Depends(get_admin)):
+    """Todos los canales (activos y apagados) para el panel admin."""
+    return {"channels": db.list_channels(active_only=False)}
+
+
+@app.post("/admin/channels")
+def admin_create_channel(data: ChannelIn, user=Depends(get_admin)):
+    """Agrega un canal nuevo (queda ACTIVO por defecto)."""
+    name = data.name.strip()
+    stream = data.stream.strip()
+    if not name or not stream.startswith(("http://", "https://")):
+        raise HTTPException(400, "Nombre y URL del stream son obligatorios.")
+    channel = db.create_channel(
+        name=name,
+        stream=stream,
+        ctype=data.type if data.type in ("m3u8", "iframe") else "m3u8",
+        ads=data.ads,
+        use_proxy=data.useProxy,
+        geo_restriction=(data.geoRestriction or "NONE").upper(),
+    )
+    if not channel:
+        raise HTTPException(500, "No se pudo guardar el canal.")
+    return {"ok": True, "channel": channel}
+
+
+@app.put("/admin/channels/{channel_id}")
+def admin_update_channel(channel_id: str, data: ChannelUpdateIn, user=Depends(get_admin)):
+    """Edita un canal o cambia su estado (ACTIVO / CAIDO = apagado)."""
+    fields = {}
+    if data.name is not None:
+        fields["name"] = data.name.strip()
+    if data.stream is not None:
+        fields["stream"] = data.stream.strip()
+    if data.type is not None and data.type in ("m3u8", "iframe"):
+        fields["type"] = data.type
+    if data.status is not None:
+        fields["status"] = data.status.upper()
+    if data.ads is not None:
+        fields["ads"] = data.ads
+    if data.useProxy is not None:
+        fields["use_proxy"] = data.useProxy
+    if data.geoRestriction is not None:
+        fields["geo_restriction"] = data.geoRestriction.upper()
+    channel = db.update_channel(channel_id, **fields)
+    if not channel:
+        raise HTTPException(404, "Canal no encontrado o sin cambios.")
+    return {"ok": True, "channel": channel}
+
+
+@app.delete("/admin/channels/{channel_id}")
+def admin_delete_channel(channel_id: str, user=Depends(get_admin)):
+    ok = db.delete_channel(channel_id)
+    if not ok:
+        raise HTTPException(404, "Canal no encontrado.")
+    return {"ok": True}
+
+
+# ==============================
+# EVENTOS / PARTIDOS DEL DIA (TV)
+# ==============================
+
+@app.get("/events")
+def list_tv_events(user=Depends(get_current_user)):
+    """Partidos del dia con links vigentes (< 6h) para la pagina de TV."""
+    db.purge_events()
+    return {"events": db.list_events()}
+
+
+@app.get("/event-resolve")
+def event_resolve(url: str, user=Depends(get_current_user)):
+    """Devuelve el playbackURL FRESCO de una pagina de evento de la fuente.
+
+    Los tokens de la fuente se invalidan cuando alguien abre la pagina de
+    nuevo, asi que los scrapeados mueren en minutos. En su lugar, al hacer
+    clic en un partido, el backend pide la pagina EN ESE INSTANTE y extrae
+    el token vigente (misma regex que usa el scraper).
+    """
+    target = (url or "").strip()
+    if not re.match(r"^https?://", target):
+        raise HTTPException(400, "URL invalida")
+    # Solo paginas de la fuente (la18hd) para que no sirva de proxy abierto
+    if "la18hd.su" not in target:
+        raise HTTPException(400, "Fuente no permitida")
+    # El host del stream rota en cada scrape y algunos hosts salen muertos
+    # (DNS fail / 404): re-scrapeamos hasta 3 veces y devolvemos el PRIMER
+    # token cuyo m3u8 realmente responde. Sin esto, "Recargar canal" puede
+    # devolver otro stream muerto y el usuario sigue viendo manifestLoadError.
+    ultimo_error = "La fuente no responde en este momento."
+    for _intento in range(3):
+        try:
+            resp = http_requests.get(
+                target,
+                headers={"User-Agent": HLS_USER_AGENT, "Referer": "https://la18hd.su/"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception:
+            time.sleep(1)
+            continue
+        match = re.search(r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text)
+        if not match:
+            ultimo_error = "No se encontro el stream en la pagina."
+            continue
+        candidato = match.group(1)
+        # Anti-SSRF: el candidato viene de una pagina scrapeada, validar host
+        if not _url_tiene_host_publico(candidato):
+            continue
+        try:
+            check = http_requests.get(
+                candidato,
+                headers={"User-Agent": HLS_USER_AGENT, "Referer": target},
+                timeout=10,
+            )
+            if check.status_code == 200 and "#EXTM3U" in check.text:
+                return {"url": candidato}
+        except Exception:
+            pass
+        ultimo_error = "El stream salio muerto; reintentando con un token nuevo."
+        time.sleep(1)
+    raise HTTPException(502, ultimo_error)
+
+
+# ============================================================
+# ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
+# ============================================================
+# Reproductor de ESPN Deportes + marcador y estadisticas del
+# partido destacado del dia (Atlético Madrid vs Real Madrid). Disponible
+# solo durante la ventana de 2 horas alrededor del kickoff.
+# Nada de esto requiere cuenta: es captacion de usuarios.
+
+FREE_ESPN_MATCH = ("atlético madrid", "real madrid")   # equipos del partido destacado
+FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
+FREE_ESPN_WINDOW_AFTER_MIN = 97             # ...y cierra 97 min despues (2h + 7 min extra)
+FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
+FREE_ESPN_STREAM_URL = "https://admin2.formaturamaxi.com.br/dep.m3u8"  # stream principal
+
+
+def _free_espn_buscar_partido():
+    """Busca el partido destacado (Atlético Madrid vs Real Madrid) en la agenda de hoy."""
+    import sports
+
+    data = sports.get_sport_games("soccer", "esp.1")
+    busqueda = [t.lower() for t in FREE_ESPN_MATCH]
+    for g in data.get("games", []):
+        home = (g.get("home") or {}).get("name") or ""
+        away = (g.get("away") or {}).get("name") or ""
+        nombres = f"{home} {away}".lower()
+        if all(t in nombres for t in busqueda):
+            return g
+    return None
+
+
+def _free_espn_ventana(game: dict):
+    """Devuelve (apertura, cierre) de la ventana gratis como datetimes UTC."""
+    from datetime import datetime, timedelta, timezone
+
+    fecha = (game.get("date") or "").replace("Z", "+00:00")
+    try:
+        kickoff = datetime.fromisoformat(fecha).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        kickoff = datetime.now(timezone.utc)
+    apertura = kickoff - timedelta(minutes=FREE_ESPN_WINDOW_BEFORE_MIN)
+    cierre = kickoff + timedelta(minutes=FREE_ESPN_WINDOW_AFTER_MIN)
+    return apertura, cierre
+
+
+@app.get("/tv-live/match")
+def free_espn_match():
+    """Partido destacado + marcador + estadisticas (publico, sin registro)."""
+    game = _free_espn_buscar_partido()
+    if not game:
+        return {
+            "disponible": False,
+            "motivo": "El partido destacado no esta en la agenda de hoy.",
+        }
+
+    from datetime import datetime, timezone
+
+    apertura, cierre = _free_espn_ventana(game)
+    ahora = datetime.now(timezone.utc)
+    home = game.get("home") or {}
+    away = game.get("away") or {}
+
+    detail = {}
+    try:
+        import sports
+        detail = sports.get_game_detail("soccer", str(game.get("id"))) or {}
+    except Exception:
+        detail = {}
+
+    teams = []
+    for equipo, base in ((home, detail.get("teams")[0] if detail.get("teams") else None),
+                         (away, detail.get("teams")[1] if len(detail.get("teams") or []) > 1 else None)):
+        stats = (base or {}).get("statistics") or []
+        teams.append({
+            "name": (base or {}).get("name") or (base or {}).get("short_name") or equipo.get("name"),
+            "logo": (base or {}).get("logo") or equipo.get("logo"),
+            "score": (base or {}).get("score") if base is not None else equipo.get("score"),
+            "winner": (base or {}).get("winner") if base is not None else equipo.get("winner"),
+            "statistics": stats,
+        })
+
+    dentro_ventana = (apertura <= ahora <= cierre) and game.get("state") != "post"
+    tiempo_restante = max(0, int((cierre - ahora).total_seconds())) if dentro_ventana else 0
+
+    return {
+        "disponible": dentro_ventana,
+        "tiempo_restante_seg": tiempo_restante,
+        "apertura": apertura.isoformat(),
+        "cierre": cierre.isoformat(),
+        "kickoff": game.get("date"),
+        "estado": game.get("state"),
+        "reloj": detail.get("clock") or game.get("clock") or "",
+        "status": detail.get("status") or game.get("status") or "",
+        "liga": detail.get("league") or game.get("league") or "LaLiga",
+        "event_id": str(game.get("id")),
+        "teams": teams,
+        "suscripcion": {
+            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
+            "planes_endpoint": "/pagadito/plans",
+            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
+            "planes": get_pagadito_plans(),
+        },
+    }
+
+
+@app.get("/tv-live/stream")
+def free_espn_stream(request: Request):
+    """m3u8 por el proxy HLS (publico). Cadena de respaldo validada:
+
+    1. Stream oficial (token Akamai; vence rapido, se valida en vivo).
+    2. Evento del partido en la TV (Partidos de Hoy): token fresco de su
+       pagina de la fuente; si no, el token guardado en la BD.
+    3. Stream fijo de respaldo.
+    Se sirve el PRIMERO que responda 200 con #EXTM3U.
+    """
+    from datetime import datetime, timezone
+
+    url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
+
+    def _vivo(u: str, referer: str | None = None) -> bool:
+        try:
+            headers = {"User-Agent": HLS_USER_AGENT}
+            if referer:
+                headers["Referer"] = referer
+            r = http_requests.get(u, headers=headers, timeout=8)
+            if r.status_code != 200:
+                return False
+            text = r.text
+            # HLS playlist (m3u8)
+            if "#EXTM3U" in text:
+                return True
+            # Página embed HTML con player de video (iframe, video, o referencia m3u8)
+            low = text.lower()
+            if "<iframe" in low or "<video" in low or "m3u8" in low:
+                return True
+            return False
+        except Exception:
+            return False
+
+    cierre = None
+    try:
+        game = _free_espn_buscar_partido()
+        if game:
+            apertura, cierre = _free_espn_ventana(game)
+            ahora = datetime.now(timezone.utc)
+            if ahora < apertura:
+                segundos = int((apertura - ahora).total_seconds())
+                raise HTTPException(403, f"El acceso abre en {segundos // 60} minutos.")
+            if game.get("state") == "post":
+                raise HTTPException(403, "El partido ya termino.")
+            if ahora > cierre:
+                raise HTTPException(403, "El acceso gratuito termino.")
+    except HTTPException:
+        raise
+
+    # --- Candidatos (fubo18 del partido, en orden de preferencia) ---
+    # 1) Stream principal (admin2). 2) Stream fijo de respaldo. 3) HTML embed
+    candidatos = [(FREE_ESPN_STREAM_URL, None), (url_fija, None)]
+    # Fallback HTML embed (no es m3u8 pero carga el player correctamente)
+    candidatos.append((FREE_ESPN_STREAM_EXTRA, None))
+
+    try:
+        # 1) Process database events that have a valid stream (any event, not just the hardcoded match)
+        for ev in db.list_events() or []:
+            guardado = ev.get("stream") or ""
+            page = ev.get("referer") or ""
+            if guardado.startswith("http"):
+                candidatos.append((guardado, page))
+            # Also try to extract from referer if it's a valid page
+            if page.startswith("http"):
+                try:
+                    resp = http_requests.get(
+                        page,
+                        headers={
+                            "User-Agent": HLS_USER_AGENT,
+                            "Referer": "https://la18hd.su/",
+                        },
+                        timeout=12,
+                    )
+                    m = re.search(
+                        r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
+                    )
+                    if m:
+                        candidatos.append((m.group(1), page))
+                except Exception:
+                    pass
+
+        # 2) Also check the hardcoded FREE_ESPN_MATCH if needed (avoid duplicates)
+        tokens = [t.lower() for t in FREE_ESPN_MATCH]
+        for ev in db.list_events() or []:
+            nombre = (ev.get("name") or "").lower()
+            if all(t in nombre for t in tokens):
+                page = ev.get("referer") or ""
+                if page.startswith("http"):
+                    try:
+                        resp = http_requests.get(
+                            page,
+                            headers={
+                                "User-Agent": HLS_USER_AGENT,
+                                "Referer": "https://la18hd.su/",
+                            },
+                            timeout=12,
+                        )
+                        m = re.search(
+                            r'var\s+playbackURL\s+=\s+"([^"]*)"', resp.text
+                        )
+                        if m:
+                            # Avoid duplicate if already added
+                            if not any(c[0] == m.group(1) for c in candidatos):
+                                candidatos.append((m.group(1), page))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # Validar en vivo y armar hasta 3 OPCIONES (max 6 checks para no tardar)
+    opciones = []
+    vistos = set()
+    checks = 0
+    proxy_base = _proxy_base(request)
+    for url_c, ref in candidatos:
+        if url_c in vistos or checks >= 6 or len(opciones) >= 3:
+            continue
+        vistos.add(url_c)
+        checks += 1
+        if _vivo(url_c, ref):
+            opciones.append({
+                "label": f"Opción {len(opciones) + 1}",
+                "url": _wrap(url_c, proxy_base, ref),
+            })
+
+    if not opciones:
+        # Nada validado ahora mismo: entregar el stream principal de todos modos
+        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_URL, proxy_base)})
+
+    ahora2 = datetime.now(timezone.utc)
+    tiempo_restante = max(0, int((cierre - ahora2).total_seconds())) if cierre else 0
+    respuesta = {
+        "opciones": opciones,
+        "tiempo_restante_seg": tiempo_restante,
+        "suscripcion": {
+            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
+            "planes_endpoint": "/pagadito/plans",
+            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
+            "planes": get_pagadito_plans(),
+        },
+    }
+    if cierre:
+        respuesta["expira"] = cierre.isoformat()
+    return respuesta
+
+
+@app.post("/admin/events")
+def admin_replace_events(data: EventsIn, user=Depends(get_admin)):
+    """Reemplaza TODA la lista de eventos (lo llama el scraper en cada corrida)."""
+    count = db.replace_events([ev.model_dump() for ev in data.events])
+    if count == 0:
+        raise HTTPException(400, "Ningun evento valido en la lista.")
+    return {"ok": True, "count": count}
+
+
+@app.delete("/admin/events")
+def admin_delete_events(user=Depends(get_admin)):
+    """Borra todos los eventos (manual, por si la fuente se rompio)."""
+    ok = db.run_query("delete from events")
+    return {"ok": bool(ok)}
+

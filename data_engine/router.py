@@ -148,6 +148,9 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
     detalles = []
 
     for p in picks:
+        mercado_txt = ((p.get("market") or "") + " " + (p.get("titulo") or "")).lower()
+        if "primer juego" in mercado_txt or "primer punto" in mercado_txt:
+            continue
         fecha = str(p.get("event_date") or "")[:10].replace("-", "") or None
         try:
             d = buscar_completo(p.get("sport") or "soccer", p.get("home_name") or "",
@@ -234,6 +237,10 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
 
 def search_prop(q: PropQuery):
     """Verifica un pick: ACIERTO / FALLO / NO_RESOLUBLE."""
+    mercado_txt = ((q.market or "") + " " + (getattr(q, 'titulo', '') or "")).lower()
+    if "primer juego" in mercado_txt or "primer punto" in mercado_txt:
+        return {"result": "PENDIENTE", "source": None, "value_real": None,
+                "confidence": 0, "message": "Mercado descartado."}
     d = buscar_completo(q.sport, q.home_name, q.away_name, q.event_date, q.league)
     if not d.get("found"):
         return {"result": "PENDIENTE", "source": None, "value_real": None,
