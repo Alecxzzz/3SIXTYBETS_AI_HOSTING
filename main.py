@@ -4096,3 +4096,29 @@ def admin_delete_events(user=Depends(get_admin)):
     ok = db.run_query("delete from events")
     return {"ok": bool(ok)}
 
+
+
+# ==================== AUTO-RESOLVER CRON ====================
+import threading
+import time as _time
+import sys as _sys
+
+_dr_mod = _sys.modules.get('data_engine.router')
+
+def _auto_resolver_loop():
+    _time.sleep(60)
+    while True:
+        try:
+            if _dr_mod and hasattr(_dr_mod, 'resolve_picks'):
+                _dr_mod.resolve_picks(limite=200, solo_hoy=False, anular_no_resolubles=False, admin={'role': 'admin', 'id': 'system'})
+                print('[AUTO-RESOLVER] OK')
+        except Exception as e:
+            print(f'[AUTO-RESOLVER] ERR: {e}')
+        _time.sleep(600)
+
+try:
+    _auto_t = threading.Thread(target=_auto_resolver_loop, daemon=True)
+    _auto_t.start()
+    print('[AUTO-RESOLVER] Iniciado cada 10 minutos')
+except Exception as e:
+    print(f'[AUTO-RESOLVER] No se pudo iniciar: {e}')
