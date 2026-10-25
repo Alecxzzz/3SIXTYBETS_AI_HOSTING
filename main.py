@@ -3823,7 +3823,7 @@ FREE_ESPN_MATCH = ("real madrid", "barcelona")  # El Clásico
 FREE_ESPN_SPORT = "soccer"                  # deporte del partido destacado
 FREE_ESPN_LEAGUE = "esp.1"                  # LaLiga
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
-FREE_ESPN_WINDOW_AFTER_MIN = 112            # ...y cierra 112 min despues (2h + 22 min extra)
+FREE_ESPN_WINDOW_AFTER_MIN = 172            # ...y cierra 172 min despues (2h + 82 min extra)
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal principal pedida para /espn-gratis (Stream 1)
 FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_2/ESPN_2.isml/ESPN_2.m3u8"
