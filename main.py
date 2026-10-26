@@ -43,7 +43,7 @@ except ImportError:
 
 app = FastAPI(
     title="3SIXTYBETS AI WORKSPOT",
-    description="IA deportiva con busqueda web automatica.",
+    description="IA deportiva con busqueda web automatica para estadisticas y pronosticos.",
     version="2.0"
 )
 
