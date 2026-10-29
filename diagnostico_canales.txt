@@ -1,0 +1,310 @@
+channels.js -> 52 canales, 89 fuentes (principal + opciones)
+Origen asumido del frontend (CORS): https://threesixtybets-chat.vercel.app
+
+================================================================================================================
+INFORME POR CANAL
+DIRECTO   = se reproduce tal cual (https + CORS valido)
+PROXY     = tiene que pasar por /hls-proxy (http o CORS no valido)
+TRANSCODE = codec que el navegador no decodifica -> /live/index.m3u8 (FFmpeg)
+CAIDO     = la fuente no responde (403/404/timeout)
+================================================================================================================
+
+[DIRECTO] ANALISTAS TV (EN INGLES)   (useProxy en channels.js: false)
+    principal  DIRECTO    https H.264 .ts cors=OK
+
+[CAIDO] BEIN 1   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP 403 cors=NO(*) HTTP 403
+
+[DIRECTO] BEIN SPORTS EXTRA Ñ (español)   (useProxy en channels.js: false)
+    principal  DIRECTO    https avc1.640028,mp4a.40.2 1024x576 .m3u8 cors=OK
+
+[PROXY] BEIN SPORTS XTRA (ingles)   (useProxy en channels.js: true)
+    principal  PROXY      https avc1.4d4028,mp4a.40.2 1024x576 .m3u8 cors=NO(https://bein-beinxtrasports-firetv.amagi.tv)
+
+[PROXY] CANAL 4 (JUEGOS MLB)   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[CAIDO] CANAL AMERICA   (useProxy en channels.js: true)
+    principal  CAIDO      http  HTTP 404 cors=NO HTTP 404
+
+[CAIDO] CBS SPORT GOLAZO   (useProxy en channels.js: true)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+
+[PROXY] CBS UEFA CHAMPIONS LEAGUE   (useProxy en channels.js: true)
+    principal  PROXY      https .m3u8 cors=NO(http://pluto.tv)
+
+[DIRECTO/PROXY] CLARO SPORTS   (useProxy en channels.js: false)
+    principal  DIRECTO    https .ts cors=OK
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] CLARO SPORTS 2   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] DIRECTV SPORTS   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] DSPORTS 1   (useProxy en channels.js: true)
+    principal  PROXY      http  .m3u8 cors=OK
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] DSPORTS 2   (useProxy en channels.js: true)
+    principal  PROXY      http  AAC, H.264 .m3u8 cors=OK
+
+[CAIDO/PROXY] ESPN 1   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO ReadTimeout
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 3   PROXY      http  .m3u8 cors=OK
+    opcion 4   CAIDO      https HTTP None cors=NO SSLError
+    opcion 5   CAIDO      https HTTP None cors=NO ConnectTimeout
+    opcion 6   CAIDO      https HTTP None cors=NO ConnectTimeout
+    opcion 7   PROXY      http  .m3u8 cors=OK
+    opcion 8   CAIDO      https HTTP None cors=NO SSLError
+    opcion 9   PROXY      http  AAC .m3u8 cors=OK
+    opcion 10  CAIDO      http  HTTP 404 cors=NO(*) HTTP 404
+    opcion 11  CAIDO      https HTTP None cors=NO ConnectTimeout
+
+[CAIDO/PROXY] ESPN 2   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO ConnectTimeout
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 3   PROXY      http  AAC .m3u8 cors=OK
+    opcion 4   PROXY      http  .m3u8 cors=OK
+    opcion 5   PROXY      http  AAC .m3u8 cors=OK
+    opcion 6   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 7   PROXY      http  AAC .m3u8 cors=OK
+
+[CAIDO/PROXY] ESPN 3   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO ConnectTimeout
+    opcion 2   PROXY      http  AAC .m3u8 cors=OK
+    opcion 3   CAIDO      http  HTTP None cors=NO ConnectTimeout
+    opcion 4   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 5   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 6   PROXY      http  AAC .m3u8 cors=OK
+    opcion 7   PROXY      http  .m3u8 cors=OK
+    opcion 8   PROXY      http  .m3u8 cors=OK
+
+[CAIDO/PROXY] ESPN 4   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO ConnectTimeout
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 3   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 4   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 5   PROXY      http  MP3 .m3u8 cors=OK
+    opcion 6   PROXY      http  H.264 .m3u8 cors=OK
+    opcion 7   PROXY      http  H.264, tipo0x86 .m3u8 cors=OK
+    opcion 8   PROXY      http  .m3u8 cors=OK
+
+[CAIDO] EUROSPORT 1   (useProxy en channels.js: true)
+    principal  CAIDO      http  HTTP 404 cors=NO HTTP 404
+
+[CAIDO] EUROSPORT 2   (useProxy en channels.js: true)
+    principal  CAIDO      http  HTTP 404 cors=NO HTTP 404
+
+[TRANSCODE] FOX DEPORTES (ESPAÑOL)   (useProxy en channels.js: true)
+    principal  TRANSCODE  http  HEVC/H.265, tipo0x05 .m3u8 cors=OK
+
+[PROXY] FOX DEPORTES 2 ESPAÑOL   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] FOX SPORTS   (useProxy en channels.js: true)
+    principal  PROXY      https .m3u8 cors=NO(http://pluto.tv)
+
+[CAIDO] FOX SPORTS 2   (useProxy en channels.js: true)
+    principal  CAIDO      http  HTTP 404 cors=NO HTTP 404
+
+[CAIDO] FOX SPORTS CENTROAMERICA   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP None cors=NO ConnectTimeout
+
+[CAIDO] FS1 (MLB - NFL Y MAS)   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP None cors=NO ConnectTimeout
+
+[CAIDO] FS2   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO ConnectTimeout
+
+[PROXY] GOLAZO NETWORK   (useProxy en channels.js: true)
+    principal  PROXY      https .m3u8 cors=NO(http://pluto.tv)
+
+[CAIDO] LALIGA HYPERMOTION 1   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+
+[CAIDO] LIGA 1 MAX   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+
+[CAIDO] MOVISTAR DEPORTES   (useProxy en channels.js: true)
+    principal  CAIDO      https HTTP 403 cors=NO(*) HTTP 403
+
+[CAIDO] MOVISTAR LIGA DE DEPORTES   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP 403 cors=NO(*) HTTP 403
+
+[CAIDO/PROXY] NBA TV   (useProxy en channels.js: true)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+    opcion 2   PROXY      http  avc1.64002a,mp4a.40.2 1920x1080 .m3u8 cors=OK
+
+[DIRECTO] NBC SPORTS   (useProxy en channels.js: true)
+    principal  DIRECTO    https avc1.64001e,mp4a.40.2 768x432 .m3u8 cors=OK
+
+[PROXY] NFL CHANNEL   (useProxy en channels.js: true)
+    principal  PROXY      https .m3u8 cors=NO(http://pluto.tv)
+
+[PROXY] NHL NETWORK   (useProxy en channels.js: true)
+    principal  PROXY      https avc1.640028,mp4a.40.2 1920x1080 .m3u8 cors=NO
+
+[DIRECTO] NYMSPORTS   (useProxy en channels.js: true)
+    principal  DIRECTO    https avc1.64001f,mp4a.40.2 1280x720 .m3u8 cors=OK
+
+[PROXY] SKY SPORTS   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[CAIDO] SKY SPORTS LALIGA   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP None cors=NO ConnectTimeout
+
+[PROXY] SKY SPORTS NFL   (useProxy en channels.js: false)
+    principal  PROXY      http  avc1.4d401f,mp4a.40.2 1280x720 .m3u8 cors=OK
+
+[PROXY] SKY SPORTS PREMIER LEAGUE   (useProxy en channels.js: false)
+    principal  PROXY      http  avc1.4d001f,mp4a.40.2 1024x576 .m3u8 cors=OK
+
+[PROXY] SPOR TV 1 BR   (useProxy en channels.js: true)
+    principal  PROXY      http  .ts cors=OK
+    opcion 2   PROXY      http  .ts cors=OK
+
+[PROXY] SPOR TV 3 BR   (useProxy en channels.js: true)
+    principal  PROXY      http  .ts cors=OK
+    opcion 2   PROXY      http  .ts cors=OK
+
+[PROXY] SPORTV 2 BR   (useProxy en channels.js: true)
+    principal  PROXY      http  .ts cors=OK
+    opcion 2   PROXY      http  .ts cors=OK
+
+[CAIDO] STAR SPORTS 1   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP 404 cors=NO HTTP 404
+
+[DIRECTO] TELEMUNDO DEPORTES   (useProxy en channels.js: false)
+    principal  DIRECTO    https H.264 .ts cors=OK
+
+[DIRECTO] TENNIS CHANNEL   (useProxy en channels.js: true)
+    principal  DIRECTO    https avc1.4d4028,mp4a.40.2 640x360 .m3u8 cors=OK
+
+[PROXY] TUDN   (useProxy en channels.js: false)
+    principal  PROXY      http  H.264, tipo0x28 .m3u8 cors=OK
+    opcion 2   PROXY      http  H.264 .m3u8 cors=OK
+
+[PROXY] TUDN MX   (useProxy en channels.js: true)
+    principal  PROXY      http  H.264 .m3u8 cors=OK
+
+[CAIDO] TYC SPORTS   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP None cors=NO ConnectTimeout
+
+[CAIDO] UNIVISION   (useProxy en channels.js: false)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+
+[CAIDO] USA SPORTS   (useProxy en channels.js: true)
+    principal  CAIDO      https HTTP None cors=NO SSLError
+
+[CAIDO] WIN SPORTS   (useProxy en channels.js: false)
+    principal  CAIDO      http  HTTP None cors=NO ConnectTimeout
+
+================================================================================================================
+RESUMEN
+================================================================================================================
+  DIRECTO    7 fuente(s)
+  PROXY      50 fuente(s)
+  TRANSCODE  1 fuente(s)
+  CAIDO      31 fuente(s)
+
+  A TRANSCODIFICAR (codec que el navegador no decodifica):
+    - FOX DEPORTES (ESPAÑOL) [principal] -> HEVC/H.265, tipo0x05
+
+  CAIDOS ahora mismo (fuente muerta: 403/404/timeout):
+    - BEIN 1 [principal] HTTP 403
+    - CANAL AMERICA [principal] HTTP 404
+    - CBS SPORT GOLAZO [principal] SSLError
+    - ESPN 1 [opcion 10] HTTP 404
+    - ESPN 1 [opcion 11] ConnectTimeout
+    - ESPN 1 [opcion 4] SSLError
+    - ESPN 1 [opcion 5] ConnectTimeout
+    - ESPN 1 [opcion 6] ConnectTimeout
+    - ESPN 1 [opcion 8] SSLError
+    - ESPN 1 [principal] ReadTimeout
+    - ESPN 2 [principal] ConnectTimeout
+    - ESPN 3 [opcion 3] ConnectTimeout
+    - ESPN 3 [principal] ConnectTimeout
+    - ESPN 4 [principal] ConnectTimeout
+    - EUROSPORT 1 [principal] HTTP 404
+    - EUROSPORT 2 [principal] HTTP 404
+    - FOX SPORTS 2 [principal] HTTP 404
+    - FOX SPORTS CENTROAMERICA [principal] ConnectTimeout
+    - FS1 (MLB - NFL Y MAS) [principal] ConnectTimeout
+    - FS2 [principal] ConnectTimeout
+    - LALIGA HYPERMOTION 1 [principal] SSLError
+    - LIGA 1 MAX [principal] SSLError
+    - MOVISTAR DEPORTES [principal] HTTP 403
+    - MOVISTAR LIGA DE DEPORTES [principal] HTTP 403
+    - NBA TV [principal] SSLError
+    - SKY SPORTS LALIGA [principal] ConnectTimeout
+    - STAR SPORTS 1 [principal] HTTP 404
+    - TYC SPORTS [principal] ConnectTimeout
+    - UNIVISION [principal] SSLError
+    - USA SPORTS [principal] SSLError
+    - WIN SPORTS [principal] ConnectTimeout
+
+  REPRODUCEN DIRECTO (https + CORS valido, sin proxy):
+    - ANALISTAS TV (EN INGLES)
+    - BEIN SPORTS EXTRA Ñ (español)
+    - NBC SPORTS
+    - NYMSPORTS
+    - TELEMUNDO DEPORTES
+    - TENNIS CHANNEL
+
+  useProxy=false PERO necesitan proxy/transcode (dato mal en channels.js):
+    - CLARO SPORTS
+    - ESPN 1
+    - ESPN 2
+    - ESPN 3
+    - ESPN 4
+    - SKY SPORTS NFL
+    - SKY SPORTS PREMIER LEAGUE
+    - TUDN
+
+  useProxy=true aunque reproducen directo (proxy innecesario):
+    - NBC SPORTS
+    - NYMSPORTS
+    - TENNIS CHANNEL
+
+  FUENTES POR HOST (responden / total):
+    138.59.177.78:9999                         12/12
+    38.252.215.33:8000                         7/8
+    45.228.234.9:8000                          7/7
+    barinaslive1.boldmss.com                   0/7
+    fonte.lista.luxe                           6/6
+    200.115.120.1:8000                         1/4
+    jmp2.uk                                    4/4
+    168.228.44.241:9998                        0/3
+    181.224.255.210:8001                       3/3
+    190.61.47.54:8000                          3/3
+    stream.bottledesk.net                      2/3
+    7nyaler.streamhostingcdn.top               0/2
+    tvsen3.aynaott.com                         0/2
+    168.196.127.137:6001                       1/1
+    190.11.225.124:5000                        0/1
+    190.83.2.182:8090                          0/1
+    23.237.104.106:8080                        1/1
+    41.205.93.154                              0/1
+    45.181.87.106                              0/1
+    10.ftlly.com                               0/1
+    1nyaler.streamhostingcdn.top               0/1
+    4.ftlly.com                                0/1
+    5.ftlly.com                                0/1
+    6.ftlly.com                                0/1
+    aegis-cloudfront-1.tubi.video              1/1
+    bein-beinxtrasports-firetv.amagi.tv        1/1
+    cdn-ue1-prod.tsv2.amagi.tv                 1/1
+    cdn1.ayitistream.com                       0/1
+    d1rqgw5gocwo9i.cloudfront.net              1/1
+    d1seb4wyirpp71.cloudfront.net              1/1
+    d4whmvwm0rdvi.cloudfront.net               1/1
+    dw5pdgvk.fubo18.com                        0/1
+    nhl-firetv.amagi.tv                        1/1
+    sportsgrid-plex.amagi.tv                   1/1
+    thm-it-roku.otteravision.com               1/1
+    tvsen7.aynascope.net                       0/1
+
+  JSON completo en diagnostico_canales.json
