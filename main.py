@@ -11,6 +11,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 import db
+import emailer
 import sports
 import transcoder
 import dashboard
@@ -1289,6 +1290,7 @@ class AuthSignup(BaseModel):
     username: str
     password: str
     redeem_code: str | None = None  # opcional: sin key se crea cuenta GRATIS
+    email: str | None = None        # opcional: sin email no hay recuperacion
 
 class AuthSignin(BaseModel):
     username: str
@@ -1305,6 +1307,20 @@ class AdminKeyIn(BaseModel):
     duration_days: int
     quantity: int = 1
     expires_in_days: int | None = None
+
+class EmailIn(BaseModel):
+    email: str
+
+class ForgotIn(BaseModel):
+    email: str
+
+class ResetIn(BaseModel):
+    token: str
+    password: str
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
 
 # ---- Auth dependency ----
 def get_current_user(authorization: str = Header(None)):
@@ -1411,6 +1427,16 @@ def auth_signup(data: AuthSignup, request: Request):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     token = db.create_session(user["id"])
+    # Email OPCIONAL: sin el no hay recuperacion de contrasena, pero no se
+    # bloquea el registro (puede añadirlo luego desde su perfil).
+    if (data.email or "").strip():
+        try:
+            _guardar_email_y_verificar(user["id"], data.email, data.username, request)
+        except Exception as exc:
+            print(f"[signup] no se pudo guardar el email: {exc}", flush=True)
+        fresco = db.get_user_by_username(user["username"])
+        if fresco:
+            user = db.public_user(fresco)
     return {"access_token": token, "user": user}
 
 @app.post("/auth/signin")
@@ -1467,6 +1493,231 @@ def redeem_key(request: Request, data: RedeemIn, user=Depends(get_current_user))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return result
+
+
+# ==============================
+# RECUPERACION DE CONTRASENA (email + enlace magico)
+# ==============================
+# Flujo: el usuario pide el enlace -> se guarda un token de un solo uso
+# (hasheado en la BD) y se manda un email con /recuperar?token=... -> el usuario
+# fija la contrasena nueva y se cierran TODAS sus sesiones.
+#
+# Sin EMAIL_PROVIDER configurado, emailer no envia: deja el enlace en el log, de
+# modo que el flujo se puede probar completo en local sin proveedor de correo.
+
+RESET_TOKEN_MIN = 30      # vida del enlace de recuperacion
+VERIFY_TOKEN_HORAS = 24   # vida del enlace de verificacion de email
+
+
+def _base_publica(request: Request) -> str:
+    """URL publica del backend para armar los enlaces de los correos."""
+    fija = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+    if fija:
+        return fija
+    try:
+        return str(request.base_url).rstrip("/")
+    except Exception:
+        return ""
+
+
+def _email_valido(email: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$", (email or "").strip()))
+
+
+def _html_correo(titulo: str, saludo: str, boton: str, enlace: str, nota: str) -> str:
+    """Correo HTML sencillo (los clientes de correo no soportan CSS moderno)."""
+    return f"""<!doctype html><html><body style="margin:0;background:#0f1120;padding:24px;
+font-family:Segoe UI,Arial,sans-serif;color:#e8eaf6">
+<div style="max-width:520px;margin:0 auto;background:#171a2e;border:1px solid #262b45;
+border-radius:14px;padding:26px">
+  <div style="font-size:13px;letter-spacing:2px;color:#a78bfa;font-weight:700">3SIXTYBETS</div>
+  <h1 style="font-size:20px;margin:14px 0 8px">{titulo}</h1>
+  <p style="color:#b9bed6;line-height:1.5;margin:0 0 18px">{saludo}</p>
+  <a href="{enlace}" style="display:inline-block;background:#7c5ce7;color:#fff;
+     text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700">{boton}</a>
+  <p style="color:#8b90ad;font-size:12px;line-height:1.5;margin:18px 0 0">{nota}</p>
+  <p style="color:#6d7291;font-size:11px;word-break:break-all;margin:12px 0 0">{enlace}</p>
+</div></body></html>"""
+
+
+def _enviar_correo_reset(email: str, username: str, enlace: str) -> bool:
+    html = _html_correo(
+        "Restablece tu contrasena",
+        f"Hola {username or ''}, recibimos una peticion para cambiar tu contrasena.",
+        "Cambiar mi contrasena",
+        enlace,
+        f"El enlace caduca en {RESET_TOKEN_MIN} minutos y solo se puede usar una vez. "
+        "Si no pediste esto, ignora el correo: tu contrasena sigue igual.",
+    )
+    texto = (f"Restablece tu contrasena de 3SIXTYBETS:\n{enlace}\n\n"
+             f"Caduca en {RESET_TOKEN_MIN} minutos y es de un solo uso.\n"
+             "Si no lo pediste, ignora este correo.")
+    return emailer.send_email(email, "3SIXTYBETS: restablece tu contrasena", html, texto)
+
+
+def _enviar_correo_verificacion(email: str, username: str, enlace: str) -> bool:
+    html = _html_correo(
+        "Confirma tu email",
+        f"Hola {username or ''}, confirma esta direccion para poder recuperar tu "
+        "contrasena si algun dia la olvidas.",
+        "Confirmar mi email",
+        enlace,
+        f"El enlace caduca en {VERIFY_TOKEN_HORAS} horas. Si no creaste la cuenta, ignora este correo.",
+    )
+    texto = (f"Confirma tu email en 3SIXTYBETS:\n{enlace}\n\n"
+             f"Caduca en {VERIFY_TOKEN_HORAS} horas.")
+    return emailer.send_email(email, "3SIXTYBETS: confirma tu email", html, texto)
+
+
+def _guardar_email_y_verificar(user_id: str, email: str, username: str,
+                               request: Request) -> bool:
+    """Guarda el email (si esta libre) y manda el enlace de verificacion."""
+    email = (email or "").strip().lower()
+    if not _email_valido(email):
+        return False
+    otro = db.get_user_by_email(email)
+    if otro and otro["id"] != user_id:
+        return False
+    if not db.set_user_email(user_id, email):
+        return False
+    token, _ = db.create_email_token(user_id, "verify", VERIFY_TOKEN_HORAS * 60)
+    if not token:
+        return False
+    enlace = f"{_base_publica(request)}/verificar-email?token={quote(token)}"
+    return _enviar_correo_verificacion(email, username, enlace)
+
+
+@app.post("/auth/forgot")
+def auth_forgot(data: ForgotIn, request: Request):
+    """Pide el enlace de recuperacion. La respuesta es SIEMPRE la misma.
+
+    No se revela si el email existe (evita enumerar cuentas) ni si esta
+    verificado: mismo mensaje en todos los casos.
+    """
+    _rate_limit(f"forgot:{_ip_del_cliente(request)}", 5, 900)
+    email = (data.email or "").strip().lower()
+    if email:
+        _rate_limit(f"forgot-mail:{email}", 3, 900)
+
+    generico = {
+        "ok": True,
+        "mensaje": ("Si esa direccion tiene una cuenta, te enviamos un enlace para "
+                    "restablecer la contrasena. Revisa tambien la carpeta de spam."),
+    }
+    if not _email_valido(email):
+        return generico
+
+    user = db.get_user_by_email(email)
+    # Solo cuentas con email VERIFICADO: si no lo esta, no hay como probar que
+    # la direccion es del dueño de la cuenta.
+    if not user or not user.get("email_verified_at"):
+        return generico
+
+    token, _expira = db.create_email_token(user["id"], "reset", RESET_TOKEN_MIN)
+    if token:
+        enlace = f"{_base_publica(request)}/recuperar?token={quote(token)}"
+        _enviar_correo_reset(email, user.get("username") or "", enlace)
+    return generico
+
+
+@app.get("/recuperar", response_class=HTMLResponse)
+def pagina_recuperar():
+    """Pagina publica donde se fija la contrasena nueva (llega desde el email)."""
+    return HTMLResponse(extras.html_recuperar())
+
+
+@app.post("/auth/reset")
+def auth_reset(data: ResetIn, request: Request):
+    """Cambia la contrasena usando el token del email (de un solo uso)."""
+    _rate_limit(f"reset:{_ip_del_cliente(request)}", 10, 900)
+    nueva = (data.password or "").strip()
+    if len(nueva) < 6:
+        raise HTTPException(400, "La contrasena debe tener al menos 6 caracteres.")
+
+    fila = db.consume_email_token(data.token, "reset")
+    if not fila:
+        raise HTTPException(400, "El enlace no es valido o ya expiro. Pide uno nuevo.")
+
+    if not db.set_password(fila["user_id"], nueva):
+        raise HTTPException(500, "No se pudo guardar la contrasena. Intenta de nuevo.")
+
+    # El enlace solo llega al email verificado: al usarlo, queda confirmado.
+    db.marcar_email_verificado(fila["user_id"])
+    # Y se cierran TODAS las sesiones: si la cuenta estaba comprometida, el token
+    # robado deja de servir en cuanto el dueño cambia la contrasena.
+    db.delete_sessions_for_user(fila["user_id"])
+    return {"ok": True, "mensaje": "Contrasena actualizada. Ya puedes iniciar sesion."}
+
+
+@app.post("/auth/change-password")
+def auth_change_password(data: ChangePasswordIn, request: Request,
+                         user=Depends(get_current_user)):
+    """Cambia la contrasena del usuario logueado (exige la actual)."""
+    _rate_limit(f"chpass:{user['id']}", 5, 900)
+    if not db.verify_password(data.current_password or "", user["password_hash"]):
+        raise HTTPException(400, "La contrasena actual no es correcta.")
+    nueva = (data.new_password or "").strip()
+    if len(nueva) < 6:
+        raise HTTPException(400, "La nueva contrasena debe tener al menos 6 caracteres.")
+    if not db.set_password(user["id"], nueva):
+        raise HTTPException(500, "No se pudo guardar la contrasena. Intenta de nuevo.")
+    # Se cierran todas las sesiones y se devuelve una nueva: asi el resto de
+    # dispositivos (o un token robado) quedan fuera.
+    db.delete_sessions_for_user(user["id"])
+    token = db.create_session(user["id"])
+    return {"ok": True, "access_token": token,
+            "mensaje": "Contrasena actualizada. Se cerraron las demas sesiones."}
+
+
+@app.post("/auth/set-email")
+def auth_set_email(data: EmailIn, request: Request, user=Depends(get_current_user)):
+    """Guarda el email del usuario logueado y manda el enlace de verificacion."""
+    _rate_limit(f"setemail:{user['id']}", 5, 3600)
+    email = (data.email or "").strip().lower()
+    if not _email_valido(email):
+        raise HTTPException(400, "Ese email no parece valido.")
+
+    otro = db.get_user_by_email(email)
+    if otro and otro["id"] != user["id"]:
+        raise HTTPException(400, "Ese email ya esta en uso en otra cuenta.")
+
+    if not db.set_user_email(user["id"], email):
+        raise HTTPException(500, "No se pudo guardar el email. Intenta de nuevo.")
+
+    token, _ = db.create_email_token(user["id"], "verify", VERIFY_TOKEN_HORAS * 60)
+    enviado = False
+    if token:
+        enlace = f"{_base_publica(request)}/verificar-email?token={quote(token)}"
+        enviado = _enviar_correo_verificacion(email, user.get("username") or "", enlace)
+
+    return {
+        "ok": True,
+        "email": email,
+        "verificado": False,
+        "correo_enviado": enviado,
+        "mensaje": "Te enviamos un enlace para confirmar tu email."
+        if enviado else
+        "Guardamos tu email, pero no se pudo enviar el correo de confirmacion. "
+        "Escribenos por soporte para confirmarlo.",
+    }
+
+
+@app.get("/verificar-email", response_class=HTMLResponse)
+def verificar_email(token: str = ""):
+    """Confirma la direccion del usuario que abrio el enlace del correo."""
+    fila = db.consume_email_token(token, "verify")
+    if not fila:
+        return HTMLResponse(extras.html_aviso(
+            "Enlace no valido",
+            "Este enlace ya se uso o expiro. Entra a tu perfil y pide uno nuevo.",
+            ok=False,
+        ))
+    db.marcar_email_verificado(fila["user_id"])
+    return HTMLResponse(extras.html_aviso(
+        "Email confirmado",
+        "Listo: ya puedes recuperar tu contrasena con este email si algun dia la olvidas.",
+        ok=True,
+    ))
 
 
 # ==============================

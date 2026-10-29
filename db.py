@@ -198,6 +198,20 @@ def init_db():
         )
         """,
         """
+        create table if not exists email_tokens (
+            id varchar(64) primary key,
+            user_id varchar(64) not null,
+            purpose varchar(20) not null,
+            token_hash varchar(128) not null,
+            expires_at datetime not null,
+            used_at datetime null,
+            created_at datetime not null,
+            index email_tokens_user_idx (user_id, purpose),
+            index email_tokens_hash_idx (token_hash),
+            foreign key (user_id) references users(id) on delete cascade
+        )
+        """,
+        """
         create table if not exists redeem_keys (
             id varchar(64) primary key,
             code varchar(32) not null unique,
@@ -393,6 +407,36 @@ def init_db():
         if existe and not existe.get("cnt"):
             run_query(f"alter table favoritos add column {column} {tipo_col}")
 
+    # Migracion ligera: recuperacion de contrasena por email. Las instalaciones
+    # previas no tienen estas columnas (los usuarios se crearon sin email).
+    for column, tipo_col in (
+        ("email", "varchar(255) null"),
+        ("email_verified_at", "datetime null"),
+    ):
+        existe = run_query(
+            """
+            select count(*) as cnt from information_schema.columns
+            where table_schema = database() and table_name = 'users' and column_name = %s
+            """,
+            (column,),
+            fetchone=True,
+        )
+        if existe and not existe.get("cnt"):
+            run_query(f"alter table users add column {column} {tipo_col}")
+
+    # Un email = una cuenta. MySQL permite varios NULL en un indice unico, asi
+    # que los usuarios sin email (los antiguos) no estorban.
+    indice = run_query(
+        """
+        select count(*) as cnt from information_schema.statistics
+        where table_schema = database() and table_name = 'users'
+          and index_name = 'users_email_uq'
+        """,
+        fetchone=True,
+    )
+    if indice and not indice.get("cnt"):
+        run_query("alter table users add unique key users_email_uq (email)")
+
     ensure_admin_user()
 
 
@@ -446,6 +490,8 @@ def public_user(row):
         "username": row["username"],
         "role": row["role"],
         "credits": row["credits"],
+        "email": row.get("email"),
+        "email_verified": bool(row.get("email_verified_at")),
         "access_expires_at": row["access_expires_at"].isoformat()
         if row.get("access_expires_at")
         else None,
@@ -701,6 +747,137 @@ def get_user_by_token(token):
         except TypeError:
             pass
     return fila
+
+
+# ==============================
+# EMAIL / RECUPERACION DE CONTRASENA
+# ==============================
+# Los tokens se guardan HASHEADOS (sha256): si alguien lee la BD no puede
+# canjear un enlace de recuperacion. Son de un solo uso y caducan.
+
+PROPOSITOS_EMAIL = ("reset", "verify")
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def get_user_by_email(email):
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    return run_query("select * from users where lower(email) = %s", (email,), fetchone=True)
+
+
+def set_user_email(user_id, email) -> bool:
+    """Guarda el email SIN verificar (se limpia email_verified_at al cambiarlo)."""
+    return bool(run_query(
+        "update users set email = %s, email_verified_at = null where id = %s",
+        ((email or "").strip().lower() or None, user_id),
+    ))
+
+
+def marcar_email_verificado(user_id) -> bool:
+    return bool(run_query(
+        "update users set email_verified_at = %s where id = %s", (now_utc(), user_id)
+    ))
+
+
+def create_email_token(user_id, purpose, ttl_minutos=30):
+    """Crea un token de un solo uso. Devuelve (token_en_claro, expira) o (None, None).
+
+    Invalida los tokens anteriores del mismo proposito: solo hay un enlace vivo.
+    """
+    if purpose not in PROPOSITOS_EMAIL:
+        raise ValueError("Proposito de token invalido.")
+
+    token = secrets.token_urlsafe(32)
+    token_id = secrets.token_urlsafe(16)
+    expira = now_utc() + timedelta(minutes=max(1, int(ttl_minutos)))
+    ok = run_query(
+        """
+        insert into email_tokens
+        (id, user_id, purpose, token_hash, expires_at, created_at)
+        values (%s, %s, %s, %s, %s, %s)
+        """,
+        (token_id, user_id, purpose, _hash_token(token), expira, now_utc()),
+    )
+    if not ok:
+        return None, None
+
+    run_query(
+        """
+        update email_tokens set used_at = %s
+        where user_id = %s and purpose = %s and id <> %s and used_at is null
+        """,
+        (now_utc(), user_id, purpose, token_id),
+    )
+    return token, expira
+
+
+def consume_email_token(token, purpose):
+    """Valida y quema el token. Devuelve la fila (con user_id) o None."""
+    if not token or purpose not in PROPOSITOS_EMAIL:
+        return None
+
+    conn = None
+    cur = None
+    try:
+        conn = get_connection(autocommit=False)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            select * from email_tokens
+            where token_hash = %s and purpose = %s
+            for update
+            """,
+            (_hash_token(token), purpose),
+        )
+        fila = cur.fetchone()
+        if not fila or fila.get("used_at") or fila["expires_at"] < now_utc():
+            conn.rollback()
+            return None
+
+        cur.execute(
+            "update email_tokens set used_at = %s where id = %s and used_at is null",
+            (now_utc(), fila["id"]),
+        )
+        if cur.rowcount != 1:  # otra peticion lo quemo antes
+            conn.rollback()
+            return None
+
+        conn.commit()
+        return fila
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        print(f"[db] consume_email_token error: {exc}", flush=True)
+        return None
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+def set_password(user_id, nueva) -> bool:
+    return bool(run_query(
+        "update users set password_hash = %s where id = %s",
+        (hash_password(nueva), user_id),
+    ))
+
+
+def delete_sessions_for_user(user_id, excepto_token=None) -> bool:
+    """Cierra TODAS las sesiones del usuario (tras un reset/cambio de clave).
+
+    Un token robado deja de servir en cuanto el dueño cambia la contrasena.
+    """
+    if excepto_token:
+        return bool(run_query(
+            "delete from sessions where user_id = %s and token <> %s",
+            (user_id, excepto_token),
+        ))
+    return bool(run_query("delete from sessions where user_id = %s", (user_id,)))
 
 
 def list_messages(user_id):

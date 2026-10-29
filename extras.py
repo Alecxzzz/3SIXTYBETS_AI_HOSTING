@@ -476,6 +476,9 @@ def _login_html() -> str:
   <input id="u" placeholder="Usuario" autocomplete="username">
   <input id="p" type="password" placeholder="Contrasena" autocomplete="current-password">
   <button onclick="hacerLogin()">Entrar</button>
+  <p class="sub" style="margin-top:12px">
+    <a href="/recuperar">Olvide mi contrasena</a>
+  </p>
 </div>"""
 
 
@@ -492,6 +495,61 @@ async function hacerLogin() {
 """
 
 
+# ------------------- RECUPERACION DE CONTRASENA -------------------
+
+def html_recuperar() -> str:
+    """Pagina publica (sin sesion) que se abre desde el enlace del correo."""
+    cuerpo = """
+<div class="card" id="form">
+  <h1>Nueva contrasena</h1>
+  <p class="sub">Elige una contrasena nueva para tu cuenta</p>
+  <div class="err" id="err"></div>
+  <input id="p1" type="password" placeholder="Contrasena nueva" autocomplete="new-password">
+  <input id="p2" type="password" placeholder="Repite la contrasena" autocomplete="new-password">
+  <button onclick="cambiar()">Guardar contrasena</button>
+  <p class="sub" style="margin-top:12px">Minimo 6 caracteres.</p>
+</div>
+<div class="card" id="ok" style="display:none">
+  <h1>Contrasena actualizada</h1>
+  <p class="sub">Ya puedes iniciar sesion con la contrasena nueva. Por seguridad
+  cerramos las sesiones abiertas en otros dispositivos.</p>
+  <button onclick="location.href='/'">Ir a 3SIXTYBETS</button>
+</div>"""
+    script = """
+function param(n) { return new URLSearchParams(location.search).get(n) || ''; }
+async function cambiar() {
+  const err = document.getElementById('err');
+  err.textContent = '';
+  const t = param('token');
+  const p1 = document.getElementById('p1').value;
+  const p2 = document.getElementById('p2').value;
+  if (!t) { err.textContent = 'Falta el token: abre el enlace tal cual te llego por correo.'; return; }
+  if (p1.length < 6) { err.textContent = 'La contrasena debe tener al menos 6 caracteres.'; return; }
+  if (p1 !== p2) { err.textContent = 'Las contrasenas no coinciden.'; return; }
+  const r = await api('/auth/reset', {method:'POST', body: JSON.stringify({token: t, password: p1})});
+  if (!r.ok) { err.textContent = r.data.detail || 'El enlace no es valido o ya expiro. Pide uno nuevo.'; return; }
+  document.getElementById('form').style.display = 'none';
+  document.getElementById('ok').style.display = 'block';
+}
+if (!param('token')) {
+  document.getElementById('err').textContent = 'Abre el enlace que te enviamos por correo para cambiar la contrasena.';
+}
+"""
+    return _pagina("Recuperar contrasena", cuerpo, script)
+
+
+def html_aviso(titulo: str, texto: str, ok: bool = True) -> str:
+    """Pagina de resultado (email confirmado / enlace caducado)."""
+    color = "#22c55e" if ok else "#f87171"
+    cuerpo = f"""
+<div class="card">
+  <h1 style="color:{color}">{titulo}</h1>
+  <p class="sub">{texto}</p>
+  <button onclick="location.href='/'">Ir a 3SIXTYBETS</button>
+</div>"""
+    return _pagina(titulo, cuerpo)
+
+
 # ------------------------- PERFIL -------------------------
 
 def html_perfil() -> str:
@@ -500,6 +558,20 @@ def html_perfil() -> str:
   <h1>Mi perfil</h1>
   <p class="sub">Tu cuenta y tu suscripcion</p>
   <div class="card"><div id="cuenta"></div></div>
+  <div class="card">
+    <h1 style="font-size:1.05rem">Seguridad</h1>
+    <div class="row"><span class="k">Email</span><span class="v" id="email_estado">-</span></div>
+    <input id="email_in" placeholder="tu@correo.com" autocomplete="email">
+    <button onclick="guardarEmail()">Guardar y confirmar email</button>
+    <p class="sub" style="margin-top:8px">Con el email confirmado puedes recuperar
+    tu contrasena si algun dia la olvidas.</p>
+    <div class="err" id="email_err"></div>
+    <hr style="border:0;border-top:1px solid #262b45;margin:16px 0">
+    <input id="clave_actual" type="password" placeholder="Contrasena actual" autocomplete="current-password">
+    <input id="clave_nueva" type="password" placeholder="Contrasena nueva" autocomplete="new-password">
+    <button onclick="cambiarClave()">Cambiar contrasena</button>
+    <div class="err" id="clave_err"></div>
+  </div>
   <div class="card">
     <h1 style="font-size:1.05rem">Historial de pagos</h1>
     <div id="pagos" style="margin-top:10px"></div>
@@ -511,6 +583,33 @@ function pillEstado(e) {
   const v = String(e||'').toUpperCase();
   const cls = v==='COMPLETED' ? 'hi' : (v==='PROCESANDO'||v==='PENDING' ? 'mid' : 'lo');
   return `<span class="pill ${cls}">${esc(v||'?')}</span>`;
+}
+async function guardarEmail() {
+  const err = document.getElementById('email_err');
+  err.style.color = '#f87171';
+  err.textContent = '';
+  const email = document.getElementById('email_in').value.trim();
+  if (!email) { err.textContent = 'Escribe tu email.'; return; }
+  const r = await api('/auth/set-email', {method:'POST', body: JSON.stringify({email: email})});
+  if (!r.ok) { err.textContent = r.data.detail || 'No se pudo guardar el email.'; return; }
+  document.getElementById('email_estado').textContent = r.data.email + ' (sin confirmar)';
+  err.style.color = '#22c55e';
+  err.textContent = r.data.mensaje;
+}
+async function cambiarClave() {
+  const err = document.getElementById('clave_err');
+  err.style.color = '#f87171';
+  err.textContent = '';
+  const actual = document.getElementById('clave_actual').value;
+  const nueva = document.getElementById('clave_nueva').value;
+  if (nueva.length < 6) { err.textContent = 'La contrasena nueva debe tener al menos 6 caracteres.'; return; }
+  const r = await api('/auth/change-password', {method:'POST', body: JSON.stringify({current_password: actual, new_password: nueva})});
+  if (!r.ok) { err.textContent = r.data.detail || 'No se pudo cambiar la contrasena.'; return; }
+  if (r.data.access_token) setTk(r.data.access_token);
+  document.getElementById('clave_actual').value = '';
+  document.getElementById('clave_nueva').value = '';
+  err.style.color = '#22c55e';
+  err.textContent = r.data.mensaje;
 }
 async function init() {
   const me = await api('/auth/me');
@@ -526,6 +625,10 @@ async function init() {
     <div class="row"><span class="k">Rol</span><span class="v">${u.role==='admin'?'Administrador':'Usuario'}</span></div>
     <div class="row"><span class="k">Plan</span><span class="v">${anos ? '<span class="pill hi">ILIMITADO</span>' : (restantes>0 ? `<span class="pill mid">${restantes} dias restantes</span>` : '<span class="pill lo">EXPIRADO</span>')}</span></div>
     <div class="row"><span class="k">Acceso vence</span><span class="v">${exp && !anos ? esc(exp.toLocaleDateString('es-NI')) : 'Nunca expira'}</span></div>`;
+  document.getElementById('email_estado').textContent = u.email
+    ? (u.email + (u.email_verified ? ' (confirmado)' : ' (sin confirmar)'))
+    : 'sin email';
+  document.getElementById('email_in').value = u.email || '';
   const tx = await api('/transactions');
   const lista = tx.data.transactions || [];
   document.getElementById('pagos').innerHTML = lista.length ? `<table><tr><th>Fecha</th><th>Plan</th><th>Monto</th><th>Estado</th></tr>${
