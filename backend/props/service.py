@@ -16,12 +16,18 @@ y calcula lo unico que el usuario necesita para juzgar una cuota:
 Nada de esto decide ni publica picks: es informacion.
 """
 
+import os
 import time
 
 import cuotas_doradobet as book
 import sports
 
 from . import mercados, proveedores
+
+# Solo se publican props que el jugador haya cumplido al menos este % de las
+# veces en la ventana. Por debajo es ruido: la muestra es de 5 partidos y un
+# 1/5 (20%) no dice nada util.
+PROPS_PCT_MINIMA = float(os.getenv("PROPS_PCT_MINIMA", "60"))
 
 # Cache en memoria del resultado por (deporte, evento, n). La pagina y el
 # scheduler leen de aqui; el scheduler ademas lo persiste en la BD.
@@ -54,14 +60,20 @@ def cache_clear():
 # ------------------------------------------------------------- calculo
 
 
-def _valores(historial: dict, campo: str) -> list:
-    """Valor del campo en cada partido (sin huecos)."""
-    salida = []
+def _detalle(historial: dict, campo: str, n: int) -> list:
+    """Los ultimos n partidos con su valor, su fecha y el rival."""
+    filas = []
     for partido in historial.get("partidos") or []:
         valor = (partido.get("stats") or {}).get(campo)
-        if valor is not None:
-            salida.append(valor)
-    return salida
+        if valor is None:
+            continue
+        filas.append({
+            "valor": valor,
+            "fecha": partido.get("fecha"),
+            "rival": partido.get("rival"),
+            "casa": partido.get("casa"),
+        })
+    return filas[-n:]
 
 
 def _cumple(valores: list, linea: float, lado: str) -> int:
@@ -73,15 +85,41 @@ def _cumple(valores: list, linea: float, lado: str) -> int:
     return sum(1 for v in valores if v >= linea)
 
 
+def _wilson(cumple: int, total: int, z: float = 1.96):
+    """Limite INFERIOR del intervalo de confianza (Wilson) del porcentaje.
+
+    Con 5 partidos, un 5/5 da 100% pero el limite inferior es ~57%: es la
+    forma honesta de no vender como certeza lo que puede ser suerte. Se usa
+    para el "edge ajustado", que es el que deberia mirar el usuario.
+    """
+    if not total:
+        return None
+    p = cumple / total
+    denom = 1 + (z * z) / total
+    centro = p + (z * z) / (2 * total)
+    margen = z * (((p * (1 - p)) / total + (z * z) / (4 * total * total)) ** 0.5)
+    return max(0.0, min(1.0, (centro - margen) / denom))
+
+
 def _fila(sport, prop, evento, historial, campo, n):
-    """Fila final: la prop + su racha + el edge."""
-    valores = _valores(historial, campo)[-n:]
-    cumple = _cumple(valores, prop["linea"], prop["lado"])
+    """Fila final: la prop + su racha + cuota justa + edge (crudo y ajustado)."""
+    detalle = _detalle(historial, campo, n)
+    valores = [d["valor"] for d in detalle]
     total = len(valores)
+    cumple = _cumple(valores, prop["linea"], prop["lado"])
     pct = round(100.0 * cumple / total, 1) if total else None
+
+    bajo = _wilson(cumple, total)
+    pct_ajustado = round(100.0 * bajo, 1) if bajo is not None else None
+
     implicita = round(100.0 / prop["cuota"], 1) if prop.get("cuota") else None
     edge = (round(pct - implicita, 1)
             if pct is not None and implicita is not None else None)
+    edge_ajustado = (round(pct_ajustado - implicita, 1)
+                     if pct_ajustado is not None and implicita is not None else None)
+    # Cuota que DEBERIA pagar si el porcentaje real fuera su probabilidad.
+    cuota_justa = round(100.0 / pct, 2) if pct else None
+
     return {
         "sport": sport,
         "jugador": prop["jugador"],
@@ -94,11 +132,16 @@ def _fila(sport, prop, evento, historial, campo, n):
         "linea": prop["linea"],
         "cuota": prop["cuota"],
         "implicita": implicita,
+        "cuota_justa": cuota_justa,
+        "detalle": detalle,
         "valores": valores,
         "n_partidos": total,
         "cumple": cumple,
         "pct": pct,
+        "pct_ajustado": pct_ajustado,
         "edge": edge,
+        "edge_ajustado": edge_ajustado,
+        "edge_mostrado": edge,
         "evento_id": evento.get("id"),
         "evento": evento.get("name"),
         "liga": evento.get("league"),
@@ -171,11 +214,19 @@ def props_evento(sport: str, evento: dict, n: int = 5,
             filas.append(_fila(sport, prop, evento, historial, campo, n))
 
 
-    # Mas valor primero; las que no tienen historico van al final.
+    # FILTRO: solo props cumplidas al menos PROPS_PCT_MINIMA (60% por defecto).
+    # Lo demas es ruido con una muestra de 5 partidos.
+    descartadas = sum(
+        1 for f in filas if f["pct"] is None or f["pct"] < PROPS_PCT_MINIMA
+    )
+    filas = [f for f in filas
+             if f["pct"] is not None and f["pct"] >= PROPS_PCT_MINIMA]
     filas.sort(key=lambda f: (f["edge"] is None, -(f["edge"] or 0)))
     return {
         "ok": True,
         "props": filas,
+        "pct_minima": PROPS_PCT_MINIMA,
+        "descartadas_por_pct": descartadas,
         "jugadores_sin_historico": sum(
             1 for h in historiales.values() if not h.get("encontrado")),
         "ms": int((time.time() - inicio) * 1000),
@@ -206,20 +257,35 @@ def props_deporte(sport: str, n: int = 5, limite_eventos: int = 15,
     eventos.sort(key=lambda e: e.get("date") or "")
     eventos = eventos[:limite_eventos]
 
-    props, procesados, omitidos = [], 0, 0
-    for evento in eventos:
-        resultado = props_evento(sport, evento, n, max_jugadores=max_jugadores)
+    props, procesados, omitidos, descartadas = [], 0, 0, 0
+    # En PARALELO: cada evento es una llamada HTTP al bookmaker (~2-8 s). En
+    # serie, 6 eventos por deporte tardaban medio minuto o mas por ciclo.
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        resultados = list(pool.map(
+            lambda ev: props_evento(sport, ev, n, max_jugadores=max_jugadores),
+            eventos,
+        ))
+
+    for resultado in resultados:
         if resultado.get("ok"):
             procesados += 1
             props.extend(resultado["props"])
+            descartadas += resultado.get("descartadas_por_pct") or 0
         else:
             omitidos += 1
 
+    # Mismo filtro de calidad que props_evento (por si algun evento se salto).
+    props = [f for f in props if f.get("pct") is not None
+             and f["pct"] >= PROPS_PCT_MINIMA]
     props.sort(key=lambda f: (f["edge"] is None, -(f["edge"] or 0)))
     salida = {
         "ok": True,
         "sport": sport,
         "n": n,
+        "pct_minima": PROPS_PCT_MINIMA,
+        "descartadas_por_pct": descartadas,
         "eventos": len(eventos),
         "eventos_con_props": procesados,
         "eventos_sin_props": omitidos,

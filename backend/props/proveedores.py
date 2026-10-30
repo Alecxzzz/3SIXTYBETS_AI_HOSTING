@@ -261,9 +261,13 @@ def _gamelog_espn(sport: str, league: str | None, player_id):
                         if valor is not None:
                             stats[campo] = valor
                 info = meta.get(eid) or {}
+                oponente = info.get("opponent") or {}
                 salida.append({
                     "evento_id": eid,
                     "fecha": _fecha(info.get("gameDate")),
+                    "rival": (oponente.get("displayName")
+                              or oponente.get("abbreviation") or None),
+                    "casa": (info.get("atVs") == "vs"),
                     "stats": stats,
                 })
     salida.sort(key=lambda x: x["fecha"] or "", reverse=True)
@@ -326,6 +330,8 @@ def _gamelog_mlb(player_id, n: int):
                 salida.append({
                     "evento_id": s.get("gamePk"),
                     "fecha": _fecha(s.get("date")),
+                    "rival": ((s.get("opponent") or {}).get("name") or None),
+                    "casa": bool(s.get("isHome")),
                     "stats": stats,
                 })
         if len(salida) >= n:

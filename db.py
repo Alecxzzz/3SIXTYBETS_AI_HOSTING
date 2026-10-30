@@ -381,6 +381,7 @@ def init_db():
             odds decimal(10, 4) null,
             implied decimal(6, 2) null,
             values_json text null,
+            detalle_json text null,
             n_games tinyint null,
             hits tinyint null,
             pct decimal(5, 1) null,
@@ -397,6 +398,21 @@ def init_db():
 
     for statement in statements:
         run_query(statement)
+
+    # Migracion ligera: columnas nuevas del apartado /props (instalaciones
+    # previas ya tienen la tabla player_props sin ellas).
+    for column, tipo in (("detalle_json", "text null"),):
+        existe = run_query(
+            """
+            select count(*) as cnt from information_schema.columns
+            where table_schema = database() and table_name = 'player_props'
+            and column_name = %s
+            """,
+            (column,),
+            fetchone=True,
+        )
+        if existe is not None and not existe.get("cnt"):
+            run_query(f"alter table player_props add column {column} {tipo}")
 
     # Migracion ligera: columnas para instalaciones previas.
     for column in ("home_name", "away_name", "home_logo", "away_logo", "titulo", "league", "closing_odds",
@@ -2266,10 +2282,10 @@ def player_prop_id(evento_id, jugador, prop, lado, linea) -> str:
 _COLS_PLAYER_PROPS = (
     "id, pick_date, sport, league, event_id, event_name, event_date, "
     "player_name, player_team, player_photo, prop, prop_raw, side, "
-    "line_value, odds, implied, values_json, n_games, hits, pct, edge, "
-    "fuente, created_at, updated_at"
+    "line_value, odds, implied, values_json, detalle_json, n_games, hits, pct, "
+    "edge, fuente, created_at, updated_at"
 )
-_N_COLS_PLAYER_PROPS = 24
+_N_COLS_PLAYER_PROPS = 25
 
 
 def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
@@ -2318,6 +2334,7 @@ def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
             f.get("cuota"),
             f.get("implicita"),
             json.dumps(f.get("valores") or []),
+            json.dumps(f.get("detalle") or []),
             f.get("n_partidos"),
             f.get("cumple"),
             f.get("pct"),
@@ -2344,7 +2361,8 @@ def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
             f"insert into player_props ({_COLS_PLAYER_PROPS}) values "
             + trozo_sql
             + " on duplicate key update odds=values(odds), implied=values(implied), "
-              "values_json=values(values_json), n_games=values(n_games), "
+              "values_json=values(values_json), detalle_json=values(detalle_json), "
+              "n_games=values(n_games), "
               "hits=values(hits), pct=values(pct), edge=values(edge), "
               "player_photo=values(player_photo), player_team=values(player_team), "
               "event_date=values(event_date), prop_raw=values(prop_raw), "
@@ -2375,6 +2393,11 @@ def _public_player_prop(row: dict) -> dict:
         valores = json.loads(row.get("values_json") or "[]")
     except (TypeError, ValueError):
         valores = []
+    detalle = []
+    try:
+        detalle = json.loads(row.get("detalle_json") or "[]")
+    except (TypeError, ValueError):
+        detalle = []
     return {
         "id": row.get("id"),
         "sport": row.get("sport"),
@@ -2392,6 +2415,7 @@ def _public_player_prop(row: dict) -> dict:
         "cuota": float(row["odds"]) if row.get("odds") is not None else None,
         "implicita": float(row["implied"]) if row.get("implied") is not None else None,
         "valores": valores,
+        "detalle": detalle,
         "n_partidos": row.get("n_games"),
         "cumple": row.get("hits"),
         "pct": float(row["pct"]) if row.get("pct") is not None else None,

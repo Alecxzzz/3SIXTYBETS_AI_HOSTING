@@ -294,14 +294,24 @@ def _linea_de(texto: str):
 
 
 _DORADO_DETALLES = {}
+_DETALLE_TTL = 15 * 60      # 15 min: las cuotas se mueven, el detalle no es eterno
+_DETALLE_MAX = 400          # tope de eventos en memoria
 
 
 def _detalle_completo(event_id):
-    """GetEventDetails: TODOS los mercados y lineas de un evento (cache)."""
+    """GetEventDetails: TODOS los mercados y lineas de un evento (cache TTL).
+
+    Antes el cache era un dict que NUNCA expiraba: en un contenedor de larga
+    vida eso es una fuga de memoria silenciosa (un evento de futbol son ~1 MB
+    de JSON) y ademas servia cuotas viejas. Ahora caduca a los 15 minutos.
+    """
     import time
 
-    if event_id in _DORADO_DETALLES:
-        return _DORADO_DETALLES[event_id]
+    ahora = time.time()
+    cacheado = _DORADO_DETALLES.get(event_id)
+    if cacheado and ahora - cacheado[0] < _DETALLE_TTL:
+        return cacheado[1]
+
     try:
         r = requests.get(
             f"{DORADO_WIDGET}/GetEventDetails?{DORADO_PARAMS}&eventId={event_id}",
@@ -311,7 +321,9 @@ def _detalle_completo(event_id):
         if not r.ok:
             return None
         data = r.json()
-        _DORADO_DETALLES[event_id] = data
+        if len(_DORADO_DETALLES) > _DETALLE_MAX:
+            _DORADO_DETALLES.clear()
+        _DORADO_DETALLES[event_id] = (ahora, data)
         return data
     except Exception:
         return None

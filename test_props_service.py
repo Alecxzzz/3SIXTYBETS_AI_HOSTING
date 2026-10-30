@@ -89,15 +89,15 @@ class TestEvento(unittest.TestCase):
     }
 
     def test_cruza_bookmaker_con_historial(self):
+        # 2/3 y 3/3 => >= 60%, pasan el filtro de calidad.
         historial_uno = _historial(
-            {"shotsOnTarget": 2}, {"shotsOnTarget": 0}, {"shotsOnTarget": 1},
-        )
-        historial_dos = _historial(
-            {"shotsOnTarget": 0}, {"shotsOnTarget": 0}, {"shotsOnTarget": 3},
+            {"shotsOnTarget": 2, "totalGoals": 1},
+            {"shotsOnTarget": 3, "totalGoals": 1},
+            {"shotsOnTarget": 1, "totalGoals": 0},
         )
 
         def _fake_historial(sport, jugador, equipo, evento, n):
-            return historial_uno if jugador == "Jugador Uno" else historial_dos
+            return historial_uno
 
         evento = {"id": "1", "name": "VIL vs ESP", "league": "LaLiga",
                   "date": "2026-10-30T20:00Z", "home": {"name": "VIL"},
@@ -108,18 +108,40 @@ class TestEvento(unittest.TestCase):
 
         self.assertTrue(r["ok"])
         props = r["props"]
-        nombres = {p["jugador"] for p in props}
-        self.assertEqual(nombres, {"Jugador Uno", "Jugador Dos"})
-        # Jugador Uno: Remates a Puerta (linea 1.5, |1.8-1.95|=0.15 es la mas
-        # cercana a 2.0) y Goleador. Jugador Dos: solo Remates a Puerta.
         uno = [p for p in props if p["jugador"] == "Jugador Uno"]
-        self.assertEqual(len(uno), 2)
         remates = [p for p in uno if p["prop"] == "remates_puerta"][0]
         self.assertEqual(remates["linea"], 1.5)
-        self.assertEqual(remates["cumple"], 1)      # 2,0,1 -> solo el 2
-        self.assertEqual(remates["pct"], 33.3)
+        self.assertEqual(remates["cumple"], 2)      # 2,3,1 -> 2 y 3
+        self.assertEqual(remates["pct"], 66.7)
+        self.assertEqual(remates["cuota_justa"], 1.5)
+        self.assertIsNotNone(remates["pct_ajustado"])
+        self.assertLess(remates["pct_ajustado"], remates["pct"])  # Wilson baja
+        self.assertEqual(len(remates["detalle"]), 3)
         goles = [p for p in uno if p["prop"] == "goles"][0]
         self.assertEqual(goles["linea"], 0.5)
+
+    def test_filtro_60_por_ciento_descarta_lo_demas(self):
+        """1 de 3 (33%) no se publica: con 5 partidos es ruido."""
+        historial = _historial(
+            {"shotsOnTarget": 2}, {"shotsOnTarget": 0}, {"shotsOnTarget": 1},
+        )
+        evento = {"id": "1", "name": "VIL vs ESP", "league": "LaLiga",
+                  "date": "2026-10-30T20:00Z", "home": {"name": "VIL"},
+                  "away": {"name": "ESP"}}
+        with mock.patch.object(service.book, "detalle_de_evento", return_value=self.DETALLE), \
+                mock.patch.object(service.proveedores, "historial_jugador", return_value=historial):
+            r = service.props_evento("soccer", evento, 5)
+
+        self.assertTrue(r["ok"])
+        # La invariante: NINGUNA prop publicada por debajo del minimo.
+        self.assertTrue(all(p["pct"] >= service.PROPS_PCT_MINIMA for p in r["props"]))
+        self.assertGreater(r["descartadas_por_pct"], 0)
+        self.assertEqual(r["pct_minima"], service.PROPS_PCT_MINIMA)
+        # La de 33% (remates a puerta linea 1.5 de Jugador Uno) NO sale.
+        self.assertFalse([
+            p for p in r["props"]
+            if p["prop"] == "remates_puerta" and p["linea"] == 1.5
+        ])
 
     def test_sin_detalle_del_book_no_hay_props(self):
         with mock.patch.object(service.book, "detalle_de_evento", return_value=None):

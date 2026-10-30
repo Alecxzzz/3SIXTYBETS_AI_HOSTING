@@ -3859,6 +3859,39 @@ def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(
 # PROPS DE JUGADOR (apartado /props)
 # ==============================
 
+def _props_enriquecer(filas: list, minima: float) -> tuple:
+    """Completa las filas que vienen de la BD y aplica el filtro de calidad.
+
+    La tabla guarda lo minimo (pct, cumple, n_partidos); la cuota justa y el
+    edge ajustado (Wilson) se recalculan aqui para no duplicar la formula.
+    Devuelve (filas_validas, descartadas).
+    """
+    from backend.props import service
+
+    salida, descartadas = [], 0
+    for f in filas:
+        pct = f.get("pct")
+        if pct is None or pct < minima:
+            descartadas += 1
+            continue
+        n_partidos = f.get("n_partidos") or 0
+        cumple = f.get("cumple") or 0
+        if f.get("pct_ajustado") is None and n_partidos:
+            bajo = service._wilson(int(cumple), int(n_partidos))
+            if bajo is not None:
+                f["pct_ajustado"] = round(100.0 * bajo, 1)
+        if f.get("cuota_justa") is None and pct:
+            f["cuota_justa"] = round(100.0 / pct, 2)
+        if (f.get("edge_ajustado") is None
+                and f.get("pct_ajustado") is not None
+                and f.get("implicita") is not None):
+            f["edge_ajustado"] = round(f["pct_ajustado"] - f["implicita"], 1)
+        salida.append(f)
+
+    salida.sort(key=lambda x: (x.get("edge") is None, -(x.get("edge") or 0)))
+    return salida, descartadas
+
+
 @app.get("/api/props")
 def api_props(sport: str = "soccer", n: int = 5, limite: int = 60):
     """Props de jugador con la racha de sus ultimos N partidos.
@@ -3867,6 +3900,9 @@ def api_props(sport: str = "soccer", n: int = 5, limite: int = 60):
     instantanea). Si todavia no hay snapshot del dia, lo calcula en el
     momento: es mas lento (una llamada por partido al bookmaker) pero nunca
     deja la pagina vacia.
+
+    Solo se devuelven props cumplidas al menos PROPS_PCT_MINIMA (60% por
+    defecto): por debajo es ruido con una muestra de 5 partidos.
     """
     from backend.props import service
 
@@ -3874,26 +3910,28 @@ def api_props(sport: str = "soccer", n: int = 5, limite: int = 60):
         raise HTTPException(
             400, "Deporte no soportado. Usa: " + ", ".join(service.mercados.DEPORTES))
 
-    props, origen = [], "cache"
+    minima = service.PROPS_PCT_MINIMA
+    props, origen, descartadas = [], "cache", 0
     try:
-        props = db.list_player_props(sport=sport, limite=limite)
+        props = db.list_player_props(sport=sport, limite=limite * 3)
     except Exception as exc:  # noqa: BLE001
         print(f"[props] lectura de BD fallo: {exc}", flush=True)
 
     if not props:
-        # Sin snapshot todavia: se calcula al vuelo pero ACOTADO (2 partidos,
-        # 6 jugadores) para no colgar la primera visita ~40 s. El resto lo
-        # completa el scheduler en su primer ciclo (45 s tras el arranque).
         resultado = service.props_deporte(sport, n=n, limite_eventos=2,
                                           max_jugadores=6)
         props = resultado.get("props") or []
+        descartadas = resultado.get("descartadas_por_pct") or 0
         origen = "directo"
 
+    props, descartadas_extra = _props_enriquecer(props, minima)
     return {
         "ok": True,
         "sport": sport,
         "n": n,
         "origen": origen,
+        "pct_minima": minima,
+        "descartadas_por_pct": descartadas + descartadas_extra,
         "props": props[:limite],
     }
 
