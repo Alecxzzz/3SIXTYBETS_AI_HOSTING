@@ -205,6 +205,31 @@ class TestMercadosRechazados(unittest.TestCase):
 
 
 
+class TestMercadoPrincipal(unittest.TestCase):
+    """Altenar publica variantes del mismo mercado con el mismo nombre pero
+    otro sportMarketId y otra escala de linea. Solo vale el partido completo."""
+
+    def test_variante_con_menos_jugadores_se_descarta(self):
+        nombre = "Total de Yardas de recepción  Más / Menos de Jugador (incl. prórroga)"
+        det = {
+            "odds": [
+                {"id": "m1", "name": "Ashton Jeanty (LV) Más De 25.5", "price": 1.91, "sv": "25.5"},
+                {"id": "m2", "name": "Brock Bowers (LV) Más De 66.5", "price": 1.90, "sv": "66.5"},
+                {"id": "m3", "name": "Tre Tucker (LV) Más De 44.5", "price": 1.90, "sv": "44.5"},
+                {"id": "v1", "name": "Ashton Jeanty (LV) Más De 0.5", "price": 1.91, "sv": "0.5"},
+            ],
+            "childMarkets": [
+                {"name": nombre, "sportMarketId": 71925, "desktopOddIds": [["m1"]]},
+                {"name": nombre, "sportMarketId": 71925, "desktopOddIds": [["m2"]]},
+                {"name": nombre, "sportMarketId": 71925, "desktopOddIds": [["m3"]]},
+                {"name": nombre, "sportMarketId": 77060, "desktopOddIds": [["v1"]]},
+            ],
+        }
+        filas = M.props_de_detalle("nfl", det)
+        self.assertEqual(sorted(f["linea"] for f in filas), [25.5, 44.5, 66.5])
+        self.assertTrue(all(f["prop"] == "yardas_recepcion" for f in filas))
+
+
 class TestElegirPrincipal(unittest.TestCase):
     def _prop(self, lado, cuota, linea):
         return {"jugador": "X", "equipo": "VIL", "prop": "puntos", "prop_raw": "Puntos",

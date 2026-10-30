@@ -346,10 +346,43 @@ def props_de_detalle(sport: str, detalle: dict) -> list:
     Recorre los childMarkets (donde viven las props en Altenar) y aplica el
     parser del deporte. Devuelve filas deduplicadas por
     (jugador, prop, lado, linea).
+
+    OJO con el "mercado principal": Altenar publica VARIANTES del mismo
+    mercado con el MISMO nombre pero distinto `sportMarketId` y otra escala de
+    linea (ej. yardas de recepcion del partido 25.5 -> 71925, y variantes de
+    0.5 / 10.5 -> 77058/77059/77060). Comparar una linea de "1er cuarto" con
+    las estadisticas del partido completo da 5/5 y edges inventados de +47%.
+    El mercado del partido completo es SIEMPRE el que tiene mas childMarkets
+    (24 jugadores frente a 12 en cada variante), asi que se elige ese por prop.
     """
     if not detalle or sport not in STATS:
         return []
     odds_idx = {o.get("id"): o for o in (detalle.get("odds") or [])}
+
+    candidatos = []
+    cuenta = {}
+    for cm in detalle.get("childMarkets") or []:
+        nombre = str(cm.get("name") or "").strip()
+        if not nombre:
+            continue
+        datos = _jugador_en_mercado(sport, nombre)
+        prop_raw = datos[0] if datos else nombre
+        prop, legible = _prop_de_mercado(sport, prop_raw)
+        if not prop:
+            continue
+        smid = cm.get("sportMarketId")
+        cuenta[(prop, smid)] = cuenta.get((prop, smid), 0) + 1
+        candidatos.append((cm, nombre, prop, prop_raw, legible, datos))
+
+    if not candidatos:
+        return []
+
+    principal = {}
+    for (prop, smid), n in cuenta.items():
+        actual = principal.get(prop)
+        if actual is None or n > actual[0]:
+            principal[prop] = (n, smid)
+
     salida, vistos = [], set()
 
     def _anadir(fila):
@@ -361,24 +394,16 @@ def props_de_detalle(sport: str, detalle: dict) -> list:
         vistos.add(clave)
         salida.append(fila)
 
-    for cm in detalle.get("childMarkets") or []:
-        nombre = str(cm.get("name") or "").strip()
-        if not nombre:
-            continue
-        datos = _jugador_en_mercado(sport, nombre)
+    for cm, nombre, prop, prop_raw, legible, datos in candidatos:
+        if principal.get(prop, (0, None))[1] != cm.get("sportMarketId"):
+            continue  # variante (cuarto, mitad...), no el partido completo
         if datos:
-            prop_raw, jugador, equipo = datos
-            prop, _legible = _prop_de_mercado(sport, prop_raw)
-            if not prop:
-                continue
+            _prop_raw, jugador, equipo = datos
             for odd in _odds_de(cm, odds_idx):
                 _anadir(_fila(sport, prop, prop_raw, jugador, equipo, odd, nombre))
             continue
         # (B) el jugador viene en la seleccion: NBA y NFL
         if sport in ("nba", "nfl"):
-            prop, legible = _prop_de_mercado(sport, nombre)
-            if not prop:
-                continue
             for odd in _odds_de(cm, odds_idx):
                 _anadir(_fila(sport, prop, legible, None, None, odd, nombre))
     return salida
