@@ -1253,6 +1253,16 @@ def _init_database():
     except Exception as exc:
         print(f"[startup] Scheduler de eventos no iniciado: {exc}", flush=True)
 
+    # Props de jugador (/props): cada 90 min mira el calendario real y guarda
+    # las props del dia con la racha de cada jugador. Los partidos nuevos
+    # traen props nuevas sin intervencion manual.
+    try:
+        import props_scheduler
+
+        props_scheduler.iniciar_scheduler()
+    except Exception as exc:
+        print(f"[startup] Scheduler de props no iniciado: {exc}", flush=True)
+
     # Estadisticas: calentador de cache (scoreboards frescos y
     # respuestas instantaneas; el trafico a ESPN queda centralizado).
     if sports_warming:
@@ -3843,6 +3853,65 @@ def api_game_players(sport: str, game_id: int, season: int = 2024, user=Depends(
     if player_stats_service is None:
         return {"error": True, "message": "Servicio de estadísticas no disponible en este momento."}
     return player_stats_service.get_clickable_players(sport, game_id, season)
+
+
+# ==============================
+# PROPS DE JUGADOR (apartado /props)
+# ==============================
+
+@app.get("/api/props")
+def api_props(sport: str = "soccer", n: int = 5, limite: int = 60):
+    """Props de jugador con la racha de sus ultimos N partidos.
+
+    Lee el snapshot que props_scheduler.py guarda cada 90 minutos (respuesta
+    instantanea). Si todavia no hay snapshot del dia, lo calcula en el
+    momento: es mas lento (una llamada por partido al bookmaker) pero nunca
+    deja la pagina vacia.
+    """
+    from backend.props import service
+
+    if sport not in service.mercados.DEPORTES:
+        raise HTTPException(
+            400, "Deporte no soportado. Usa: " + ", ".join(service.mercados.DEPORTES))
+
+    props, origen = [], "cache"
+    try:
+        props = db.list_player_props(sport=sport, limite=limite)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[props] lectura de BD fallo: {exc}", flush=True)
+
+    if not props:
+        # Sin snapshot todavia: se calcula al vuelo pero ACOTADO (2 partidos,
+        # 6 jugadores) para no colgar la primera visita ~40 s. El resto lo
+        # completa el scheduler en su primer ciclo (45 s tras el arranque).
+        resultado = service.props_deporte(sport, n=n, limite_eventos=2,
+                                          max_jugadores=6)
+        props = resultado.get("props") or []
+        origen = "directo"
+
+    return {
+        "ok": True,
+        "sport": sport,
+        "n": n,
+        "origen": origen,
+        "props": props[:limite],
+    }
+
+
+@app.post("/api/props/refresh")
+def api_props_refresh(user=Depends(get_admin)):
+    """Fuerza un ciclo del apartado de props ahora (admin)."""
+    import props_scheduler
+
+    return props_scheduler.refresh_once(usar_cache=False)
+
+
+@app.get("/props", response_class=HTMLResponse)
+def pagina_props():
+    """Apartado de props de jugador (pagina publica, como /track)."""
+    import extras as _extras
+
+    return HTMLResponse(_extras.html_props())
 
 
 # ==============================

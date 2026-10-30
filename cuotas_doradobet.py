@@ -514,6 +514,25 @@ def _props_jugador(sport, data, ev, min_odds, max_odds):
     return salida
 
 
+def detalle_de_evento(sport: str, home_name: str, away_name: str, event_date=None):
+    """GetEventDetails COMPLETO del evento (o None si el book no lo tiene).
+
+    Wrapper publico de lo que ya usa mercados_reales(): resuelve el evento del
+    bookmaker por nombres de equipo y devuelve su detalle con TODOS los
+    mercados, incluidos los childMarkets donde viven los props de jugador.
+
+    Existe para que backend/props no dependa de funciones privadas de este
+    modulo (si mañana cambia el nombre de una interna, solo se toca aqui).
+    """
+    data = get_events_deporte(sport)
+    if not data:
+        return None
+    ev = _encontrar_evento(data, home_name, away_name, event_date)
+    if not ev:
+        return None
+    return _detalle_completo(ev.get("id"))
+
+
 def cuota_doradobet(sport: str, home_name: str, away_name: str,
                     market: str, selection: str, titulo: str):
     """Cuota REAL de DORADOBET para el mercado/seleccion del pick.

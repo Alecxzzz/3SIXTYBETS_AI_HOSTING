@@ -357,6 +357,42 @@ def init_db():
             index ai_picks_descartados_fecha_idx (created_at)
         )
         """,
+        # Props de jugador del apartado /props. Es un SNAPSHOT por dia: el
+        # calendario cambia a diario, asi que la fila guarda la fecha
+        # (pick_date) y el evento. La clave unica es lo que hace idempotente al
+        # scheduler: relanzar el ciclo actualiza cuotas/racha en vez de
+        # duplicar filas.
+        """
+        create table if not exists player_props (
+            id varchar(64) primary key,
+            pick_date date not null,
+            sport varchar(20) not null,
+            league varchar(80) null,
+            event_id varchar(64) not null,
+            event_name varchar(200) not null,
+            event_date varchar(60) null,
+            player_name varchar(120) not null,
+            player_team varchar(10) null,
+            player_photo varchar(400) null,
+            prop varchar(40) not null,
+            prop_raw varchar(120) null,
+            side varchar(10) not null default 'over',
+            line_value decimal(6, 2) not null default 0,
+            odds decimal(10, 4) null,
+            implied decimal(6, 2) null,
+            values_json text null,
+            n_games tinyint null,
+            hits tinyint null,
+            pct decimal(5, 1) null,
+            edge decimal(6, 1) null,
+            fuente varchar(20) null,
+            created_at datetime not null,
+            updated_at datetime null,
+            unique key player_props_key (event_id, player_name, prop, side, line_value),
+            index player_props_date_idx (pick_date),
+            index player_props_event_idx (event_id)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -2209,4 +2245,166 @@ def purgar_picks_prohibidos() -> int:
         return 0
 
 
+
+
+
+# ==============================
+# PLAYER PROPS (apartado /props)
+# ==============================
+# Snapshot diario de las props de jugador que publica el bookmaker, con la
+# racha real del jugador (en cuantos de sus ultimos N partidos supero la
+# linea). Se escribe desde props_scheduler.py cada 90 minutos y se lee desde
+# GET /api/props y la pagina /props.
+
+
+def player_prop_id(evento_id, jugador, prop, lado, linea) -> str:
+    """Id determinista de una prop (misma fila aunque el scheduler reintente)."""
+    base = f"{evento_id}|{jugador}|{prop}|{lado}|{linea}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:32]
+
+
+_COLS_PLAYER_PROPS = (
+    "id, pick_date, sport, league, event_id, event_name, event_date, "
+    "player_name, player_team, player_photo, prop, prop_raw, side, "
+    "line_value, odds, implied, values_json, n_games, hits, pct, edge, "
+    "fuente, created_at, updated_at"
+)
+_N_COLS_PLAYER_PROPS = 24
+
+
+def upsert_player_props(filas: list, fecha=None) -> int:
+    """Inserta/actualiza el snapshot de props de un dia (idempotente).
+
+    Se hace en UN solo INSERT masivo: cada run_query abre una conexion nueva
+    y fila a fila tardaria minutos. `on duplicate key update` refresca cuota,
+    racha y edge del mismo prop sin crear duplicados.
+    """
+    if not filas:
+        return 0
+    ahora = now_utc()
+    dia = fecha or ahora.date()
+    placeholders = "(" + ", ".join(["%s"] * _N_COLS_PLAYER_PROPS) + ")"
+    rows, params, vistos = [], [], set()
+
+    for f in filas:
+        pid = player_prop_id(f.get("evento_id"), f.get("jugador"), f.get("prop"),
+                             f.get("lado"), f.get("linea"))
+        if pid in vistos:
+            continue
+        vistos.add(pid)
+        fila = str(f.get("linea") or 0)
+        rows.append(placeholders)
+        params.extend((
+            pid,
+            dia,
+            str(f.get("sport") or "")[:20],
+            (str(f.get("liga"))[:80] if f.get("liga") else None),
+            str(f.get("evento_id") or "")[:64],
+            str(f.get("evento") or "")[:200],
+            (str(f.get("fecha_evento"))[:60] if f.get("fecha_evento") else None),
+            str(f.get("jugador") or "")[:120],
+            (str(f.get("equipo"))[:10] if f.get("equipo") else None),
+            (str(f.get("foto"))[:400] if f.get("foto") else None),
+            str(f.get("prop") or "")[:40],
+            (str(f.get("prop_raw"))[:120] if f.get("prop_raw") else None),
+            str(f.get("lado") or "over")[:10],
+            float(fila),
+            f.get("cuota"),
+            f.get("implicita"),
+            json.dumps(f.get("valores") or []),
+            f.get("n_partidos"),
+            f.get("cumple"),
+            f.get("pct"),
+            f.get("edge"),
+            (str(f.get("fuente"))[:20] if f.get("fuente") else None),
+            ahora,
+            ahora,
+        ))
+
+    if not rows:
+        return 0
+    # Por LOTES: un ciclo del scheduler puede juntar cientos de props y un
+    # unico INSERT con miles de parametros es fragil (pymysql construye la
+    # sentencia en cliente) y puede pasarse de max_allowed_packet.
+    _LOTE = 150
+    guardadas = 0
+    for inicio in range(0, len(rows), _LOTE):
+        trozo_sql = ", ".join(rows[inicio:inicio + _LOTE])
+        trozo_params = tuple(
+            params[inicio * _N_COLS_PLAYER_PROPS:(inicio + _LOTE) * _N_COLS_PLAYER_PROPS]
+        )
+        sql = (
+            f"insert into player_props ({_COLS_PLAYER_PROPS}) values "
+            + trozo_sql
+            + " on duplicate key update odds=values(odds), implied=values(implied), "
+              "values_json=values(values_json), n_games=values(n_games), "
+              "hits=values(hits), pct=values(pct), edge=values(edge), "
+              "player_photo=values(player_photo), player_team=values(player_team), "
+              "event_date=values(event_date), prop_raw=values(prop_raw), "
+              "updated_at=values(updated_at)"
+        )
+        if run_query(sql, trozo_params):
+            guardadas += len(rows[inicio:inicio + _LOTE])
+    return guardadas
+
+
+def _public_player_prop(row: dict) -> dict:
+    """Fila de BD -> dict con la forma que ya usa el servicio/pagina."""
+    valores = []
+    try:
+        valores = json.loads(row.get("values_json") or "[]")
+    except (TypeError, ValueError):
+        valores = []
+    return {
+        "id": row.get("id"),
+        "sport": row.get("sport"),
+        "liga": row.get("league"),
+        "evento_id": row.get("event_id"),
+        "evento": row.get("event_name"),
+        "fecha_evento": row.get("event_date"),
+        "jugador": row.get("player_name"),
+        "equipo": row.get("player_team"),
+        "foto": row.get("player_photo"),
+        "prop": row.get("prop"),
+        "prop_raw": row.get("prop_raw"),
+        "lado": row.get("side"),
+        "linea": float(row.get("line_value") or 0),
+        "cuota": float(row["odds"]) if row.get("odds") is not None else None,
+        "implicita": float(row["implied"]) if row.get("implied") is not None else None,
+        "valores": valores,
+        "n_partidos": row.get("n_games"),
+        "cumple": row.get("hits"),
+        "pct": float(row["pct"]) if row.get("pct") is not None else None,
+        "edge": float(row["edge"]) if row.get("edge") is not None else None,
+        "fuente": row.get("fuente"),
+        "actualizado": row.get("updated_at"),
+    }
+
+
+def list_player_props(sport=None, fecha=None, limite: int = 600) -> list:
+    """Props guardadas del dia (por defecto hoy), mejor edge primero."""
+    dia = fecha or now_utc().date()
+    sql = "select * from player_props where pick_date = %s"
+    params = [dia]
+    if sport:
+        sql += " and sport = %s"
+        params.append(sport)
+    sql += " order by (edge is null), edge desc, pct desc limit %s"
+    params.append(int(limite))
+    rows = run_query(sql, tuple(params)) or []
+    return [_public_player_prop(r) for r in rows]
+
+
+def purgar_player_props(dias: int = 90) -> int:
+    """Borra props mas viejas que `dias` (retencion del historico)."""
+    corte = now_utc().date() - timedelta(days=max(1, int(dias)))
+    borradas = run_query(
+        "select count(*) as cnt from player_props where pick_date < %s",
+        (corte,),
+        fetchone=True,
+    )
+    if not borradas or not borradas.get("cnt"):
+        return 0
+    run_query("delete from player_props where pick_date < %s", (corte,))
+    return int(borradas.get("cnt") or 0)
 

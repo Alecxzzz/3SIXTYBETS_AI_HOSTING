@@ -765,3 +765,118 @@ init();
 
 
 
+
+
+# ------------------------- PROPS DE JUGADOR -------------------------
+
+def html_props() -> str:
+    """Apartado /props: props de jugador con su racha real.
+
+    Una sola fila de barras por prop (una barra por partido): altura = lo que
+    hizo ese partido, verde si supero la linea y roja si no. Al lado, la cuota
+    real del bookmaker y el edge (% real - % implicito en la cuota).
+    """
+    cuerpo = """
+<h1>Props de jugador</h1>
+<p class="sub">En cu&aacute;ntos de sus &uacute;ltimos 5 partidos el jugador cumpli&oacute;
+la l&iacute;nea, frente a la cuota que paga el bookmaker.</p>
+<div class="tabs" id="tabs">
+  <button class="tab on" data-sport="soccer">F&uacute;tbol</button>
+  <button class="tab" data-sport="nba">NBA</button>
+  <button class="tab" data-sport="nfl">NFL</button>
+</div>
+<p class="sub" id="estado">Cargando&hellip;</p>
+<div id="lista"></div>
+<style>
+.tabs{display:flex;gap:8px;margin:14px 0;flex-wrap:wrap}
+.tab{padding:8px 16px;border-radius:999px;border:1px solid #2a2f3a;background:#141821;
+     color:#c9d1d9;cursor:pointer;font-weight:600}
+.tab.on{background:linear-gradient(135deg,#22c55e,#16a34a);color:#04140a;border-color:transparent}
+.prop-card{display:flex;gap:14px;align-items:center;padding:14px;border-radius:14px;
+           background:#111722;border:1px solid #1e2733;margin-bottom:10px}
+.prop-foto{width:56px;height:56px;border-radius:50%;object-fit:cover;background:#1b2231;
+           flex:0 0 56px}
+.prop-info{flex:1;min-width:0}
+.prop-nombre{font-weight:700}
+.prop-sub{font-size:.8rem;color:#8b98a9}
+.prop-bars{display:flex;gap:4px;align-items:flex-end;height:52px;margin-top:8px}
+.bar{width:16px;border-radius:3px 3px 0 0;min-height:4px}
+.bar.ok{background:#22c55e}
+.bar.no{background:#ef4444}
+.prop-datos{text-align:right;flex:0 0 auto}
+.prop-cuota{font-weight:800;color:#f5c542;font-size:1.05rem}
+.prop-pct{font-size:.78rem;color:#8b98a9}
+</style>"""
+    script = """
+let SPORT = 'soccer';
+document.querySelectorAll('.tab').forEach(function (b) {
+  b.onclick = function () {
+    document.querySelectorAll('.tab').forEach(function (x) { x.classList.remove('on'); });
+    b.classList.add('on');
+    SPORT = b.dataset.sport;
+    cargar();
+  };
+});
+
+function barras(valores, linea, lado) {
+  if (!valores || !valores.length) {
+    return '<div class="prop-sub">Sin historico reciente</div>';
+  }
+  const max = Math.max(linea, Math.max.apply(null, valores), 1);
+  return '<div class="prop-bars">' + valores.map(function (v) {
+    const ok = (lado === 'under') ? (v <= linea) : (v >= linea);
+    const alto = Math.max(6, Math.round((v / max) * 46));
+    return '<div class="bar ' + (ok ? 'ok' : 'no') + '" style="height:' + alto +
+           'px" title="' + v + '"></div>';
+  }).join('') + '</div>';
+}
+
+async function cargar() {
+  const estado = document.getElementById('estado');
+  const lista = document.getElementById('lista');
+  estado.textContent = 'Cargando props...';
+  lista.innerHTML = '';
+  const r = await api('/api/props?sport=' + SPORT);
+  if (!r.ok) {
+    estado.textContent = r.data.detail || 'No se pudieron cargar los props.';
+    return;
+  }
+  const props = r.data.props || [];
+  if (!props.length) {
+    estado.textContent = 'No hay props de jugador publicados ahora mismo en este deporte.';
+    return;
+  }
+  estado.textContent = props.length + ' props - ' +
+    (r.data.origen === 'directo' ? 'calculado ahora' : 'actualizado por el sistema');
+  lista.innerHTML = props.map(function (p) {
+    const foto = p.foto || '';
+    const lado = (p.lado === 'under') ? 'MENOS' : 'MAS';
+    const pct = (p.pct === null || p.pct === undefined) ? '-' : p.pct;
+    const impl = (p.implicita === null || p.implicita === undefined) ? '-' : p.implicita;
+    const edge = (p.edge === null || p.edge === undefined) ? null : p.edge;
+    return '<div class="prop-card">' +
+      '<img class="prop-foto" loading="lazy" alt="" src="' + esc(foto) + '" ' +
+      'onerror="this.style.visibility=\\'hidden\\'">' +
+      '<div class="prop-info">' +
+        '<div class="prop-nombre">' + esc(p.jugador) +
+          (p.equipo ? ' <span class="prop-sub">(' + esc(p.equipo) + ')</span>' : '') + '</div>' +
+        '<div class="prop-sub">' + esc(p.prop_raw || p.prop) + ' - ' + lado +
+          ' de ' + p.linea + '</div>' +
+        barras(p.valores, p.linea, p.lado) +
+        '<div class="prop-sub">' + (p.cumple || 0) + '/' + (p.n_partidos || 0) +
+          ' partidos (' + pct + '%)</div>' +
+      '</div>' +
+      '<div class="prop-datos">' +
+        '<div class="prop-cuota">' + (p.cuota === null || p.cuota === undefined ? '-' : p.cuota) + '</div>' +
+        '<div class="prop-pct">impl. ' + impl + '%</div>' +
+        (edge === null ? '' :
+          '<div class="prop-pct" style="color:' + (edge >= 0 ? '#22c55e' : '#ef4444') +
+          '">edge ' + (edge > 0 ? '+' : '') + edge + '%</div>') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+cargar();
+"""
+    return _pagina("Props de jugador", cuerpo, script)
+
