@@ -67,7 +67,7 @@ def refresh_once(usar_cache: bool = False) -> dict:
         if not props:
             partes.append(f"{sport}: sin props ({resultado.get('motivo') or 'sin partidos'})")
             continue
-        guardadas = db.upsert_player_props(props)
+        guardadas = db.upsert_player_props(props, reemplazar_sport=sport)
         total += guardadas
         partes.append(
             f"{sport}: {guardadas} props de "

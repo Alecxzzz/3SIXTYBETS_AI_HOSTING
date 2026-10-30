@@ -86,56 +86,63 @@ STATS = {
 
 DEPORTES = tuple(STATS)
 
-# Familia de mercado -> clave canonica. El orden IMPORTA: se evalua de
-# arriba abajo y gana la primera coincidencia, asi que las variantes
-# complejas van antes que las simples ("remates a puerta" antes que "remates").
-# None = mercado que existe en el book pero NO es un prop comparable con el
-# historico por partido (primero/ultimo goleador, multigoleadores...).
+# Familia de mercado -> clave canonica. COINCIDENCIA EXACTA sobre el nombre ya
+# limpio (sin "(incl. prorroga)", sin "Mas de/Menos de", sin "por jugador").
+#
+# Por que exacta y no substring: con substring, el mercado real
+# "Intentos de Tiros de 2 Puntos Mas de/Menos de" caia en "puntos" y se
+# comparaba contra los PUNTOS del jugador (linea 6.5 de tiros de 2 contra 25
+# puntos anotados => 5/5 y un edge inventado de +50%). Lo mismo con
+# "1er cuarto - Rebotes" (solo el primer cuarto) o "Bloq.-Robos" (combinado).
+# Es mejor mostrar menos props que mostrar una comparacion falsa.
 _FAMILIAS = {
-    "soccer": (
-        ("marcador exacto", None),
-        ("por mitad", None),
-        ("sustituto", None),
-        ("multigoleador", None),
-        ("goleador", "goles"),
-        ("asistencia", "asistencias"),
-        ("remates a puerta", "remates_puerta"),
-        ("remate a puerta", "remates_puerta"),
-        ("remates", "remates"),
-        ("remate", "remates"),
-        ("falta", "faltas"),
-        ("fuera de juego", "offsides"),
-    ),
-    "nba": (
-        ("puntos", "puntos"),
-        ("rebotes", "rebotes"),
-        ("asistencias", "asistencias"),
-        ("triples", "triples"),
-        ("robos", "robos"),
-        ("tapones", "tapones"),
-    ),
-    "nfl": (
-        ("yardas de pases", "yardas_pase"),
-        ("touchdowns de pase", "td_pase"),
-        ("yardas de recepcion", "yardas_recepcion"),
-        ("recepciones", "recepciones"),
-        ("yardas de carrera", "yardas_carrera"),
-        ("touchdowns de carrera", "td_carrera"),
-        ("intercepciones", "intercepciones"),
-        ("sacks", "sacks"),
-    ),
-    "mlb": (
-        ("carreras impulsadas", "rbi"),
-        ("bases totales", "bases_totales"),
-        ("bases robadas", "bases_robadas"),
-        ("hits", "hits"),
-        ("hr", "hr"),
-        ("jonrones", "hr"),
-        ("strikeouts", "ponches"),
-        ("ponches", "ponches"),
-        ("carreras", "carreras"),
-    ),
+    "soccer": {
+        "goleador": "goles",
+        "asistencias": "asistencias",
+        "remates": "remates",
+        "remates a puerta": "remates_puerta",
+        "faltas": "faltas",
+        "fuera de juego": "offsides",
+        "fuera de juego del jugador": "offsides",
+    },
+    "nba": {
+        "puntos": "puntos",
+        "rebotes": "rebotes",
+        "asistencias": "asistencias",
+        "triples": "triples",
+        "triples anotados": "triples",
+        "tiros de 3 puntos anotados": "triples",
+        "robos": "robos",
+        "tapones": "tapones",
+    },
+    "nfl": {
+        "yardas de pases": "yardas_pase",
+        "touchdowns de pase": "td_pase",
+        "yardas de recepcion": "yardas_recepcion",
+        "total de yardas de recepcion": "yardas_recepcion",
+        "recepciones": "recepciones",
+        "yardas de carrera": "yardas_carrera",
+        "touchdowns de carrera": "td_carrera",
+    },
+    "mlb": {
+        "hits totales": "hits",
+        "hr totales": "hr",
+        "jonrones": "hr",
+        "strikeouts": "ponches",
+        "ponches": "ponches",
+        "bases totales": "bases_totales",
+        "carreras impulsadas": "rbi",
+        "carreras": "carreras",
+        "bases robadas": "bases_robadas",
+    },
 }
+
+# Con coincidencia EXACTA no hace falta lista negra: cualquier nombre que no
+# este en el diccionario se descarta solo ("1er cuarto - Rebotes",
+# "Intentos de Tiros de 2 Puntos", "Bloq.-Robos", "Multis de jugador"...).
+# Una lista negra global era peligrosa: "pases" habria tumbado tambien
+# "Yardas de pases" de NFL.
+
 
 
 # --------------------------------------------------------------- utilidades
@@ -195,17 +202,26 @@ def _es_otro_mercado(nombre_odd: str) -> bool:
 
 _RE_INCL = re.compile(r"\(incl\.[^)]*\)", re.I)
 _RE_VARIANTE = re.compile(
-    r"m[aá]s\s*/\s*menos de jugador|m[ií]\s*/\s*menos de jugador", re.I
+    r"m[aá]s\s*/\s*menos de jugador"
+    r"|m[ií]\s*/\s*menos de jugador"
+    r"|m[aá]s\s*de\s*/\s*menos\s*de"
+    r"|m[aá]s\s*de\s*menos\s*de",
+    re.I,
 )
 
 
 def _prop_de_mercado(sport: str, nombre: str):
     """(clave canonica, texto legible) o (None, None) si no es comparable.
 
-    Limpia los adornos del bookmaker antes de clasificar:
+    Limpia los adornos del bookmaker y exige COINCIDENCIA EXACTA:
+
         "Yardas de pases Mas / Menos de Jugador (incl. prorroga)"
-            -> "Yardas de pases"  -> yardas_pase
-        "Hits totales por jugador"  -> "Hits totales" -> hits
+            -> "Yardas de pases"        -> yardas_pase
+        "Rebotes Mas de/Menos de"       -> "Rebotes" -> rebotes
+        "Hits totales por jugador"      -> "Hits totales" -> hits
+
+        "Intentos de Tiros de 2 Puntos Mas de/Menos de"  -> no esta -> None
+        "1er cuarto - Rebotes"                            -> no esta -> None
     """
     limpio = _RE_INCL.sub(" ", nombre or "")
     limpio = _RE_VARIANTE.sub(" ", limpio)
@@ -213,11 +229,8 @@ def _prop_de_mercado(sport: str, nombre: str):
     limpio = re.sub(r"\s+", " ", limpio).strip(" -|/")
     if not limpio:
         return None, None
-    t = _norm(limpio)
-    for aguja, clave in _FAMILIAS.get(sport, ()):
-        if aguja in t:
-            return clave, limpio
-    return None, None
+    clave = _FAMILIAS.get(sport, {}).get(_norm(limpio))
+    return (clave, limpio) if clave else (None, None)
 
 
 

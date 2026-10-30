@@ -160,6 +160,51 @@ class TestUtilidades(unittest.TestCase):
         self.assertEqual(M.props_de_detalle("soccer", None), [])
 
 
+class TestMercadosRechazados(unittest.TestCase):
+    """Mercados reales de NBA que NO se pueden comparar con el total del
+    partido. Clasificarlos con substring producia edges falsos de +50%."""
+
+    def _nba(self, mercado, jugador="Bam Adebayo", equipo="MIA"):
+        return M.props_de_detalle("nba", _detalle((
+            mercado,
+            [(f"{jugador} ({equipo}) Más De 9.5", 2.05, "9.5")],
+        )))
+
+    def test_intentos_de_tiros_de_2_no_son_puntos(self):
+        self.assertEqual(
+            self._nba("Intentos de Tiros de 2 Puntos Más de/Menos de"), [])
+
+    def test_primer_cuarto_no_es_el_partido(self):
+        self.assertEqual(self._nba("1er cuarto - Rebotes"), [])
+        self.assertEqual(self._nba("1er cuarto - Puntos"), [])
+        self.assertEqual(self._nba("1er cuarto - Asistencias"), [])
+
+    def test_combinado_bloqueos_robos_no_es_robos(self):
+        self.assertEqual(self._nba("Bloq.-Robos Más de/Menos de"), [])
+
+    def test_h2h_no_es_prop(self):
+        self.assertEqual(self._nba("Rebotes de los jugadores H2H"), [])
+
+    def test_total_del_equipo_no_es_prop(self):
+        self.assertEqual(self._nba("Total de Rebotes del equipo"), [])
+
+    def test_el_mercado_normal_si_pasa(self):
+        """Contraste: 'Rebotes Más de/Menos de' SI es un prop valido."""
+        filas = self._nba("Rebotes Más de/Menos de")
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0]["prop"], "rebotes")
+
+    def test_pases_de_nfl_no_se_rompe(self):
+        """La palabra 'pases' no debe tumbar 'Yardas de pases' (NFL)."""
+        filas = M.props_de_detalle("nfl", _detalle((
+            "Yardas de pases Más / Menos de Jugador (incl. prórroga)",
+            [("Aaron Rodgers (PIT) Más De 223.5", 1.8696, "223.5")],
+        )))
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0]["prop"], "yardas_pase")
+
+
+
 class TestElegirPrincipal(unittest.TestCase):
     def _prop(self, lado, cuota, linea):
         return {"jugador": "X", "equipo": "VIL", "prop": "puntos", "prop_raw": "Puntos",

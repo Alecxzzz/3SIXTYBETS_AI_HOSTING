@@ -2272,12 +2272,18 @@ _COLS_PLAYER_PROPS = (
 _N_COLS_PLAYER_PROPS = 24
 
 
-def upsert_player_props(filas: list, fecha=None) -> int:
+def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
     """Inserta/actualiza el snapshot de props de un dia (idempotente).
 
-    Se hace en UN solo INSERT masivo: cada run_query abre una conexion nueva
-    y fila a fila tardaria minutos. `on duplicate key update` refresca cuota,
-    racha y edge del mismo prop sin crear duplicados.
+    Se hace en UN solo INSERT masivo por lotes: cada run_query abre una
+    conexion nueva y fila a fila tardaria minutos. `on duplicate key update`
+    refresca cuota, racha y edge del mismo prop sin crear duplicados.
+
+    `reemplazar_sport`: si se indica, al final se BORRAN las props de ese
+    deporte/dia que ya no vienen en el snapshot. Asi desaparecen las de
+    partidos que ya empezaron y no queda datos viejo si cambia el parser.
+    El borrado va DESPUES del insert y solo si este funciono: si el bookmaker
+    falla, se conserva el snapshot anterior en vez de vaciar la tabla.
     """
     if not filas:
         return 0
@@ -2321,6 +2327,7 @@ def upsert_player_props(filas: list, fecha=None) -> int:
             ahora,
         ))
 
+
     if not rows:
         return 0
     # Por LOTES: un ciclo del scheduler puede juntar cientos de props y un
@@ -2345,6 +2352,19 @@ def upsert_player_props(filas: list, fecha=None) -> int:
         )
         if run_query(sql, trozo_params):
             guardadas += len(rows[inicio:inicio + _LOTE])
+
+    # Limpieza: props de ese deporte/dia que ya NO vienen en el snapshot
+    # (partido empezado, linea retirada, o un mercado que el parser ya
+    # descarta). Va despues del insert y solo si hubo exito.
+    if guardadas and reemplazar_sport:
+        ids = list(vistos)
+        marcas = ", ".join(["%s"] * len(ids))
+        run_query(
+            "delete from player_props where pick_date = %s and sport = %s "
+            f"and id not in ({marcas})",
+            tuple([dia, str(reemplazar_sport)[:20]] + ids),
+        )
+
     return guardadas
 
 

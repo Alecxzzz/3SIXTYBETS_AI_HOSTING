@@ -182,6 +182,25 @@ class TestPersistencia(unittest.TestCase):
         self.assertEqual(guardadas, 1)
         self.assertEqual(len(capturado["params"]), db._N_COLS_PLAYER_PROPS)
 
+    def test_reemplazar_sport_borra_lo_que_ya_no_viene(self):
+        """El snapshot sustituye al del dia: se borran las props que sobran."""
+        consultas = []
+
+        def _espia(sql, params=None, fetchone=False):
+            consultas.append((sql, params))
+            return True
+
+        with mock.patch.object(db, "run_query", side_effect=_espia):
+            db.upsert_player_props([self._fila()], reemplazar_sport="soccer")
+
+        deletes = [c for c in consultas if c[0].strip().lower().startswith("delete")]
+        self.assertEqual(len(deletes), 1, consultas)
+        sql, params = deletes[0]
+        self.assertIn("pick_date = %s and sport = %s", sql)
+        self.assertIn("id not in", sql)
+        self.assertEqual(params[-1], db.player_prop_id(
+            "401", "Gerard Moreno", "goles", "over", 0.5))
+
     def test_sin_filas_no_toca_la_bd(self):
         with mock.patch.object(db, "run_query") as espia:
             self.assertEqual(db.upsert_player_props([]), 0)
@@ -222,8 +241,8 @@ class TestScheduler(unittest.TestCase):
 
         guardadas = []
 
-        def _upsert(filas, fecha=None):
-            guardadas.append(len(filas))
+        def _upsert(filas, fecha=None, reemplazar_sport=None):
+            guardadas.append((len(filas), reemplazar_sport))
             return len(filas)
 
         with mock.patch.object(props_scheduler.service, "props_deporte",
@@ -235,6 +254,8 @@ class TestScheduler(unittest.TestCase):
             estado = props_scheduler.refresh_once(usar_cache=False)
 
         self.assertEqual(len(guardadas), len(props_scheduler.DEPORTES))
+        # Cada deporte se guarda reemplazando SU snapshot del dia.
+        self.assertEqual([d for _n, d in guardadas], list(props_scheduler.DEPORTES))
         self.assertEqual(estado["props"], len(props_scheduler.DEPORTES))
         self.assertTrue(estado["ok"])
         self.assertIn("soccer", estado["detalle"])
