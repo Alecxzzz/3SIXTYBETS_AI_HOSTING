@@ -171,17 +171,12 @@ class TestSenalPorPartido(unittest.TestCase):
         )
 
     def test_senal_por_defecto_es_espn_3(self):
-        self.assertIn("barinaslive1.boldmss.com", main.FREE_ESPN_STREAM_PRINCIPAL)
-        self.assertIn("ESPN_3", main.FREE_ESPN_STREAM_PRINCIPAL)
+        self.assertIn("190.61.47.54:8000/play/a02u", main.FREE_ESPN_STREAM_PRINCIPAL)
 
     def test_inter_milan_usa_espn_3(self):
         self.assertEqual(
             main._free_espn_opciones_de(INTER["name"]),
-            [{
-                "label": "",
-                "url": main.FREE_ESPN_STREAM_PRINCIPAL,
-                "referer": "https://barinaslive1.boldmss.com/",
-            }],
+            [{"label": "", "url": main.FREE_ESPN_STREAM_PRINCIPAL, "referer": ""}],
         )
 
     def test_referer_por_host_de_la_senal(self):
@@ -260,9 +255,14 @@ class TestEndpointStream(unittest.TestCase):
         self.assertGreater(data["tiempo_restante_seg"], 0)
 
     def test_proxy_lleva_el_referer_que_exige_la_fuente(self):
-        data = self._get_stream(INTER).json()
-        self.assertIn("referer=https%3A%2F%2Fbarinaslive1.boldmss.com%2F",
-                      data["opciones"][0]["url"])
+        self.assertEqual(
+            main._free_espn_opcion("", "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8")["referer"],
+            "https://barinaslive1.boldmss.com/",
+        )
+        self.assertEqual(
+            main._free_espn_opcion("", "http://190.61.47.54:8000/play/a02u/index.m3u8")["referer"],
+            "",
+        )
 
     def test_dos_opciones_cuando_el_evento_tiene_dos_senales(self):
         eventos = [{
