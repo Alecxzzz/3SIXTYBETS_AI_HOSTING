@@ -174,15 +174,13 @@ class TestSenalPorPartido(unittest.TestCase):
         self.assertIn("barinaslive1.boldmss.com", main.FREE_ESPN_STREAM_PRINCIPAL)
         self.assertIn("ESPN_3", main.FREE_ESPN_STREAM_PRINCIPAL)
 
-    def test_inter_milan_usa_la_senal_por_defecto(self):
-        self.assertEqual(
-            main._free_espn_opciones_de(INTER["name"]),
-            [{
-                "label": "",
-                "url": main.FREE_ESPN_STREAM_PRINCIPAL,
-                "referer": "https://barinaslive1.boldmss.com/",
-            }],
-        )
+    def test_inter_milan_es_espn_3_con_alternativas(self):
+        opciones = main._free_espn_opciones_de(INTER["name"])
+        self.assertEqual(len(opciones), len(main.ESPN3_OPCIONES))
+        self.assertEqual(opciones[0]["label"], "(ESPN 3)")
+        self.assertEqual(opciones[0]["url"], main.FREE_ESPN_STREAM_PRINCIPAL)
+        self.assertEqual(opciones[0]["referer"], "https://barinaslive1.boldmss.com/")
+        self.assertEqual(opciones[1]["referer"], "")  # las alternativas no lo piden
 
     def test_referer_por_host_de_la_senal(self):
         self.assertEqual(

@@ -4204,6 +4204,17 @@ FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales progra
 # Respaldos: solo se usan si FREE_ESPN_OPCIONES_PROGRAMADAS = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
 
+# ESPN 3: la MISMA señal y las MISMAS alternativas que el canal "ESPN 3" del
+# sitio principal (channels.js). La 1 es la pedida; las demas son respaldo
+# para que el player cambie solo si la fuente falla.
+ESPN3_OPCIONES = [
+    {"label": "(ESPN 3)", "url": "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"},
+    {"label": "(ESPN 3 alt 1)", "url": "http://45.228.234.9:8000/play/a05h/index.m3u8"},
+    {"label": "(ESPN 3 alt 2)", "url": "http://38.252.215.33:8000/play/a00l/index.m3u8"},
+    {"label": "(ESPN 3 alt 3)", "url": "http://190.61.47.54:8000/play/a02u/index.m3u8"},
+    {"label": "(ESPN 3 alt 4)", "url": "http://138.59.177.78:9999/play/a07v/index.m3u8"},
+]
+
 # Partidos programados, EN ORDEN (el orden decide cual manda si dos
 # estan en ventana a la vez). Cada evento:
 #   "match"    -> palabras que deben aparecer en "local visita" segun ESPN
@@ -4230,6 +4241,7 @@ FREE_ESPN_EVENTOS = [
         # Serie A - 19:45Z
         "match": ("inter", "milan"),
         "league": "ita.1",
+        "opciones": ESPN3_OPCIONES,
     },
 ]
 
