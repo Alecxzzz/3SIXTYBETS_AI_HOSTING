@@ -3936,6 +3936,16 @@ def api_props(sport: str = "soccer", n: int = 5, limite: int = 60):
     }
 
 
+@app.get("/api/props/track")
+def api_props_track(dias: int = 7):
+    """Efectividad REAL de las props ya cerradas (ultimos `dias` dias).
+
+    Solo cuenta props con veredicto (ACIERTO/FALLO). Es la prueba de si el
+    edge que muestra la pagina se sostiene en la realidad.
+    """
+    return db.track_record_player_props(dias=max(1, min(90, int(dias))))
+
+
 @app.post("/api/props/refresh")
 def api_props_refresh(user=Depends(get_admin)):
     """Fuerza un ciclo del apartado de props ahora (admin)."""

@@ -366,6 +366,19 @@ def _equipo_de_evento(evento, equipo_abbr):
     return None
 
 
+def partidos_jugador(sport: str, league, player_id) -> list:
+    """Todos los partidos conocidos del jugador, sin filtrar por fecha.
+
+    Lo usa el cierre de props para localizar el partido concreto del evento
+    (misma fecha) y sacar el valor real que consiguio.
+    """
+    if not player_id:
+        return []
+    if sport == "mlb":
+        return _gamelog_mlb(player_id, 60)
+    return _gamelog_espn(sport, league, player_id)
+
+
 def historial_jugador(sport: str, jugador: str, equipo: str, evento: dict, n: int = 5):
     """Ultimos n partidos del jugador JUGADOS ANTES del evento.
 

@@ -81,6 +81,17 @@ def refresh_once(usar_cache: bool = False) -> dict:
     except Exception as exc:  # noqa: BLE001
         partes.append(f"purga: {exc!r}")
 
+    # A1: cerrar las props de partidos ya jugados (ACIERTO / FALLO).
+    try:
+        cierre = service.cerrar_props()
+        if cierre.get("revisadas"):
+            partes.append(
+                f"cierre: {cierre['cerradas']}/{cierre['revisadas']} props "
+                f"({cierre['sin_partido']} sin partido aun)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        partes.append(f"cierre: {exc!r}")
+
     resumen = "; ".join(partes) or "sin actividad"
     _salud.update({
         "ultima": datetime.now(timezone.utc).isoformat(timespec="seconds"),

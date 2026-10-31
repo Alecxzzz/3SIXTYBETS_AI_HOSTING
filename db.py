@@ -386,6 +386,10 @@ def init_db():
             hits tinyint null,
             pct decimal(5, 1) null,
             edge decimal(6, 1) null,
+            estado varchar(20) null,
+            valor_real decimal(8, 2) null,
+            player_espn_id varchar(20) null,
+            league_code varchar(40) null,
             fuente varchar(20) null,
             created_at datetime not null,
             updated_at datetime null,
@@ -401,7 +405,14 @@ def init_db():
 
     # Migracion ligera: columnas nuevas del apartado /props (instalaciones
     # previas ya tienen la tabla player_props sin ellas).
-    for column, tipo in (("detalle_json", "text null"),):
+    for column, tipo in (
+        ("detalle_json", "text null"),
+        # A1: cierre de props + track record
+        ("estado", "varchar(20) null"),
+        ("valor_real", "decimal(8,2) null"),
+        ("player_espn_id", "varchar(20) null"),
+        ("league_code", "varchar(40) null"),
+    ):
         existe = run_query(
             """
             select count(*) as cnt from information_schema.columns
@@ -2283,9 +2294,10 @@ _COLS_PLAYER_PROPS = (
     "id, pick_date, sport, league, event_id, event_name, event_date, "
     "player_name, player_team, player_photo, prop, prop_raw, side, "
     "line_value, odds, implied, values_json, detalle_json, n_games, hits, pct, "
-    "edge, fuente, created_at, updated_at"
+    "edge, estado, valor_real, player_espn_id, league_code, fuente, "
+    "created_at, updated_at"
 )
-_N_COLS_PLAYER_PROPS = 25
+_N_COLS_PLAYER_PROPS = 29
 
 
 def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
@@ -2339,6 +2351,10 @@ def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
             f.get("cumple"),
             f.get("pct"),
             f.get("edge"),
+            f.get("estado") or "PENDIENTE",
+            f.get("valor_real"),
+            (str(f.get("jugador_id"))[:20] if f.get("jugador_id") else None),
+            (str(f.get("liga_code"))[:40] if f.get("liga_code") else None),
             (str(f.get("fuente"))[:20] if f.get("fuente") else None),
             ahora,
             ahora,
@@ -2420,6 +2436,9 @@ def _public_player_prop(row: dict) -> dict:
         "cumple": row.get("hits"),
         "pct": float(row["pct"]) if row.get("pct") is not None else None,
         "edge": float(row["edge"]) if row.get("edge") is not None else None,
+        "estado": row.get("estado") or "PENDIENTE",
+        "valor_real": (float(row["valor_real"])
+                       if row.get("valor_real") is not None else None),
         "fuente": row.get("fuente"),
         "actualizado": row.get("updated_at"),
     }
@@ -2451,4 +2470,119 @@ def purgar_player_props(dias: int = 90) -> int:
         return 0
     run_query("delete from player_props where pick_date < %s", (corte,))
     return int(borradas.get("cnt") or 0)
+
+
+
+# ------------------- CIERRE DE PROPS Y TRACK RECORD (A1) -------------------
+
+
+def list_player_props_por_cerrar(limite: int = 400) -> list:
+    """Props de eventos ya pasados que todavia no tienen veredicto.
+
+    La fecha del evento se guarda como texto ISO, asi que se compara solo la
+    parte de fecha. Si el partido aun no aparece en el historico del jugador,
+    la prop se queda PENDIENTE y se reintenta en el siguiente ciclo.
+    """
+    hoy = now_utc().date().isoformat()
+    rows = run_query(
+        "select * from player_props "
+        "where (estado is null or estado = 'PENDIENTE') "
+        "and left(event_date, 10) <= %s "
+        "and player_espn_id is not null "
+        "order by pick_date asc, player_name asc limit %s",
+        (hoy, int(limite)),
+    )
+    return rows or []
+
+
+def cerrar_player_props(resultados: list) -> int:
+    """Marca ACIERTO/FALLO y guarda el valor real de cada prop.
+
+    Se hace con CASE + IN por lotes de 100: un UPDATE por fila obligaria a
+    abrir una conexion nueva cada vez y cerrar cientos de props tardaria
+    minutos.
+    """
+    if not resultados:
+        return 0
+
+    total, ahora = 0, now_utc()
+    for inicio in range(0, len(resultados), 100):
+        lote = resultados[inicio:inicio + 100]
+        ids = [r["id"] for r in lote]
+        marcas = ", ".join(["%s"] * len(ids))
+        estado_case = " ".join(["when %s then %s"] * len(lote))
+        valor_case = " ".join(["when %s then %s"] * len(lote))
+
+        params = []
+        for r in lote:
+            params.extend([r["id"], r["estado"]])
+        for r in lote:
+            params.extend([r["id"], r.get("valor_real")])
+        params.append(ahora)
+        params.extend(ids)
+
+        sql = (
+            "update player_props set "
+            f"estado = case id {estado_case} end, "
+            f"valor_real = case id {valor_case} end, "
+            "updated_at = %s "
+            f"where id in ({marcas}) "
+            "and (estado is null or estado = 'PENDIENTE')"
+        )
+        if run_query(sql, tuple(params)):
+            total += len(lote)
+    return total
+
+
+def track_record_player_props(dias: int = 7) -> dict:
+    """Efectividad REAL de las props ya cerradas (ultimos `dias` dias).
+
+    Es la unica forma de saber si el edge que muestra la pagina se sostiene:
+    se compara el veredicto guardado con lo que pagaba la cuota.
+    """
+    desde = now_utc().date() - timedelta(days=max(1, int(dias)))
+    filtro = "where pick_date >= %s and estado in ('ACIERTO', 'FALLO')"
+    campos = (
+        "count(*) as resueltos, "
+        "sum(case when estado = 'ACIERTO' then 1 else 0 end) as aciertos, "
+        "sum(case when estado = 'ACIERTO' then coalesce(odds, 1) - 1 else -1 end) as unidades"
+    )
+
+    def _fila(r):
+        resueltos = int((r or {}).get("resueltos") or 0)
+        aciertos = int((r or {}).get("aciertos") or 0)
+        unidades = float((r or {}).get("unidades") or 0)
+        return {
+            "resueltos": resueltos,
+            "aciertos": aciertos,
+            "efectividad": round(100.0 * aciertos / resueltos, 1) if resueltos else None,
+            "roi": round(100.0 * unidades / resueltos, 1) if resueltos else None,
+        }
+
+    total = _fila(run_query(
+        f"select {campos} from player_props {filtro}", (desde,), fetchone=True))
+
+    por_deporte = []
+    for r in run_query(
+        f"select sport, {campos} from player_props {filtro} "
+        "group by sport order by resueltos desc",
+        (desde,),
+    ) or []:
+        por_deporte.append({"sport": r.get("sport"), **_fila(r)})
+
+    por_prop = []
+    for r in run_query(
+        f"select prop, {campos} from player_props {filtro} "
+        "group by prop order by resueltos desc limit 12",
+        (desde,),
+    ) or []:
+        por_prop.append({"prop": r.get("prop"), **_fila(r)})
+
+    return {
+        "dias": int(dias),
+        "desde": desde.isoformat(),
+        "total": total,
+        "deportes": por_deporte,
+        "props": por_prop,
+    }
 

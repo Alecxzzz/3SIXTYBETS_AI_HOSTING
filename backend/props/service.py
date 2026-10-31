@@ -20,6 +20,7 @@ import os
 import time
 
 import cuotas_doradobet as book
+import db
 import sports
 
 from . import mercados, proveedores
@@ -145,7 +146,9 @@ def _fila(sport, prop, evento, historial, campo, n):
         "evento_id": evento.get("id"),
         "evento": evento.get("name"),
         "liga": evento.get("league"),
+        "liga_code": evento.get("league_code"),
         "fecha_evento": evento.get("date"),
+        "estado": "PENDIENTE",
         "fuente": "statsapi" if sport == "mlb" else "espn",
     }
 
@@ -294,4 +297,66 @@ def props_deporte(sport: str, n: int = 5, limite_eventos: int = 15,
     }
     cache_set(clave, salida)
     return salida
+
+
+
+# ------------------------------------------------------- cierre (A1)
+
+
+def cerrar_props(limite: int = 400) -> dict:
+    """Cierra las props de partidos ya jugados: ACIERTO / FALLO.
+
+    Para cada jugador se pide su historico UNA sola vez y se busca el partido
+    del evento por fecha. Si ese partido todavia no aparece en la fuente, la
+    prop se queda PENDIENTE para el siguiente ciclo: no se inventa veredicto.
+
+    Es lo que convierte el apartado en algo demostrable: con el veredicto
+    guardado se puede medir la efectividad real (db.track_record_player_props).
+    """
+    filas = db.list_player_props_por_cerrar(limite)
+    if not filas:
+        return {"revisadas": 0, "cerradas": 0, "sin_partido": 0}
+
+    grupos = {}
+    for f in filas:
+        clave = (f.get("sport"), f.get("league_code"), str(f.get("player_espn_id")))
+        grupos.setdefault(clave, []).append(f)
+
+    resultados, sin_partido = [], 0
+    for (sport, league, player_id), props in grupos.items():
+        try:
+            partidos = proveedores.partidos_jugador(sport, league, player_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[props] cierre: historico de {player_id} fallo: {exc}", flush=True)
+            partidos = []
+        por_fecha = {(p.get("fecha") or "")[:10]: p for p in partidos}
+
+        for f in props:
+            fecha = str(f.get("event_date") or "")[:10]
+            partido = por_fecha.get(fecha)
+            if not partido:
+                sin_partido += 1
+                continue
+            campo = (mercados.STATS.get(sport) or {}).get(f.get("prop"))
+            if not campo:
+                continue
+            valor = (partido.get("stats") or {}).get(campo)
+            if valor is None:
+                sin_partido += 1
+                continue
+            linea = float(f.get("line_value") or 0)
+            lado = f.get("side") or "over"
+            cumple = (valor <= linea) if lado == "under" else (valor >= linea)
+            resultados.append({
+                "id": f["id"],
+                "estado": "ACIERTO" if cumple else "FALLO",
+                "valor_real": float(valor),
+            })
+
+    cerradas = db.cerrar_player_props(resultados)
+    return {
+        "revisadas": len(filas),
+        "cerradas": cerradas,
+        "sin_partido": sin_partido,
+    }
 

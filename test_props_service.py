@@ -269,6 +269,9 @@ class TestScheduler(unittest.TestCase):
 
         with mock.patch.object(props_scheduler.service, "props_deporte",
                                return_value=resultado_deporte), \
+                mock.patch.object(props_scheduler.service, "cerrar_props",
+                                  return_value={"revisadas": 0, "cerradas": 0,
+                                                "sin_partido": 0}), \
                 mock.patch.object(props_scheduler.db, "upsert_player_props",
                                   side_effect=_upsert), \
                 mock.patch.object(props_scheduler.db, "purgar_player_props",
@@ -288,6 +291,9 @@ class TestScheduler(unittest.TestCase):
 
         with mock.patch.object(props_scheduler.service, "props_deporte",
                                side_effect=RuntimeError("book caido")), \
+                mock.patch.object(props_scheduler.service, "cerrar_props",
+                                  return_value={"revisadas": 0, "cerradas": 0,
+                                                "sin_partido": 0}), \
                 mock.patch.object(props_scheduler.db, "upsert_player_props") as upsert, \
                 mock.patch.object(props_scheduler.db, "purgar_player_props",
                                   return_value=0):
@@ -302,4 +308,76 @@ class TestScheduler(unittest.TestCase):
 
         self.assertEqual(props_scheduler.INTERVAL_S, 90 * 60)
         self.assertEqual(props_scheduler.N_PARTIDOS, 5)
+
+
+
+class TestCierre(unittest.TestCase):
+    """Cerrar props: ACIERTO / FALLO con el valor real del partido."""
+
+    def _prop(self, **extra):
+        base = {
+            "id": "p1", "sport": "soccer", "league_code": "esp.1",
+            "player_espn_id": "156172", "player_name": "Gerard Moreno",
+            "prop": "remates_puerta", "side": "over", "line_value": 1.5,
+            "event_date": "2026-10-30T18:00Z",
+        }
+        base.update(extra)
+        return base
+
+    def _correr(self, props, partidos):
+        with mock.patch.object(service.db, "list_player_props_por_cerrar",
+                               return_value=props), \
+                mock.patch.object(service.proveedores, "partidos_jugador",
+                                  return_value=partidos), \
+                mock.patch.object(service.db, "cerrar_player_props",
+                                  side_effect=lambda rs: len(rs)) as cerrar:
+            resultado = service.cerrar_props()
+        return resultado, cerrar
+
+    def test_acierto_y_fallo_con_el_valor_real(self):
+        partidos = [
+            {"fecha": "2026-10-30", "stats": {"shotsOnTarget": 3}},
+        ]
+        props = [
+            self._prop(id="a", line_value=1.5, side="over"),   # 3 >= 1.5 -> ACIERTO
+            self._prop(id="b", line_value=4.5, side="over"),   # 3 < 4.5  -> FALLO
+            self._prop(id="c", line_value=2.5, side="under"),  # 3 > 2.5  -> FALLO
+        ]
+        resultado, cerrar = self._correr(props, partidos)
+
+        self.assertEqual(resultado["cerradas"], 3)
+        filas = cerrar.call_args[0][0]
+        estados = {f["id"]: f["estado"] for f in filas}
+        self.assertEqual(estados, {"a": "ACIERTO", "b": "FALLO", "c": "FALLO"})
+        self.assertTrue(all(f["valor_real"] == 3.0 for f in filas))
+
+    def test_sin_ese_partido_queda_pendiente(self):
+        """Si la fuente aun no tiene el partido, NO se inventa veredicto."""
+        partidos = [{"fecha": "2026-10-25", "stats": {"shotsOnTarget": 2}}]
+        resultado, cerrar = self._correr([self._prop()], partidos)
+
+        self.assertEqual(resultado["cerradas"], 0)
+        self.assertEqual(resultado["sin_partido"], 1)
+        cerrar.assert_called_once_with([])
+
+    def test_stat_ausente_no_cierra(self):
+        partidos = [{"fecha": "2026-10-30", "stats": {"goals": 1}}]
+        resultado, cerrar = self._correr([self._prop()], partidos)
+
+        self.assertEqual(resultado["cerradas"], 0)
+        self.assertEqual(resultado["sin_partido"], 1)
+        cerrar.assert_called_once_with([])
+
+    def test_sin_pendientes_no_llama_a_la_fuente(self):
+        with mock.patch.object(service.db, "list_player_props_por_cerrar",
+                               return_value=[]), \
+                mock.patch.object(service.proveedores, "partidos_jugador") as partidos:
+            resultado = service.cerrar_props()
+
+        partidos.assert_not_called()
+        self.assertEqual(resultado, {"revisadas": 0, "cerradas": 0, "sin_partido": 0})
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
 
