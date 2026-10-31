@@ -10,8 +10,9 @@ Lo que se protege:
 - Sin partidos abiertos todavia, se muestra el proximo (cuenta atras).
 - Con todos cerrados, queda el mas reciente.
 - La agenda se consulta POR LIGA: Premier League (eng.1) y Bundesliga (ger.1).
-- Cada partido usa SU propia señal ("stream" del evento), y con
-  FREE_ESPN_STREAM_UNICO = True el endpoint devuelve UNA sola opcion.
+- Cada partido usa SUS propias señales: "stream" (una) u "opciones" (varias,
+  p.ej. Opción 1 ESPN Colombia + Opción 2 Portugués). Con
+  FREE_ESPN_OPCIONES_PROGRAMADAS = True el endpoint devuelve exactamente esas.
 """
 import contextlib
 import unittest
@@ -149,27 +150,79 @@ class TestSenalPorPartido(unittest.TestCase):
             main.FREE_ESPN_STREAM_PRINCIPAL,
         )
 
+    def test_opciones_del_evento_con_varias_senales(self):
+        opciones = main._free_espn_opciones_de(BAYERN["name"])
+        self.assertEqual(len(opciones), 2)
+        self.assertEqual(opciones[0]["url"], main.FREE_ESPN_STREAM_PRINCIPAL)
+        self.assertEqual(opciones[1]["label"], "(Portugués)")
+        self.assertTrue(opciones[1]["url"].startswith("http"))
+
+    def test_evento_con_una_senal_devuelve_una_opcion_sin_label(self):
+        opciones = main._free_espn_opciones_de(CITY["name"])
+        self.assertEqual(len(opciones), 1)
+        self.assertEqual(opciones[0]["label"], "")
+
+    def test_opciones_sin_url_valida_se_ignoran(self):
+        eventos = [{
+            "match": ("bayern", "dortmund"),
+            "opciones": [
+                {"label": "(mala)", "url": ""},
+                {"label": "(buena)", "url": "http://senal/buena.m3u8"},
+            ],
+        }]
+        with mock.patch.object(main, "FREE_ESPN_EVENTOS", eventos):
+            opciones = main._free_espn_opciones_de(BAYERN["name"])
+        self.assertEqual(opciones, [{"label": "(buena)", "url": "http://senal/buena.m3u8"}])
+
 
 class TestEndpointStream(unittest.TestCase):
-    """Con señal unica, /tv-live/stream entrega una sola opcion del partido."""
+    """Con señales programadas, /tv-live/stream entrega una opcion por señal."""
 
-    def test_una_sola_opcion_con_el_stream_del_partido(self):
+    def _get_stream(self, game, extra_eventos=None):
         from fastapi.testclient import TestClient
 
         ahora = datetime.now(timezone.utc)
         ventana = (ahora - timedelta(minutes=5), ahora + timedelta(minutes=60))
-        with mock.patch.object(main, "_free_espn_buscar_partido", return_value=CITY), \
-                mock.patch.object(main, "_free_espn_ventana", return_value=ventana), \
-                mock.patch.object(main, "get_pagadito_plans", return_value=[]):
-            resp = TestClient(main.app).get("/tv-live/stream")
+        parches = [
+            mock.patch.object(main, "_free_espn_buscar_partido", return_value=game),
+            mock.patch.object(main, "_free_espn_ventana", return_value=ventana),
+            mock.patch.object(main, "get_pagadito_plans", return_value=[]),
+        ]
+        if extra_eventos is not None:
+            parches.append(mock.patch.object(main, "FREE_ESPN_EVENTOS", extra_eventos))
+        for p in parches:
+            p.start()
+        try:
+            return TestClient(main.app).get("/tv-live/stream")
+        finally:
+            for p in reversed(parches):
+                p.stop()
 
+    def test_una_sola_opcion_con_el_stream_del_partido(self):
+        resp = self._get_stream(CITY)
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(len(data["opciones"]), 1)
-        self.assertEqual(data["opciones"][0]["label"], "Opción 1")
+        self.assertEqual(data["opciones"][0]["label"], "")
         self.assertIn(main._free_espn_stream_de(CITY["name"]).replace(":", "%3A").replace("/", "%2F"),
                       data["opciones"][0]["url"])
         self.assertGreater(data["tiempo_restante_seg"], 0)
+
+    def test_dos_opciones_cuando_el_evento_tiene_dos_senales(self):
+        eventos = [{
+            "match": ("bayern", "dortmund"),
+            "league": "ger.1",
+            "opciones": [
+                {"label": "(ESPN Colombia)", "url": "http://senal/espn.m3u8"},
+                {"label": "(Portugués)", "url": "http://senal/pt.m3u8"},
+            ],
+        }]
+        data = self._get_stream(BAYERN, extra_eventos=eventos).json()
+        self.assertEqual(len(data["opciones"]), 2)
+        self.assertEqual(data["opciones"][0]["label"], "(ESPN Colombia)")
+        self.assertEqual(data["opciones"][1]["label"], "(Portugués)")
+        self.assertIn("http%3A%2F%2Fsenal%2Fespn.m3u8", data["opciones"][0]["url"])
+        self.assertIn("http%3A%2F%2Fsenal%2Fpt.m3u8", data["opciones"][1]["url"])
 
 
 if __name__ == "__main__":

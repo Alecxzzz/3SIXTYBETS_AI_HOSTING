@@ -4198,16 +4198,19 @@ FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo d
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal por defecto (la usa un evento que no defina "stream")
 FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a024/index.m3u8"
-FREE_ESPN_STREAM_UNICO = True                # el reproductor muestra solo esta señal (sin alternativas)
-# Respaldos: solo se usan si FREE_ESPN_STREAM_UNICO = False
+FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales programadas (Opción 1, 2...), sin cadena de respaldos
+# Respaldos: solo se usan si FREE_ESPN_OPCIONES_PROGRAMADAS = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
 
 # Partidos programados, EN ORDEN (el orden decide cual manda si dos
 # estan en ventana a la vez). Cada evento:
-#   "match"  -> palabras que deben aparecer en "local visita" segun ESPN
-#   "league" -> codigo de liga ESPN (si se omite, usa FREE_ESPN_LEAGUE)
-#   "stream" -> m3u8 de ESA señal (si se omite, usa el PRINCIPAL)
+#   "match"    -> palabras que deben aparecer en "local visita" segun ESPN
+#   "league"   -> codigo de liga ESPN (si se omite, usa FREE_ESPN_LEAGUE)
+#   "stream"   -> m3u8 de ESA señal (si se omite, usa el PRINCIPAL)
+#   "opciones" -> lista [{"label", "url"}] si el partido tiene VARIAS
+#                 señales; reemplaza a "stream". El label se agrega al
+#                 boton de la pagina, que ya escribe "Opción N".
 FREE_ESPN_EVENTOS = [
     {
         # Premier League - 12:30Z
@@ -4224,7 +4227,10 @@ FREE_ESPN_EVENTOS = [
         # Bundesliga - 17:30Z
         "match": ("bayern", "dortmund"),
         "league": "ger.1",
-        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
+        "opciones": [
+            {"label": "(ESPN Colombia)", "url": "http://38.252.215.33:8000/play/a024/index.m3u8"},
+            {"label": "(Portugués)", "url": "http://fonte.lista.luxe/live/iptvgood/101011/3811.m3u8"},
+        ],
     },
 ]
 
@@ -4234,14 +4240,30 @@ def _free_espn_tokens(cfg: dict) -> list:
     return [t.lower() for t in (cfg.get("match") or ())]
 
 
-def _free_espn_stream_de(nombre: str) -> str:
-    """Señal programada para ese partido; si el evento no define una, la principal."""
+def _free_espn_opciones_de(nombre: str) -> list:
+    """Señales programadas para ese partido: [{"label", "url"}, ...].
+
+    Manda "opciones" si el evento define varias señales; si no, su "stream";
+    y si tampoco, la señal principal. Nunca devuelve una lista vacia.
+    """
     low = (nombre or "").lower()
     for cfg in FREE_ESPN_EVENTOS:
         tokens = _free_espn_tokens(cfg)
         if tokens and all(t in low for t in tokens):
-            return cfg.get("stream") or FREE_ESPN_STREAM_PRINCIPAL
-    return FREE_ESPN_STREAM_PRINCIPAL
+            varias = [
+                {"label": o.get("label") or "", "url": o.get("url") or ""}
+                for o in (cfg.get("opciones") or [])
+                if (o.get("url") or "").startswith("http")
+            ]
+            if varias:
+                return varias
+            return [{"label": "", "url": cfg.get("stream") or FREE_ESPN_STREAM_PRINCIPAL}]
+    return [{"label": "", "url": FREE_ESPN_STREAM_PRINCIPAL}]
+
+
+def _free_espn_stream_de(nombre: str) -> str:
+    """Señal principal (primera opcion) programada para ese partido."""
+    return _free_espn_opciones_de(nombre)[0]["url"]
 
 
 def _free_espn_agenda(liga: str) -> list:
@@ -4407,8 +4429,9 @@ def free_espn_stream(request: Request):
     3. Stream fijo de respaldo.
     Se sirve el PRIMERO que responda 200 con #EXTM3U.
 
-    Con FREE_ESPN_STREAM_UNICO = True (caso actual de /espn-gratis) se
-    devuelve UNA sola opcion: la señal principal, sin alternativas.
+    Con FREE_ESPN_OPCIONES_PROGRAMADAS = True (caso actual de /espn-gratis) se
+    devuelven SOLO las señales programadas del partido: una opcion por señal
+    ("Opcion 1", "Opcion 2"...), sin cadena de respaldos.
     """
     from datetime import datetime, timezone
 
@@ -4435,6 +4458,7 @@ def free_espn_stream(request: Request):
             return False
 
     cierre = None
+    game = None
     stream_partido = FREE_ESPN_STREAM_PRINCIPAL
     try:
         game = _free_espn_buscar_partido()
@@ -4452,15 +4476,14 @@ def free_espn_stream(request: Request):
     except HTTPException:
         raise
 
-    # --- Señal ÚNICA: /espn-gratis muestra un solo reproductor ---
-    if FREE_ESPN_STREAM_UNICO:
-        return _free_espn_payload(
-            [{
-                "label": "Opción 1",
-                "url": _wrap(stream_partido, _proxy_base(request)),
-            }],
-            cierre,
-        )
+    # --- Señales programadas: la pagina pinta un boton por opcion ---
+    if FREE_ESPN_OPCIONES_PROGRAMADAS:
+        proxy_base = _proxy_base(request)
+        opciones = [
+            {"label": o["label"], "url": _wrap(o["url"], proxy_base)}
+            for o in _free_espn_opciones_de((game or {}).get("name") or "")
+        ]
+        return _free_espn_payload(opciones, cierre)
 
     # --- Candidatos (en orden de preferencia) ---
     candidatos = [
