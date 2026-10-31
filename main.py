@@ -4198,6 +4198,8 @@ FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo d
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal por defecto (la usa un evento que no defina "stream"/"opciones")
 FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"  # ESPN 3
+# Referer por host: barinaslive bloquea hotlinks (sin Referer propio responde 502)
+FREE_ESPN_REFERERS = {"barinaslive1.boldmss.com": "https://barinaslive1.boldmss.com/"}
 FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales programadas (Opción 1, 2...), sin cadena de respaldos
 # Respaldos: solo se usan si FREE_ESPN_OPCIONES_PROGRAMADAS = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
@@ -4237,8 +4239,27 @@ def _free_espn_tokens(cfg: dict) -> list:
     return [t.lower() for t in (cfg.get("match") or ())]
 
 
+def _free_espn_referer_de(url: str) -> str:
+    """Referer que exige el host de la señal ("" si no exige ninguno)."""
+    low = (url or "").lower()
+    for host, referer in FREE_ESPN_REFERERS.items():
+        if f"//{host}" in low:
+            return referer
+    return ""
+
+
+def _free_espn_opcion(label: str, url: str, referer: str | None = None) -> dict:
+    """Opcion normalizada: label, url y el referer que necesita la fuente."""
+    url = url or FREE_ESPN_STREAM_PRINCIPAL
+    return {
+        "label": label or "",
+        "url": url,
+        "referer": referer or _free_espn_referer_de(url),
+    }
+
+
 def _free_espn_opciones_de(nombre: str) -> list:
-    """Señales programadas para ese partido: [{"label", "url"}, ...].
+    """Señales programadas para ese partido: [{"label", "url", "referer"}, ...].
 
     Manda "opciones" si el evento define varias señales; si no, su "stream";
     y si tampoco, la señal principal. Nunca devuelve una lista vacia.
@@ -4248,14 +4269,14 @@ def _free_espn_opciones_de(nombre: str) -> list:
         tokens = _free_espn_tokens(cfg)
         if tokens and all(t in low for t in tokens):
             varias = [
-                {"label": o.get("label") or "", "url": o.get("url") or ""}
+                _free_espn_opcion(o.get("label"), o.get("url"), o.get("referer") or cfg.get("referer"))
                 for o in (cfg.get("opciones") or [])
                 if (o.get("url") or "").startswith("http")
             ]
             if varias:
                 return varias
-            return [{"label": "", "url": cfg.get("stream") or FREE_ESPN_STREAM_PRINCIPAL}]
-    return [{"label": "", "url": FREE_ESPN_STREAM_PRINCIPAL}]
+            return [_free_espn_opcion("", cfg.get("stream"), cfg.get("referer"))]
+    return [_free_espn_opcion("", None)]
 
 
 def _free_espn_stream_de(nombre: str) -> str:
@@ -4477,7 +4498,7 @@ def free_espn_stream(request: Request):
     if FREE_ESPN_OPCIONES_PROGRAMADAS:
         proxy_base = _proxy_base(request)
         opciones = [
-            {"label": o["label"], "url": _wrap(o["url"], proxy_base)}
+            {"label": o["label"], "url": _wrap(o["url"], proxy_base, o.get("referer") or None)}
             for o in _free_espn_opciones_de((game or {}).get("name") or "")
         ]
         return _free_espn_payload(opciones, cierre)
