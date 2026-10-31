@@ -4183,25 +4183,26 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN COLOMBIA + marcador y estadisticas del
-# partido destacado del dia (El Clásico). Disponible
-# solo durante la ventana de 2 horas alrededor del kickoff.
+# partido destacado del dia (Chelsea vs Manchester United). Disponible
+# solo durante la ventana alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
 
-FREE_ESPN_MATCH = ("real madrid", "barcelona")  # El Clásico
+FREE_ESPN_MATCH = ("chelsea", "manchester united")  # Chelsea vs Manchester United
 FREE_ESPN_SPORT = "soccer"                  # deporte del partido destacado
-FREE_ESPN_LEAGUE = "esp.1"                  # LaLiga
+FREE_ESPN_LEAGUE = "eng.1"                  # Premier League
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo decide el estado del partido
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
-# Señal principal pedida para /espn-gratis (Clásico)
-FREE_ESPN_STREAM_PRINCIPAL = "http://38.188.186.47:4000/play/a03r/index.m3u8"  # VIX LALIGA
+# Señal ÚNICA pedida para /espn-gratis (Chelsea vs Manchester United)
+FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a024/index.m3u8"
+FREE_ESPN_STREAM_UNICO = True                # el reproductor muestra solo esta señal (sin alternativas)
+# Respaldos: solo se usan si FREE_ESPN_STREAM_UNICO = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
-# Respaldo extra ya probado: ESPN COLOMBIA
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
 
 
 def _free_espn_buscar_partido():
-    """Busca el partido destacado (MLB Juego 2: Rays vs Brewers) en la agenda de hoy."""
+    """Busca el partido destacado (Chelsea vs Manchester United) en la agenda de hoy."""
     import sports
 
     data = sports.get_sport_games(FREE_ESPN_SPORT, FREE_ESPN_LEAGUE)
@@ -4227,6 +4228,26 @@ def _free_espn_ventana(game: dict):
     apertura = kickoff - timedelta(minutes=FREE_ESPN_WINDOW_BEFORE_MIN)
     cierre = kickoff + timedelta(minutes=FREE_ESPN_WINDOW_AFTER_MIN)
     return apertura, cierre
+
+
+def _free_espn_payload(opciones: list, cierre) -> dict:
+    """Respuesta comun del reproductor gratis: opciones, tiempo y planes."""
+    from datetime import datetime, timezone
+
+    ahora = datetime.now(timezone.utc)
+    respuesta = {
+        "opciones": opciones,
+        "tiempo_restante_seg": max(0, int((cierre - ahora).total_seconds())) if cierre else 0,
+        "suscripcion": {
+            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
+            "planes_endpoint": "/pagadito/plans",
+            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
+            "planes": get_pagadito_plans(),
+        },
+    }
+    if cierre:
+        respuesta["expira"] = cierre.isoformat()
+    return respuesta
 
 
 @app.get("/tv-live/match")
@@ -4298,6 +4319,9 @@ def free_espn_stream(request: Request):
        pagina de la fuente; si no, el token guardado en la BD.
     3. Stream fijo de respaldo.
     Se sirve el PRIMERO que responda 200 con #EXTM3U.
+
+    Con FREE_ESPN_STREAM_UNICO = True (caso actual de /espn-gratis) se
+    devuelve UNA sola opcion: la señal principal, sin alternativas.
     """
     from datetime import datetime, timezone
 
@@ -4338,6 +4362,16 @@ def free_espn_stream(request: Request):
                 raise HTTPException(403, "El acceso gratuito termino.")
     except HTTPException:
         raise
+
+    # --- Señal ÚNICA: /espn-gratis muestra un solo reproductor ---
+    if FREE_ESPN_STREAM_UNICO:
+        return _free_espn_payload(
+            [{
+                "label": "Opción 1",
+                "url": _wrap(FREE_ESPN_STREAM_PRINCIPAL, _proxy_base(request)),
+            }],
+            cierre,
+        )
 
     # --- Candidatos (en orden de preferencia) ---
     candidatos = [
@@ -4432,21 +4466,7 @@ def free_espn_stream(request: Request):
         # Nada validado ahora mismo: entregar el Stream 1 de todos modos
         opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_PRINCIPAL, proxy_base)})
 
-    ahora2 = datetime.now(timezone.utc)
-    tiempo_restante = max(0, int((cierre - ahora2).total_seconds())) if cierre else 0
-    respuesta = {
-        "opciones": opciones,
-        "tiempo_restante_seg": tiempo_restante,
-        "suscripcion": {
-            "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
-            "planes_endpoint": "/pagadito/plans",
-            "checkout_endpoint": "POST /pagadito/create-payment (requiere login)",
-            "planes": get_pagadito_plans(),
-        },
-    }
-    if cierre:
-        respuesta["expira"] = cierre.isoformat()
-    return respuesta
+    return _free_espn_payload(opciones, cierre)
 
 
 @app.post("/admin/events")
