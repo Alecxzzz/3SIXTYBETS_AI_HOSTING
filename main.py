@@ -4197,10 +4197,11 @@ FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo decide el estado del partido
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
 # Señal por defecto (la usa un evento que no defina "stream"/"opciones")
-# ESPN 3. Se usa el espejo a02u porque barinaslive (abajo) bloquea hotlinks
-# y devuelve 502 intermitentes; este responde 200 con manifest y segmentos.
-FREE_ESPN_STREAM_PRINCIPAL = "http://190.61.47.54:8000/play/a02u/index.m3u8"  # ESPN 3
-# FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"  # ESPN 3 (barinaslive, inestable)
+# ESPN 3. Se usa el espejo a00l porque barinaslive bloquea hotlinks (502)
+# y el a02u entrega manifest pero rompe los segmentos; este sirve ambos.
+FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a00l/index.m3u8"  # ESPN 3
+# FREE_ESPN_STREAM_PRINCIPAL = "http://190.61.47.54:8000/play/a02u/index.m3u8"  # ESPN 3 (segmentos inestables)
+# FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"  # ESPN 3 (barinaslive, 502)
 # Referer por host: barinaslive bloquea hotlinks (sin Referer propio responde 502)
 FREE_ESPN_REFERERS = {"barinaslive1.boldmss.com": "https://barinaslive1.boldmss.com/"}
 FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales programadas (Opción 1, 2...), sin cadena de respaldos

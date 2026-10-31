@@ -171,7 +171,7 @@ class TestSenalPorPartido(unittest.TestCase):
         )
 
     def test_senal_por_defecto_es_espn_3(self):
-        self.assertIn("190.61.47.54:8000/play/a02u", main.FREE_ESPN_STREAM_PRINCIPAL)
+        self.assertIn("38.252.215.33:8000/play/a00l", main.FREE_ESPN_STREAM_PRINCIPAL)
 
     def test_inter_milan_usa_espn_3(self):
         self.assertEqual(
@@ -260,7 +260,7 @@ class TestEndpointStream(unittest.TestCase):
             "https://barinaslive1.boldmss.com/",
         )
         self.assertEqual(
-            main._free_espn_opcion("", "http://190.61.47.54:8000/play/a02u/index.m3u8")["referer"],
+            main._free_espn_opcion("", "http://38.252.215.33:8000/play/a00l/index.m3u8")["referer"],
             "",
         )
 
