@@ -4206,6 +4206,7 @@ FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8
 # Partidos programados, EN ORDEN (el orden decide cual manda si dos
 # estan en ventana a la vez). Cada evento:
 #   "match"  -> palabras que deben aparecer en "local visita" segun ESPN
+#   "league" -> codigo de liga ESPN (si se omite, usa FREE_ESPN_LEAGUE)
 #   "stream" -> m3u8 de ESA señal (si se omite, usa el PRINCIPAL)
 FREE_ESPN_EVENTOS = [
     {
@@ -4217,6 +4218,12 @@ FREE_ESPN_EVENTOS = [
         # Premier League - 15:00Z
         # TODO: si hay señal propia para este partido, cambiarla aqui.
         "match": ("manchester city", "brighton"),
+        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
+    },
+    {
+        # Bundesliga - 17:30Z
+        "match": ("bayern", "dortmund"),
+        "league": "ger.1",
         "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
     },
 ]
@@ -4237,27 +4244,42 @@ def _free_espn_stream_de(nombre: str) -> str:
     return FREE_ESPN_STREAM_PRINCIPAL
 
 
+def _free_espn_agenda(liga: str) -> list:
+    """Partidos del dia de una liga ESPN (sports cachea la respuesta 60s)."""
+    import sports
+
+    try:
+        data = sports.get_sport_games(FREE_ESPN_SPORT, liga)
+    except Exception:
+        return []
+    return data.get("games") or []
+
+
 def _free_espn_buscar_partido(ahora=None):
     """Elige cual partido de FREE_ESPN_EVENTOS toca mostrar ahora.
+
+    Cada evento puede ser de una liga distinta ("league"); la agenda se
+    consulta una sola vez por liga programada.
 
     Orden de preferencia:
     1. El que esta dentro de su ventana y sin terminar (se ve en vivo).
     2. El proximo que aun no abre (la pagina muestra la cuenta atras).
     3. El ultimo que ya cerro (la pagina mantiene los datos; player 403).
     """
-    import sports
     from datetime import datetime, timezone
 
     ahora = ahora or datetime.now(timezone.utc)
-    data = sports.get_sport_games(FREE_ESPN_SPORT, FREE_ESPN_LEAGUE)
-    juegos = data.get("games") or []
+    agendas = {}  # liga -> partidos consultados
 
     candidatos = []
     for cfg in FREE_ESPN_EVENTOS:
         tokens = _free_espn_tokens(cfg)
         if not tokens:
             continue
-        for g in juegos:
+        liga = cfg.get("league") or FREE_ESPN_LEAGUE
+        if liga not in agendas:
+            agendas[liga] = _free_espn_agenda(liga)
+        for g in agendas[liga]:
             home = (g.get("home") or {}).get("name") or ""
             away = (g.get("away") or {}).get("name") or ""
             if all(t in f"{home} {away}".lower() for t in tokens):
