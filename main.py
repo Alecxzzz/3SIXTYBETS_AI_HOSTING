@@ -4183,37 +4183,102 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # ESPN DEPORTES GRATIS (2 HORAS) - ruta publica sin registro
 # ============================================================
 # Reproductor de ESPN COLOMBIA + marcador y estadisticas del
-# partido destacado del dia (Chelsea vs Manchester United). Disponible
-# solo durante la ventana alrededor del kickoff.
+# partido destacado del dia. Disponible solo durante la ventana
+# alrededor del kickoff.
 # Nada de esto requiere cuenta: es captacion de usuarios.
+#
+# Programacion: FREE_ESPN_EVENTOS admite VARIOS partidos. La pagina
+# muestra el que este en su ventana; cuando ese termina, pasa sola al
+# siguiente (con su cuenta atras). No hay que tocar codigo, solo la lista.
 
-FREE_ESPN_MATCH = ("chelsea", "manchester united")  # Chelsea vs Manchester United
-FREE_ESPN_SPORT = "soccer"                  # deporte del partido destacado
+FREE_ESPN_SPORT = "soccer"                  # deporte de los partidos programados
 FREE_ESPN_LEAGUE = "eng.1"                  # Premier League
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo decide el estado del partido
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
-# Señal ÚNICA pedida para /espn-gratis (Chelsea vs Manchester United)
+# Señal por defecto (la usa un evento que no defina "stream")
 FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a024/index.m3u8"
 FREE_ESPN_STREAM_UNICO = True                # el reproductor muestra solo esta señal (sin alternativas)
 # Respaldos: solo se usan si FREE_ESPN_STREAM_UNICO = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
 FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
 
+# Partidos programados, EN ORDEN (el orden decide cual manda si dos
+# estan en ventana a la vez). Cada evento:
+#   "match"  -> palabras que deben aparecer en "local visita" segun ESPN
+#   "stream" -> m3u8 de ESA señal (si se omite, usa el PRINCIPAL)
+FREE_ESPN_EVENTOS = [
+    {
+        # Premier League - 12:30Z
+        "match": ("chelsea", "manchester united"),
+        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
+    },
+    {
+        # Premier League - 15:00Z
+        # TODO: si hay señal propia para este partido, cambiarla aqui.
+        "match": ("manchester city", "brighton"),
+        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
+    },
+]
 
-def _free_espn_buscar_partido():
-    """Busca el partido destacado (Chelsea vs Manchester United) en la agenda de hoy."""
+
+def _free_espn_tokens(cfg: dict) -> list:
+    """Palabras (minusculas) que identifican el partido de un evento programado."""
+    return [t.lower() for t in (cfg.get("match") or ())]
+
+
+def _free_espn_stream_de(nombre: str) -> str:
+    """Señal programada para ese partido; si el evento no define una, la principal."""
+    low = (nombre or "").lower()
+    for cfg in FREE_ESPN_EVENTOS:
+        tokens = _free_espn_tokens(cfg)
+        if tokens and all(t in low for t in tokens):
+            return cfg.get("stream") or FREE_ESPN_STREAM_PRINCIPAL
+    return FREE_ESPN_STREAM_PRINCIPAL
+
+
+def _free_espn_buscar_partido(ahora=None):
+    """Elige cual partido de FREE_ESPN_EVENTOS toca mostrar ahora.
+
+    Orden de preferencia:
+    1. El que esta dentro de su ventana y sin terminar (se ve en vivo).
+    2. El proximo que aun no abre (la pagina muestra la cuenta atras).
+    3. El ultimo que ya cerro (la pagina mantiene los datos; player 403).
+    """
     import sports
+    from datetime import datetime, timezone
 
+    ahora = ahora or datetime.now(timezone.utc)
     data = sports.get_sport_games(FREE_ESPN_SPORT, FREE_ESPN_LEAGUE)
-    busqueda = [t.lower() for t in FREE_ESPN_MATCH]
-    for g in data.get("games", []):
-        home = (g.get("home") or {}).get("name") or ""
-        away = (g.get("away") or {}).get("name") or ""
-        nombres = f"{home} {away}".lower()
-        if all(t in nombres for t in busqueda):
+    juegos = data.get("games") or []
+
+    candidatos = []
+    for cfg in FREE_ESPN_EVENTOS:
+        tokens = _free_espn_tokens(cfg)
+        if not tokens:
+            continue
+        for g in juegos:
+            home = (g.get("home") or {}).get("name") or ""
+            away = (g.get("away") or {}).get("name") or ""
+            if all(t in f"{home} {away}".lower() for t in tokens):
+                apertura, cierre = _free_espn_ventana(g)
+                candidatos.append((cfg, g, apertura, cierre))
+                break  # un solo juego por evento programado
+
+    if not candidatos:
+        return None
+
+    # 1) En vivo dentro de su ventana (manda el orden de programacion).
+    for _cfg, g, apertura, cierre in candidatos:
+        if apertura <= ahora <= cierre and g.get("state") != "post":
             return g
-    return None
+    # 2) El proximo que aun no abre: cuenta atras en la pagina.
+    proximos = [c for c in candidatos if ahora < c[2]]
+    if proximos:
+        proximos.sort(key=lambda c: c[2])
+        return proximos[0][1]
+    # 3) Todos cerrados: queda el mas reciente.
+    return max(candidatos, key=lambda c: c[3])[1]
 
 
 def _free_espn_ventana(game: dict):
@@ -4348,9 +4413,11 @@ def free_espn_stream(request: Request):
             return False
 
     cierre = None
+    stream_partido = FREE_ESPN_STREAM_PRINCIPAL
     try:
         game = _free_espn_buscar_partido()
         if game:
+            stream_partido = _free_espn_stream_de(game.get("name"))
             apertura, cierre = _free_espn_ventana(game)
             ahora = datetime.now(timezone.utc)
             if ahora < apertura:
@@ -4368,14 +4435,14 @@ def free_espn_stream(request: Request):
         return _free_espn_payload(
             [{
                 "label": "Opción 1",
-                "url": _wrap(FREE_ESPN_STREAM_PRINCIPAL, _proxy_base(request)),
+                "url": _wrap(stream_partido, _proxy_base(request)),
             }],
             cierre,
         )
 
     # --- Candidatos (en orden de preferencia) ---
     candidatos = [
-        (FREE_ESPN_STREAM_PRINCIPAL, None),
+        (stream_partido, None),
         (FREE_ESPN_STREAM_URL, None),
         (url_fija, None),
     ]
@@ -4413,11 +4480,11 @@ def free_espn_stream(request: Request):
                 except Exception:
                     pass
 
-        # 2) Also check the hardcoded FREE_ESPN_MATCH if needed (avoid duplicates)
-        tokens = [t.lower() for t in FREE_ESPN_MATCH]
+        # 2) Tambien los partidos programados en FREE_ESPN_EVENTOS
+        tokens_eventos = [_free_espn_tokens(cfg) for cfg in FREE_ESPN_EVENTOS]
         for ev in db.list_events() or []:
             nombre = (ev.get("name") or "").lower()
-            if all(t in nombre for t in tokens):
+            if any(all(t in nombre for t in tokens) for tokens in tokens_eventos if tokens):
                 page = ev.get("referer") or ""
                 if page.startswith("http"):
                     try:
@@ -4464,7 +4531,7 @@ def free_espn_stream(request: Request):
 
     if not opciones:
         # Nada validado ahora mismo: entregar el Stream 1 de todos modos
-        opciones.append({"label": "Opción 1", "url": _wrap(FREE_ESPN_STREAM_PRINCIPAL, proxy_base)})
+        opciones.append({"label": "Opción 1", "url": _wrap(stream_partido, proxy_base)})
 
     return _free_espn_payload(opciones, cierre)
 
