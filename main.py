@@ -4192,16 +4192,15 @@ def event_resolve(url: str, user=Depends(get_current_user)):
 # siguiente (con su cuenta atras). No hay que tocar codigo, solo la lista.
 
 FREE_ESPN_SPORT = "soccer"                  # deporte de los partidos programados
-FREE_ESPN_LEAGUE = "eng.1"                  # Premier League
+FREE_ESPN_LEAGUE = "eng.1"                  # liga por defecto (los eventos pueden tener la suya)
 FREE_ESPN_WINDOW_BEFORE_MIN = 15             # se abre 15 min antes del kickoff
 FREE_ESPN_WINDOW_AFTER_MIN = 300            # se mantiene abierto, el corte lo decide el estado del partido
 FREE_ESPN_STREAM_EXTRA = "https://gooz.aapmains.net/new-stream-embed/56801"  # fallback HTML embed
-# Señal por defecto (la usa un evento que no defina "stream")
-FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a024/index.m3u8"
+# Señal por defecto (la usa un evento que no defina "stream"/"opciones")
+FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"  # ESPN 3
 FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales programadas (Opción 1, 2...), sin cadena de respaldos
 # Respaldos: solo se usan si FREE_ESPN_OPCIONES_PROGRAMADAS = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
-FREE_ESPN_STREAM_ESPN_COLOMBIA = "http://38.252.215.33:8000/play/a024/index.m3u8"
 
 # Partidos programados, EN ORDEN (el orden decide cual manda si dos
 # estan en ventana a la vez). Cada evento:
@@ -4215,22 +4214,20 @@ FREE_ESPN_EVENTOS = [
     {
         # Premier League - 12:30Z
         "match": ("chelsea", "manchester united"),
-        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
     },
     {
         # Premier League - 15:00Z
-        # TODO: si hay señal propia para este partido, cambiarla aqui.
         "match": ("manchester city", "brighton"),
-        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",  # ESPN COLOMBIA
     },
     {
         # Bundesliga - 17:30Z
         "match": ("bayern", "dortmund"),
         "league": "ger.1",
-        "opciones": [
-            {"label": "(ESPN Colombia)", "url": "http://38.252.215.33:8000/play/a024/index.m3u8"},
-            {"label": "(Portugués)", "url": "http://fonte.lista.luxe/live/iptvgood/101011/3811.m3u8"},
-        ],
+    },
+    {
+        # Serie A - 19:45Z
+        "match": ("inter", "milan"),
+        "league": "ita.1",
     },
 ]
 

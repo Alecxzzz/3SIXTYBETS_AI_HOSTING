@@ -44,6 +44,13 @@ BAYERN = {
     "home": {"name": "Bayern Munich"},
     "away": {"name": "Borussia Dortmund"},
 }
+INTER = {
+    "name": "Internazionale at AC Milan",
+    "date": "2026-10-31T19:45Z",
+    "state": "pre",
+    "home": {"name": "AC Milan"},
+    "away": {"name": "Internazionale"},
+}
 
 
 def _utc(texto: str) -> datetime:
@@ -51,7 +58,7 @@ def _utc(texto: str) -> datetime:
 
 
 @contextlib.contextmanager
-def _agenda(estado_chelsea="in", estado_city="pre", estado_bayern="pre"):
+def _agenda(estado_chelsea="in", estado_city="pre", estado_bayern="pre", estado_inter="pre"):
     """Sustituye la agenda de ESPN: cada liga con sus partidos del dia."""
     consultadas = []
 
@@ -59,6 +66,8 @@ def _agenda(estado_chelsea="in", estado_city="pre", estado_bayern="pre"):
         consultadas.append(league)
         if league == "ger.1":
             return {"games": [dict(BAYERN, state=estado_bayern)]}
+        if league == "ita.1":
+            return {"games": [dict(INTER, state=estado_inter)]}
         return {
             "games": [
                 dict(CHELSEA, state=estado_chelsea),
@@ -94,10 +103,10 @@ class TestSeleccionDelPartido(unittest.TestCase):
         self.assertEqual(game["name"], CHELSEA["name"])
 
     def test_todos_cerrados_queda_el_mas_reciente(self):
-        with _agenda(estado_chelsea="post", estado_city="post", estado_bayern="post"):
+        with _agenda(estado_chelsea="post", estado_city="post", estado_bayern="post", estado_inter="post"):
             game = main._free_espn_buscar_partido(ahora=_utc("2026-10-31T21:00Z"))
-        # Cierres: Chelsea 17:30Z, City 20:00Z, Bayern 22:30Z -> gana el Bayern.
-        self.assertEqual(game["name"], BAYERN["name"])
+        # Cierres: Chelsea 17:30Z, City 20:00Z, Bayern 22:30Z, Inter 00:45Z -> gana el Inter.
+        self.assertEqual(game["name"], INTER["name"])
 
     def test_pasa_al_bayern_cuando_termina_el_city(self):
         with _agenda(estado_chelsea="post", estado_city="post", estado_bayern="pre"):
@@ -109,11 +118,22 @@ class TestSeleccionDelPartido(unittest.TestCase):
             game = main._free_espn_buscar_partido(ahora=_utc("2026-10-31T18:00Z"))
         self.assertEqual(game["name"], BAYERN["name"])
 
+    def test_pasa_al_inter_milan_cuando_termina_el_bayern(self):
+        with _agenda(estado_chelsea="post", estado_city="post", estado_bayern="post", estado_inter="pre"):
+            game = main._free_espn_buscar_partido(ahora=_utc("2026-10-31T19:45Z"))
+        self.assertEqual(game["name"], INTER["name"])
+
+    def test_inter_milan_en_vivo(self):
+        with _agenda(estado_chelsea="post", estado_city="post", estado_bayern="post", estado_inter="in"):
+            game = main._free_espn_buscar_partido(ahora=_utc("2026-10-31T20:30Z"))
+        self.assertEqual(game["name"], INTER["name"])
+
     def test_consulta_la_liga_de_cada_evento(self):
         with _agenda(estado_chelsea="post", estado_city="post") as consultadas:
             main._free_espn_buscar_partido(ahora=_utc("2026-10-31T17:30Z"))
         self.assertIn("eng.1", consultadas)  # Premier League
         self.assertIn("ger.1", consultadas)  # Bundesliga
+        self.assertIn("ita.1", consultadas)  # Serie A
 
     def test_sin_partidos_programados_devuelve_none(self):
         with _agenda() as _:
@@ -150,12 +170,29 @@ class TestSenalPorPartido(unittest.TestCase):
             main.FREE_ESPN_STREAM_PRINCIPAL,
         )
 
-    def test_opciones_del_evento_con_varias_senales(self):
-        opciones = main._free_espn_opciones_de(BAYERN["name"])
-        self.assertEqual(len(opciones), 2)
-        self.assertEqual(opciones[0]["url"], main.FREE_ESPN_STREAM_PRINCIPAL)
-        self.assertEqual(opciones[1]["label"], "(Portugués)")
-        self.assertTrue(opciones[1]["url"].startswith("http"))
+    def test_senal_por_defecto_es_espn_3(self):
+        self.assertIn("barinaslive1.boldmss.com", main.FREE_ESPN_STREAM_PRINCIPAL)
+        self.assertIn("ESPN_3", main.FREE_ESPN_STREAM_PRINCIPAL)
+
+    def test_inter_milan_usa_la_senal_por_defecto(self):
+        self.assertEqual(
+            main._free_espn_opciones_de(INTER["name"]),
+            [{"label": "", "url": main.FREE_ESPN_STREAM_PRINCIPAL}],
+        )
+
+    def test_evento_con_varias_senales_devuelve_todas(self):
+        eventos = [{
+            "match": ("bayern", "dortmund"),
+            "opciones": [
+                {"label": "(ESPN 3)", "url": "http://senal/espn3.m3u8"},
+                {"label": "(Portugués)", "url": "http://senal/pt.m3u8"},
+            ],
+        }]
+        with mock.patch.object(main, "FREE_ESPN_EVENTOS", eventos):
+            opciones = main._free_espn_opciones_de(BAYERN["name"])
+            principal = main._free_espn_stream_de(BAYERN["name"])
+        self.assertEqual([o["label"] for o in opciones], ["(ESPN 3)", "(Portugués)"])
+        self.assertEqual(principal, "http://senal/espn3.m3u8")
 
     def test_evento_con_una_senal_devuelve_una_opcion_sin_label(self):
         opciones = main._free_espn_opciones_de(CITY["name"])
