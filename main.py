@@ -2855,6 +2855,60 @@ def stats_widget(event_id: str, sport: str = "soccer", user=Depends(get_current_
     return _lmt_config(event_id)
 
 
+# ---- Radar HD: replay con tracking real (SkillCorner Open Data, MIT) ----
+
+_DEMO_TRACKING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_tracking")
+
+
+@app.get("/stats/tracking-demo")
+def tracking_demo_lista(user=Depends(get_current_user)):
+    """Partidos disponibles en el reproductor de tracking real (demo).
+
+    Los datos los genera ingestar_tracking_skillcorner.py desde SkillCorner Open
+    Data (MIT): 10 partidos de la A-League 2024/25 con las posiciones REALES de
+    los 22 jugadores y el balon. Son partidos ya jugados, no retransmision.
+    """
+    ruta = os.path.join(_DEMO_TRACKING, "index.json")
+    try:
+        with open(ruta, encoding="utf-8") as fh:
+            partidos = json.load(fh)
+    except (OSError, ValueError):
+        partidos = []
+
+    return {
+        "ok": True,
+        "partidos": partidos,
+        "fuente": "SkillCorner Open Data (MIT) - A-League 2024/25",
+        "aviso": (
+            "Tracking real de 22 jugadores y balon de partidos ya jugados: "
+            "es un replay, no una retransmision en vivo."
+        ),
+    }
+
+
+@app.get("/stats/tracking-demo/{match_id}")
+def tracking_demo_partido(match_id: str, user=Depends(get_current_user)):
+    """Tracking completo de un partido de la demo (JSON precomprimido en gzip)."""
+    if not re.fullmatch(r"\d{3,12}", match_id):
+        raise HTTPException(400, "Id de partido invalido.")
+
+    ruta = os.path.join(_DEMO_TRACKING, f"{match_id}.json.gz")
+    if not os.path.exists(ruta):
+        raise HTTPException(404, "Ese partido no esta en la demo de tracking.")
+
+    with open(ruta, "rb") as fh:
+        cuerpo = fh.read()
+
+    return Response(
+        content=cuerpo,
+        media_type="application/json",
+        headers={
+            "Content-Encoding": "gzip",
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
+
+
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
