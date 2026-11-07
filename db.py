@@ -135,6 +135,22 @@ def _devolver_conexion(conn):
         pass
 
 
+# Sin BD, cada query reintenta 5 veces (5 lineas de log). Con varios schedulers
+# eso son miles de lineas por minuto: donde el log se factura (Railway) es ruido
+# caro y ademas tapa el error real. Una linea cada 30 s por tipo de error basta.
+_ERROR_MYSQL_CADA = 30.0
+_ultimo_error_mysql = {}
+
+
+def _log_error_mysql(error):
+    """Imprime el fallo de MySQL como maximo una vez cada 30 s por tipo."""
+    clave = str(error)[:80]
+    ahora = time.time()
+    if ahora - _ultimo_error_mysql.get(clave, 0.0) >= _ERROR_MYSQL_CADA:
+        _ultimo_error_mysql[clave] = ahora
+        print("MySQL error:", error, flush=True)
+
+
 def run_query(query, params=None, fetchone=False):
     for _ in range(5):
         conn = None
@@ -157,7 +173,7 @@ def run_query(query, params=None, fetchone=False):
 
             return True
         except pymysql.MySQLError as error:
-            print("MySQL error:", error)
+            _log_error_mysql(error)
             try:
                 if conn:
                     conn.close()

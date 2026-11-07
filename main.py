@@ -1141,6 +1141,26 @@ Dudas = reduce confianza, pero no descartes si hay evidencia.
 # ==============================
 # Conecta MySQL (db.py) al backend: registro, login, keys, mensajes, health.
 
+def _db_alcanzable(timeout: float = 5.0):
+    """Ping TCP al MySQL ANTES de init_db().
+
+    `db.run_query` reintenta 5 veces con sleep(3) por query, y `init_db()` lanza
+    decenas de CREATE TABLE: con el host mal configurado (o Aiven filtrando la
+    IP) el startup se va a VARIOS minutos, el healthcheck del host falla y el
+    servicio queda en 502 "Application failed to respond" aunque la app este
+    bien. Un socket de 5 s lo detecta al instante y deja arrancar igual.
+
+    Devuelve (alcanzable, motivo).
+    """
+    cfg = db.get_mysql_config()
+    host, port = cfg["host"], int(cfg["port"] or 3306)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ""
+    except OSError as exc:
+        return False, f"{host}:{port} -> {exc}"
+
+
 @app.on_event("startup")
 def _init_database():
     """Inicializa la BD, crea admin y una key por defecto si hace falta.
@@ -1154,7 +1174,22 @@ def _init_database():
     # True si la BD conecto en el primer intento. Si no, los hilos de fondo
     # se arrancan igual y un hilo aparte reintenta la BD hasta que conecte.
     db_ok = False
-    for attempt in range(1, 4):
+
+    # Si el socket no abre no tiene sentido pagar los reintentos de init_db():
+    # se salta directo al camino tolerante (la app arranca y un hilo reintenta).
+    alcanzable, motivo = _db_alcanzable()
+    if alcanzable:
+        intentos = 3
+    else:
+        intentos = 0
+        print(
+            f"[startup] MySQL NO responde ({motivo}). Se omite init_db() y la "
+            "app arranca igual; revisa MYSQL_HOST/MYSQL_PORT y la lista de IPs "
+            "permitidas de Aiven.",
+            flush=True,
+        )
+
+    for attempt in range(1, intentos + 1):
         try:
             db.init_db()  # crea tablas + admin user (ensure_admin_user internamente)
 
