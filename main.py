@@ -92,7 +92,7 @@ _rate_lock = threading.Lock()
 
 
 def _ip_del_cliente(request: Request) -> str:
-    """IP real del cliente (detras del proxy de Northflank usa X-Forwarded-For)."""
+    """IP real del cliente (detras del proxy del host usa X-Forwarded-For)."""
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
         return xff.split(",")[0].strip()
@@ -4218,8 +4218,9 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #                 boton de la pagina, que ya escribe "Opción N".
 FREE_ESPN_EVENTOS = [
     {
-        # Premier League - 12:30Z
+        # Premier League
         "match": ("chelsea", "manchester united"),
+        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",
     },
     {
         # Premier League - 15:00Z
