@@ -233,6 +233,12 @@ def _destino(ev: dict, catalogo: list, base: str):
         return url, "m3u8", canal["name"]
 
     # 2) El canal real segun la agenda de dlive (su player va por iframe).
+    # 2) dlive: su player va por iframe y dentro de la pagina muestra la marca
+    #    de daddylive ("Embed code", "THEATER MODE", PLAYER 1-7), asi que por
+    #    defecto NO se publica. Con AGENDA_IFRAMES=1 se reactiva.
+    if os.getenv("AGENDA_IFRAMES", "0").strip() != "1":
+        return None, None, None
+
     try:
         from main import dlive_buscar_canales
 
