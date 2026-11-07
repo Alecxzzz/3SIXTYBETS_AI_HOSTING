@@ -1387,7 +1387,8 @@ def replace_events(events: list) -> int:
                 name[:200],
                 stream,
                 referer,
-                "m3u8",
+                # La agenda nueva mezcla m3u8 (cdnlivetv) e iframe (dlive).
+                (ev.get("type") or "m3u8")[:20],
                 now_utc(),
             )
         )

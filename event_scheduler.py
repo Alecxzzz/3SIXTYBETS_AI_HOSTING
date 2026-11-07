@@ -1,195 +1,282 @@
 """
-Refrescador AUTOMATICO de los partidos del dia (cuadro "Partidos de hoy" de la TV).
+Refrescador AUTOMATICO de la agenda de partidos (cuadro "Partidos de hoy").
 
-Cada 30 minutos:
-1. Descarga la agenda de la fuente (la18hd.su/eventos/json/agenda123.json).
-2. Para cada canal de la agenda: abre su pagina y extrae el playbackURL
-   fresco. (Los tokens mueren rapido; el m3u8 guardado en la BD es solo
-   fallback: la TV resuelve fresco al hacer clic via /event-resolve.)
-3. Reemplaza la tabla events. Si la fuente fallo o devolvio vacio, NO
-   toca la tabla (para no dejar la TV vacia por una caida temporal).
+Antes leia la18hd.su/eventos/json/agenda123.json, que **esta caida** (timeout).
+Ahora la agenda se arma con fuentes que ya usa el backend:
 
-Arranca como hilo daemon desde el startup de main.py. Asi la TV se
-actualiza sola todos los dias, sin depender de la PC de casa.
+1. ESPN (site.api.espn.com): hora, equipos, liga y el canal del partido
+   (broadcasts / geoBroadcasts) para tenis (ATP/WTA), NBA, NFL y futbol.
+2. dlive.sx: canal de streaming real por partido (main.dlive_buscar_canales).
+
+Cada fila de la tabla `events` guarda el destino YA resuelto:
+  - canal del partido presente y ONLINE en el catalogo de cdnlivetv
+      -> {BASE}/tv/cdnlivetv/{canal}/{code}   (type=m3u8; el backend resuelve
+         el token fresco y lo sirve por /hls-proxy)
+  - si no, y el partido esta en la agenda de dlive
+      -> pagina del canal en dlive            (type=iframe)
+  - si no hay destino jugable, el evento NO se guarda: la TV solo muestra lo
+    que se puede ver de verdad.
+
+Corre cada 30 min desde el startup de main.py. Si una fuente falla o no hay
+ningun evento jugable, NO se toca la tabla (se conserva la lista anterior).
 """
-
+import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import quote
 
 import requests
 
 import db
 
-AGENDA_URL = "https://la18hd.su/eventos/json/agenda123.json"
-PAGE_URL = "https://la18hd.su/vivo/canales.php?stream={slug}"
-PLAYBACK_RE = re.compile(r'var\s+playbackURL\s+=\s+"([^"]*)"')
+INTERVAL_S = 30 * 60          # refresco cada 30 minutos
+PRIMER_DELAY_S = 30           # deja terminar el startup antes de la 1a corrida
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 
-INTERVAL_S = 30 * 60          # refresco cada 30 minutos
-PRIMER_DELAY_S = 15           # primera corrida: deja al startup terminar
-GRACIA_MIN = 150              # ventana "en vivo" de la fuente (+2.5h tras el inicio)
+# (ruta de ESPN, etiqueta que se pinta en la tarjeta)
+ESPN_FUENTES = (
+    ("tennis/atp", "TENIS"),
+    ("tennis/wta", "TENIS"),
+    ("basketball/nba", "NBA"),
+    ("football/nfl", "NFL"),
+    ("soccer/esp.1", "LALIGA"),
+    ("soccer/eng.1", "PREMIER LEAGUE"),
+    ("soccer/ita.1", "SERIE A"),
+    ("soccer/ger.1", "BUNDESLIGA"),
+    ("soccer/fra.1", "LIGUE 1"),
+    ("soccer/por.1", "PRIMEIRA LIGA"),
+    ("soccer/ned.1", "EREDIVISIE"),
+    ("soccer/mex.1", "LIGA MX"),
+    ("soccer/arg.1", "LIGA ARGENTINA"),
+    ("soccer/usa.1", "MLS"),
+    ("soccer/bra.1", "BRASILEIRAO"),
+    ("soccer/uefa.champions", "CHAMPIONS LEAGUE"),
+    ("soccer/uefa.europa", "EUROPA LEAGUE"),
+)
 
-LIMA = timezone(timedelta(hours=-5))  # la agenda usa hora Peru (America/Lima)
-
-# Nombres lindos de canal para la lista de la TV. Lo que no esta aqui
-# cae al formato generico (espn5 -> "ESPN 5").
-CANAL_NOMBRES = {
-    "espn": "ESPN",
-    "espnmx": "ESPN MX",
-    "espn2mx": "ESPN 2 MX",
-    "espn4mx": "ESPN 4 MX",
-    "espnpremium": "ESPN Premium",
-    "espnndeportes": "ESPN Deportes",
-    "espn2": "ESPN 2",
-    "espn3": "ESPN 3",
-    "espn4": "ESPN 4",
-    "espn5": "ESPN 5",
-    "espn7": "ESPN 7",
-    "dsports": "DSports",
-    "dsports2": "DSports 2",
-    "tntsports": "TNT Sports",
-    "tntsportschile": "TNT Sports Chile",
-    "tudn": "TUDN",
-    "telemundo": "Telemundo",
-    "universo": "Universo",
-    "canal5": "Canal 5",
-    "foxsports2": "Fox Sports 2",
-    "foxsports3": "Fox Sports 3",
-    "winsports2": "Win Sports+",
-    "vtvplus": "VTV Plus",
-    "max2": "Max 2",
-    "liga1max": "Liga 1 Max",
-    "premiere1": "Premiere",
-    "premiere2": "Premiere 2",
-    "premiere3": "Premiere 3",
-    "fanatiz6": "Fanatiz 6",
-    "fanatiz10": "Fanatiz 10",
-    "beinsportes": "beIN Sports",
-    "hypermotion1": "Laliga Hypermotion",
+# --- Normalizacion de nombres de canal -------------------------------------
+# ESPN da "ESPN Deportes", "MNMT", "NFL Net"; el catalogo de cdnlivetv usa
+# "ESPN Deportes US", "Monumental Sports Network US", "NFL Network HD US".
+# Se comparan por tokens: todas las palabras relevantes del nombre deben
+# aparecer en el del catalogo (y si uno nombra el pais, debe coincidir).
+CALIDAD = {"fhd", "hd", "uhd", "sd", "4k"}
+PAISES = {
+    "us", "ca", "uk", "br", "arg", "mx", "pt", "pl", "fr", "de", "nl", "nz",
+    "il", "gr", "dk", "se", "fi", "at", "au", "cy", "bg", "ru", "tr", "ksa", "ro",
+}
+RELLENO = {"the", "tv", "channel", "network", "sports", "sport", "live"}
+# ESPN abrevia ("MNMT", "NFL Net", "USA Net", "NBCS Bay Area") y el catalogo usa
+# el nombre largo. Se normaliza token a token antes de comparar.
+ALIAS_CANAL = {
+    "net": "network",
+    "mnmt": "monumental",
+    "nbcs": "nbc sports",
+    "espn2": "espn 2",
+    "espn3": "espn 3",
+    "espn4": "espn 4",
+    "cbssn": "cbs sports network",
+    "fs1": "fox sports 1",
+    "fs2": "fox sports 2",
+    "tnt": "tnt",
+    "uni": "universo",
+}
+ALIAS_PAIS = {
+    "poland": "pl", "israel": "il", "england": "uk", "germany": "de",
+    "france": "fr", "turkey": "tr", "greece": "gr", "portugal": "pt",
+    "netherlands": "nl", "denmark": "dk", "sweden": "se", "finland": "fi",
+    "canada": "ca", "brazil": "br", "argentina": "arg", "mexico": "mx",
+    "spain": "es", "italy": "it", "cyprus": "cy", "romania": "ro",
+    "bulgaria": "bg", "usa": "us",
 }
 
 
-def _canal_pretty(slug: str) -> str:
-    slug = (slug or "").strip().lower()
-    if slug in CANAL_NOMBRES:
-        return CANAL_NOMBRES[slug]
-    base = re.sub(r"(\d+)$", r" \1", slug)
-    return base.replace("_", " ").upper()
+def _tokens(txt: str):
+    txt = (txt or "").lower()
+    txt = re.sub(r"([a-z])(\d)", r"\1 \2", txt)
+    txt = re.sub(r"(\d)([a-z])", r"\1 \2", txt)
+    txt = re.sub(r"[^a-z0-9]+", " ", txt)
+    salida = []
+    for t in txt.split():
+        t = ALIAS_PAIS.get(t, t)
+        # ALIAS_CANAL puede devolver varias palabras ("nbcs" -> "nbc sports").
+        for parte in str(ALIAS_CANAL.get(t, t)).split():
+            if parte:
+                salida.append(parte)
+    return salida
 
 
-def _vigente(fecha: str, hora: str) -> bool:
-    """True si el partido no termino (inicio + gracia > ahora, hora Lima)."""
-    try:
-        inicio = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LIMA)
-        return inicio + timedelta(minutes=GRACIA_MIN) > datetime.now(LIMA)
-    except Exception:
-        return True  # fecha/hora raras: no lo descartamos por eso
+def _canal_cdn(nombre: str, catalogo: list):
+    """Canal del catalogo que corresponde a ese nombre (prefiere los online)."""
+    tokens = set(_tokens(nombre))
+    claves = {
+        t for t in tokens
+        if t not in CALIDAD and t not in PAISES and t not in RELLENO
+    }
+    if not claves:
+        return None
+    paises = tokens & PAISES
+    candidatos = []
+    for c in catalogo:
+        ct = set(_tokens(c.get("name")))
+        if not claves <= ct:
+            continue
+        if paises and not (paises & ct):
+            continue
+        candidatos.append((len(ct - tokens), not c.get("online"), c))
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda x: (x[0], x[1], x[2].get("name") or ""))
+    return candidatos[0][2]
 
 
-def _stream_vivo(url: str, referer: str) -> bool:
-    """True si el m3u8 responde 200 con contenido HLS.
+def _base_url() -> str:
+    """URL publica del backend, para poder apuntar a /tv/cdnlivetv."""
+    base = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        host = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+        base = f"https://{host}" if host else "http://localhost:8000"
+    return base
 
-    La fuente (fubo18) rota el subdominio en cada request: algunos hosts
-    estan muertos (DNS fail, timeout, 404). Sin esta validacion la TV
-    publica eventos con streams muertos y TODOS los partidos dan
-    manifestLoadError al abrirlos.
+
+
+def _catalogo_normalizado() -> list:
+    """Catalogo de cdnlivetv con `online` booleano.
+
+    `cdnlivetv_catalogo()` devuelve `status` ("online"/"offline"); aqui se
+    normaliza para que el resto del codigo hable de `online` y `name`.
     """
     try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": UA, "Referer": referer},
-            timeout=10,
-        )
-        return resp.status_code == 200 and "#EXTM3U" in resp.text
-    except Exception:
-        return False
+        from main import cdnlivetv_catalogo
+
+        crudo = cdnlivetv_catalogo() or []
+    except Exception as exc:
+        print(f"[EventsScheduler] sin catalogo CDN: {exc!r}", flush=True)
+        return []
+    return [
+        {
+            "name": c.get("name") or "",
+            "code": c.get("code") or "us",
+            "online": (c.get("status") or "").strip().lower() == "online",
+        }
+        for c in crudo
+        if c.get("name")
+    ]
 
 
-def _procesar_evento(ev: dict):
-    """Scrapea un evento de la agenda y devuelve el dict del evento o None.
-
-    El host del stream ROTA en cada request y algunos hosts estan muertos
-    (DNS fail / timeout / 404): re-scrapeamos hasta 3 veces y solo aceptamos
-    el token cuyo m3u8 realmente responde. Sin esta validacion la TV
-    publica canales muertos y TODOS los partidos dan manifestLoadError.
-    """
-    link = (ev.get("link") or "").strip()
-    if "la18hd.su" not in link:
-        return None  # tarjetarojita.xyz y otros espejos: solo la fuente principal
-    if not _vigente(ev.get("date") or "", ev.get("time") or ""):
-        return None
-    slug = parse_qs(urlparse(link).query).get("stream", [None])[0]
-    if not slug:
-        return None
-    page = PAGE_URL.format(slug=slug)
-
-    playback = None
-    for _intento in range(3):
+def _eventos_espn() -> list:
+    """Partidos del dia con su canal segun ESPN (las 4 disciplinas)."""
+    salida = []
+    for path, liga in ESPN_FUENTES:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
         try:
-            resp = requests.get(
-                page,
-                headers={"User-Agent": UA, "Referer": "https://la18hd.su/eventos/"},
+            r = requests.get(
+                url,
+                headers={"User-Agent": UA, "Accept": "application/json"},
                 timeout=20,
             )
-        except Exception:
+            if not r.ok:
+                continue
+            data = r.json() or {}
+        except Exception as exc:
+            print(f"[EventsScheduler] ESPN {path} fallo: {exc}", flush=True)
             continue
-        m = PLAYBACK_RE.search(resp.text)
-        if not m:
+
+        for ev in data.get("events") or []:
+            comp = (ev.get("competitions") or [{}])[0]
+            equipos = {}
+            for c in comp.get("competitors") or []:
+                equipos[c.get("homeAway")] = (c.get("team") or {}).get("displayName")
+            home = (equipos.get("home") or "").strip()
+            away = (equipos.get("away") or "").strip()
+            nombre = f"{home} vs {away}" if home and away else (ev.get("name") or "")
+            nombre = nombre.strip()
+            if not nombre:
+                continue
+
+            canales = []
+            for b in comp.get("broadcasts") or []:
+                canales += [n for n in (b.get("names") or []) if n]
+            for g in comp.get("geoBroadcasts") or []:
+                n = ((g.get("media") or {}).get("shortName") or "").strip()
+                if n:
+                    canales.append(n)
+            unicos = []
+            for n in canales:
+                if n and n not in unicos:
+                    unicos.append(n)
+
+            salida.append({
+                "liga": liga,
+                "name": nombre,
+                "home": home,
+                "away": away,
+                "fecha": ev.get("date") or "",
+                "canales": unicos,
+            })
+    return salida
+
+
+def _destino(ev: dict, catalogo: list, base: str):
+    """(url, tipo, etiqueta) jugable para ese partido, o (None, None, None)."""
+    # 1) El canal que da ESPN, si existe y esta online en el CDN.
+    for nombre in ev["canales"]:
+        canal = _canal_cdn(nombre, catalogo)
+        if not canal or not canal.get("online"):
             continue
-        playback = m.group(1)
-        if _stream_vivo(playback, page):
-            break
-        playback = None  # host muerto: forzar otro scrape (nuevo token/host)
+        code = canal.get("code") or "us"
+        url = f"{base}/tv/cdnlivetv/{quote(canal['name'], safe='')}/{code}"
+        return url, "m3u8", canal["name"]
 
-    if not playback:
-        return None  # este evento no tiene stream vivo ahora mismo
+    # 2) El canal real segun la agenda de dlive (su player va por iframe).
+    try:
+        from main import dlive_buscar_canales
 
-    titulo = " ".join((ev.get("title") or "").split())
-    if ":" in titulo:
-        sport, name = (x.strip() for x in titulo.split(":", 1))
-    else:
-        sport, name = "Futbol", titulo
-    if not name:
-        return None
+        canales = dlive_buscar_canales(ev["home"], ev["away"], ev["fecha"])
+    except Exception as exc:
+        print(f"[EventsScheduler] dlive fallo para {ev['name']}: {exc!r}", flush=True)
+        canales = None
+    for c in canales or []:
+        if c.get("url"):
+            return c["url"], "iframe", c.get("nombre") or "dlive"
 
-    label = f"{name} · {_canal_pretty(slug)}"
-    lang = (ev.get("language") or "").strip()
-    if lang and lang.lower() not in label.lower():
-        label += f" ({lang.capitalize()})"
-
-    return {"sport": sport or "Futbol", "name": label, "stream": playback, "referer": page}
+    return None, None, None
 
 
 def refresh_once() -> str:
-    """Una corrida completa. Devuelve un mensaje para el log.
+    """Una corrida completa. Devuelve un mensaje para el log."""
+    base = _base_url()
+    catalogo = _catalogo_normalizado()
 
-    Los eventos se procesan EN PARALELO (cada uno implica scrape + validacion
-    del m3u8, hasta 3 intentos): en serie tardaria ~20 min con muchos streams
-    muertos; con 10 hilos baja a ~2 min.
-    """
-    agenda = requests.get(AGENDA_URL, headers={"User-Agent": UA}, timeout=20).json()
-    if not isinstance(agenda, list) or not agenda:
-        return "agenda vacia o invalida; se conserva la lista actual"
+    agenda = _eventos_espn()
+    if not agenda:
+        return "ESPN no devolvio partidos; se conserva la lista actual"
 
-    from concurrent.futures import ThreadPoolExecutor
+    eventos, sin_destino = [], 0
+    for ev in agenda:
+        url, tipo, etiqueta = _destino(ev, catalogo, base)
+        if not url:
+            sin_destino += 1
+            continue
+        eventos.append({
+            "sport": ev["liga"],
+            "name": f"{ev['name']} · {etiqueta}"[:200],
+            "stream": url,
+            "type": tipo,
+            "referer": None,
+        })
 
-    events = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        for resultado in pool.map(_procesar_evento, agenda):
-            if resultado:
-                events.append(resultado)
+    if not eventos:
+        return (f"0 eventos jugables de {len(agenda)} partidos; "
+                "se conserva la lista actual")
 
-    if not events:
-        return "no se scrapeo ningun stream vivo; se conserva la lista actual"
-
-    count = db.replace_events(events)
-    return f"{count} evento(s) publicados (agenda: {len(agenda)} items)"
+    count = db.replace_events(eventos)
+    return (f"{count} evento(s) publicados de {len(agenda)} partidos "
+            f"({sin_destino} sin canal jugable)")
 
 
 def _loop() -> None:
@@ -204,3 +291,25 @@ def _loop() -> None:
 
 def iniciar_scheduler() -> None:
     threading.Thread(target=_loop, daemon=True, name="event-scheduler").start()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--dry" in sys.argv:
+        # Muestra la agenda SIN tocar la BD (para ver que se va a publicar).
+        base = _base_url()
+        catalogo = _catalogo_normalizado()
+        agenda = _eventos_espn()
+        print(f"base={base}  partidos ESPN={len(agenda)}  "
+              f"catalogo={len(catalogo)}\n")
+        jugables = 0
+        for ev in agenda:
+            url, tipo, etiqueta = _destino(ev, catalogo, base)
+            if url:
+                jugables += 1
+            print(f"{ev['liga']:<17} {ev['name'][:42]:<42} "
+                  f"{(etiqueta or '-')[:26]:<26} {tipo or ''}")
+        print(f"\njugables: {jugables}/{len(agenda)}")
+    else:
+        print(refresh_once())
