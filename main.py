@@ -1150,18 +1150,20 @@ def _db_alcanzable(timeout: float = 5.0):
     servicio queda en 502 "Application failed to respond" aunque la app este
     bien. Un socket de 5 s lo detecta al instante y deja arrancar igual.
 
+    Nunca lanza: si la config esta rota (p.ej. MYSQL_PORT vacio) devuelve False.
+
     Devuelve (alcanzable, motivo).
     """
-    cfg = db.get_mysql_config()
-    host, port = cfg["host"], int(cfg["port"] or 3306)
     try:
+        cfg = db.get_mysql_config()
+        host, port = cfg["host"], int(cfg["port"] or 3306)
         with socket.create_connection((host, port), timeout=timeout):
             return True, ""
-    except OSError as exc:
-        return False, f"{host}:{port} -> {exc}"
+    except Exception as exc:
+        return False, f"{os.getenv('MYSQL_HOST') or '127.0.0.1'}: " \
+                      f"{os.getenv('MYSQL_PORT') or '3306'} -> {exc}"
 
 
-@app.on_event("startup")
 def _init_database():
     """Inicializa la BD, crea admin y una key por defecto si hace falta.
 
@@ -1305,6 +1307,33 @@ def _init_database():
             sports_warming.iniciar_calentador()
         except Exception as exc:
             print(f"[startup] Calentador de stats no iniciado: {exc}", flush=True)
+
+
+@app.on_event("startup")
+def _arranque_seguro():
+    """Ningun fallo de arranque puede dejar el servicio sin responder.
+
+    Antes, un error en init_db()/schedulers abortaba el startup de uvicorn: el
+    contenedor arrancaba, NO escuchaba, y el host devolvia 502 "Application
+    failed to respond" sin explicar nada. Ahora el fallo se registra y la app
+    sirve igual (los endpoints que usan BD devolveran 500 hasta que vuelva).
+    """
+    try:
+        _init_database()
+    except Exception as exc:
+        print(f"[startup] Fallo inesperado en el arranque (la app sigue "
+              f"arriba): {exc!r}", flush=True)
+
+    # Banner de arranque: en el log del host se ve de un golpe que puerto
+    # espera el router y si las variables llegaron al contenedor. Sin esto el
+    # diagnostico de un 502 es a ciegas.
+    print(
+        f"[startup] LISTO. PORT={os.getenv('PORT') or '(sin definir: uvicorn 8080)'} "
+        f"MYSQL_HOST={os.getenv('MYSQL_HOST') or '(SIN DEFINIR -> 127.0.0.1)'} "
+        f"MYSQL_DATABASE={os.getenv('MYSQL_DATABASE') or '(sin definir)'} "
+        f"FRONTEND_ORIGINS={os.getenv('FRONTEND_ORIGINS') or '(sin definir)'}",
+        flush=True,
+    )
 
 
 def _reintentar_db_y_precachear():

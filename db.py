@@ -44,9 +44,17 @@ def get_mysql_config():
 
     ssl_disabled_env = os.getenv("MYSQL_SSL_DISABLED", "false").strip().lower()
 
+    # Ojo: en el panel de algunos hosts la variable puede quedar vacia
+    # (MYSQL_PORT=). int("") revienta con ValueError y eso tumbaba el arranque
+    # entero; mejor caer al puerto por defecto.
+    try:
+        puerto = int((os.getenv("MYSQL_PORT") or "3306").strip())
+    except ValueError:
+        puerto = 3306
+
     return {
-        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
-        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "host": (os.getenv("MYSQL_HOST", "127.0.0.1") or "127.0.0.1").strip(),
+        "port": puerto,
         "user": os.getenv("MYSQL_USER", "root"),
         "password": os.getenv("MYSQL_PASSWORD", ""),
         "database": os.getenv("MYSQL_DATABASE", "sixtybets"),
