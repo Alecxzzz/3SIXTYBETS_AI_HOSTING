@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import db
 import emailer
 import sports
+import fotmob
 import transcoder
 import dashboard
 import ipaddress
@@ -2713,6 +2714,59 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
 # respuesta y los eventos nunca llegan al cliente (verificado en produccion).
 # La actualizacion en vivo queda cubierta por el calentador de cache + el
 # polling de 60s del frontend.
+
+@app.get("/stats/radar")
+def stats_radar(event_id: str, sport: str = "soccer", user=Depends(get_current_user)):
+    """Radar del partido: mapa de tiros con xG, momentum y zonas. Solo futbol.
+
+    ESPN no manda coordenadas (su /summary de futbol no dice donde fue cada
+    tiro); FotMob si: content.shotmap.shots trae x/y y expectedGoals, mas el
+    momentum minuto a minuto y las zonas de ataque.
+
+    OJO: la posicion de jugadores y balon EN VIVO no existe en ninguna API
+    gratuita: es tracking optico (Hawk-Eye / Second Spectrum) y va con la
+    licencia del torneo. Esto es un mapa real de tiros y ataques, no un radar
+    de posiciones.
+    """
+    if sport != "soccer":
+        raise HTTPException(400, "El radar solo esta disponible para futbol.")
+
+    try:
+        detalle = sports.get_game_detail(sport, event_id)
+    except Exception as exc:
+        print(f"[stats/radar] detalle {event_id}: {exc!r}", flush=True)
+        raise HTTPException(502, "No se pudo leer el partido.")
+
+    equipos = detalle.get("teams") or []
+    home = next((t.get("name") for t in equipos if t.get("homeAway") == "home"), None)
+    away = next((t.get("name") for t in equipos if t.get("homeAway") == "away"), None)
+    if not home or not away:
+        raise HTTPException(404, "El partido no tiene equipos identificables.")
+
+    partido_id = fotmob.buscar_partido(home, away)
+    if not partido_id:
+        return {
+            "ok": False,
+            "motivo": "sin_datos",
+            "home_nombre": home,
+            "away_nombre": away,
+            "detalle": "FotMob no tiene este partido (suele pasar en ligas menores).",
+        }
+
+    datos = fotmob.radar(partido_id)
+    if not datos:
+        return {
+            "ok": False,
+            "motivo": "sin_datos",
+            "home_nombre": home,
+            "away_nombre": away,
+            "detalle": "FotMob no respondio a tiempo.",
+        }
+
+    datos["home_nombre"] = home
+    datos["away_nombre"] = away
+    return datos
+
 
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):

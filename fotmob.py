@@ -31,12 +31,15 @@ _lock = threading.Lock()
 TTL = 1800  # 30 min: el historico no cambia cada minuto
 
 
-def _get(ruta, params=None):
+def _get(ruta, params=None, ttl=None):
     clave = ruta + "?" + json.dumps(params or {}, sort_keys=True)
     ahora = time.time()
+    # Los datos en vivo (matchDetails) cambian cada jugada: esas llamadas pasan
+    # ttl corto. El historico sigue usando el TTL largo de arriba.
+    vida = TTL if ttl is None else ttl
     with _lock:
         hit = _cache.get(clave)
-        if hit and ahora - hit[0] < TTL:
+        if hit and ahora - hit[0] < vida:
             return hit[1]
     try:
         r = requests.get(f"{BASE}{ruta}", params=params, headers=H, timeout=20)
@@ -162,3 +165,160 @@ def prob_partido_ambos_marcan(equipo_id, n: int = 10):
         return None
     b = sum(1 for p in partidos if p["gf"] > 0 and p["ga"] > 0)
     return int(round(b * 100 / len(partidos)))
+
+
+
+# ---------------------------------------------------------------------------
+# RADAR DEL PARTIDO (mapa de tiros con xG, momentum y zonas de ataque)
+# ---------------------------------------------------------------------------
+# ESPN no manda coordenadas: el detalle de un partido de futbol no dice donde
+# fue cada tiro. FotMob si (content.shotmap.shots con x/y y expectedGoals), y
+# ademas trae el momentum minuto a minuto y las zonas de ataque.
+#
+# Lo que NO hay es la posicion de los jugadores ni del balon en vivo: eso es
+# tracking optico (Hawk-Eye / Second Spectrum) y solo se consigue pagando la
+# licencia del torneo. Por eso el "radar" es un mapa real de tiros y ataques.
+TTL_VIVO = 45  # matchDetails: 45 s (en vivo cambia cada jugada)
+
+
+def _partido_de_fecha(datos, home, away):
+    """Busca el partido home-away dentro de la respuesta de /matches?date=."""
+    objetivo_h, objetivo_a = _clave(home), _clave(away)
+    if not objetivo_h or not objetivo_a:
+        return None
+    for liga in (datos or {}).get("leagues") or []:
+        for p in liga.get("matches") or []:
+            h = _clave((p.get("home") or {}).get("name"))
+            a = _clave((p.get("away") or {}).get("name"))
+            if not h or not a:
+                continue
+            # Se acepta cualquiera de los dos ordenes y nombres parciales
+            # ("Atletico Madrid" vs "Atletico de Madrid").
+            if (objetivo_h in h or h in objetivo_h) and (objetivo_a in a or a in objetivo_a):
+                return p
+            if (objetivo_h in a or a in objetivo_h) and (objetivo_a in h or h in objetivo_a):
+                return p
+    return None
+
+
+def buscar_partido(home, away, fecha=None, dias=(0, -1, 1)):
+    """id de FotMob del partido, buscando hoy, ayer y manana."""
+    base = fecha or date.today()
+    for delta in dias:
+        dia = base + timedelta(days=delta)
+        datos = _get("matches", {"date": dia.strftime("%Y%m%d")}, ttl=600)
+        p = _partido_de_fecha(datos, home, away)
+        if p and p.get("id"):
+            return p["id"]
+    return None
+
+
+def radar(partido_id):
+    """Datos del radar de un partido (tiros con xG, momentum, zonas, stats).
+
+    Devuelve None si FotMob no responde o el id no existe.
+    """
+    md = _get("matchDetails", {"matchId": partido_id}, ttl=TTL_VIVO)
+    if not isinstance(md, dict):
+        return None
+
+    content = md.get("content") or {}
+    header = md.get("header") or {}
+    status = header.get("status") or {}
+    equipos = header.get("teams") or []
+    home = equipos[0] if equipos else {}
+    away = equipos[1] if len(equipos) > 1 else {}
+
+    # teamId de FotMob -> "home"/"away"
+    lado = {}
+    for clave, eq in (("home", home), ("away", away)):
+        try:
+            lado[int(eq.get("id"))] = clave
+        except (TypeError, ValueError):
+            continue
+
+    tiros = []
+    for s in (content.get("shotmap") or {}).get("shots") or []:
+        try:
+            x = float(s.get("x"))
+            y = float(s.get("y"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            equipo = lado.get(int(s.get("teamId")), "home")
+        except (TypeError, ValueError):
+            equipo = "home"
+        try:
+            xg = round(float(s.get("expectedGoals") or 0), 3)
+        except (TypeError, ValueError):
+            xg = 0.0
+        tiros.append({
+            "x": round(x, 1),
+            "y": round(y, 1),
+            "xg": xg,
+            "tipo": s.get("eventType") or "",
+            "equipo": equipo,
+            "jugador": s.get("playerName") or "",
+            "min": s.get("min"),
+            "bloqueado": bool(s.get("isBlocked")),
+            "a_puerta": bool(s.get("isOnTarget")),
+            "situacion": s.get("situation") or "",
+        })
+
+    momentum = []
+    principal = ((content.get("momentum") or {}).get("main") or {}).get("data") or []
+    for punto in principal:
+        try:
+            momentum.append({
+                "min": int(punto.get("minute")),
+                "valor": float(punto.get("value")),
+            })
+        except (TypeError, ValueError):
+            continue
+
+    stats = []
+    periodos = (content.get("stats") or {}).get("Periods") or {}
+    for grupo in (periodos.get("All") or {}).get("stats") or []:
+        filas = []
+        for s in grupo.get("stats") or []:
+            vals = s.get("stats") or []
+            if len(vals) < 2:
+                continue
+            filas.append({
+                "label": s.get("title") or "",
+                "home": vals[0],
+                "away": vals[1],
+            })
+        if filas:
+            stats.append({"grupo": grupo.get("title") or "", "filas": filas})
+
+    if status.get("cancelled"):
+        estado = "cancelado"
+    elif status.get("finished"):
+        estado = "final"
+    elif status.get("started"):
+        estado = "live"
+    else:
+        estado = "pre"
+
+    return {
+        "ok": True,
+        "partido_id": partido_id,
+        "estado": estado,
+        "minuto": (status.get("liveTime") or {}).get("short") or "",
+        "marcador": status.get("scoreStr") or "",
+        "home": {
+            "nombre": _repara(home.get("name")),
+            "id": home.get("id"),
+            "score": home.get("score"),
+        },
+        "away": {
+            "nombre": _repara(away.get("name")),
+            "id": away.get("id"),
+            "score": away.get("score"),
+        },
+        "tiros": tiros,
+        "momentum": momentum,
+        "zonas": content.get("attackingZones") or {},
+        "stats": stats,
+    }
