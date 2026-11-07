@@ -57,6 +57,16 @@ def _utc(texto: str) -> datetime:
     return datetime.fromisoformat(texto.replace("Z", "+00:00"))
 
 
+# Programacion de prueba: los tests NO dependen de la lista real de produccion
+# (FREE_ESPN_EVENTOS cambia cada jornada); se inyecta esta en _agenda().
+EVENTOS_PRUEBA = [
+    {"match": ("chelsea", "manchester united")},
+    {"match": ("manchester city", "brighton")},
+    {"match": ("bayern", "dortmund"), "league": "ger.1"},
+    {"match": ("inter", "milan"), "league": "ita.1"},
+]
+
+
 @contextlib.contextmanager
 def _agenda(estado_chelsea="in", estado_city="pre", estado_bayern="pre", estado_inter="pre"):
     """Sustituye la agenda de ESPN: cada liga con sus partidos del dia."""
@@ -75,7 +85,8 @@ def _agenda(estado_chelsea="in", estado_city="pre", estado_bayern="pre", estado_
             ]
         }
 
-    with mock.patch.object(sports, "get_sport_games", _fake_get_sport_games):
+    with mock.patch.object(sports, "get_sport_games", _fake_get_sport_games), \
+            mock.patch.object(main, "FREE_ESPN_EVENTOS", EVENTOS_PRUEBA):
         yield consultadas
 
 

@@ -2769,146 +2769,6 @@ def stats_radar(event_id: str, sport: str = "soccer", user=Depends(get_current_u
     return datos
 
 
-# ---- Widget licenciado de Sportradar (Live Match Tracker / LMT Plus) ----
-
-_LAYOUTS_LMT = {"single", "double", "topdown"}
-
-
-def _lmt_match_ids():
-    """Mapa event_id -> matchId de Sportradar, desde SPORTRADAR_WIDGET_MATCHES.
-
-    Se define como JSON en el entorno, por ejemplo:
-        SPORTRADAR_WIDGET_MATCHES={"401123456":"43219876"}
-    El matchId es el numero de sr:match:XXXXXXXX que usa el widget.
-    """
-    bruto = (os.getenv("SPORTRADAR_WIDGET_MATCHES") or "").strip()
-    if not bruto:
-        return {}
-    try:
-        datos = json.loads(bruto)
-    except Exception:
-        print("[stats/widget] SPORTRADAR_WIDGET_MATCHES no es JSON valido", flush=True)
-        return {}
-    if not isinstance(datos, dict):
-        return {}
-    return {str(k): str(v) for k, v in datos.items() if v}
-
-
-def _lmt_config(event_id: str):
-    """Configuracion del widget match.lmtPlus para un partido."""
-    client_id = (os.getenv("SPORTRADAR_WIDGET_CLIENT_ID") or "").strip()
-    layout = (os.getenv("SPORTRADAR_WIDGET_LAYOUT") or "single").strip().lower()
-    if layout not in _LAYOUTS_LMT:
-        layout = "single"
-
-    if not client_id:
-        return {
-            "ok": True,
-            "disponible": False,
-            "motivo": "sin_licencia",
-            "detalle": (
-                "Falta SPORTRADAR_WIDGET_CLIENT_ID: el Live Match Tracker es un "
-                "widget licenciado (Engagement Tools) y se sirve con un clientId "
-                "propio, distinto de SPORTRADAR_API_KEY."
-            ),
-        }
-
-    match_id = _lmt_match_ids().get(str(event_id))
-    if not match_id:
-        return {
-            "ok": True,
-            "disponible": False,
-            "motivo": "sin_match_id",
-            "detalle": (
-                "Falta el matchId de Sportradar para este partido "
-                "(SPORTRADAR_WIDGET_MATCHES)."
-            ),
-        }
-
-    return {
-        "ok": True,
-        "disponible": True,
-        "widget": "match.lmtPlus",
-        "client_id": client_id,
-        "match_id": match_id,
-        "layout": layout,
-        "loader": f"https://widgets.sir.sportradar.com/{client_id}/widgetloader",
-    }
-
-
-@app.get("/stats/widget")
-def stats_widget(event_id: str, sport: str = "soccer", user=Depends(get_current_user)):
-    """Configuracion del widget LMT Plus de Sportradar (Engagement Tools).
-
-    OJO: esto NO usa SPORTRADAR_API_KEY. El widget es un producto aparte que
-    se carga desde https://widgets.sir.sportradar.com/{clientId}/widgetloader y
-    necesita:
-      * clientId propio de Engagement Tools (contrato/entitlement aparte), y
-      * el matchId de Sportradar del partido (sr:match:XXXXXXXX).
-
-    Mientras falte cualquiera de los dos devuelve disponible=false con el
-    motivo, y el frontend sigue mostrando el radar propio (/stats/radar).
-    """
-    if sport != "soccer":
-        raise HTTPException(400, "El Live Match Tracker solo esta disponible para futbol.")
-
-    return _lmt_config(event_id)
-
-
-# ---- Radar HD: replay con tracking real (SkillCorner Open Data, MIT) ----
-
-_DEMO_TRACKING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_tracking")
-
-
-@app.get("/stats/tracking-demo")
-def tracking_demo_lista(user=Depends(get_current_user)):
-    """Partidos disponibles en el reproductor de tracking real (demo).
-
-    Los datos los genera ingestar_tracking_skillcorner.py desde SkillCorner Open
-    Data (MIT): 10 partidos de la A-League 2024/25 con las posiciones REALES de
-    los 22 jugadores y el balon. Son partidos ya jugados, no retransmision.
-    """
-    ruta = os.path.join(_DEMO_TRACKING, "index.json")
-    try:
-        with open(ruta, encoding="utf-8") as fh:
-            partidos = json.load(fh)
-    except (OSError, ValueError):
-        partidos = []
-
-    return {
-        "ok": True,
-        "partidos": partidos,
-        "fuente": "SkillCorner Open Data (MIT) - A-League 2024/25",
-        "aviso": (
-            "Tracking real de 22 jugadores y balon de partidos ya jugados: "
-            "es un replay, no una retransmision en vivo."
-        ),
-    }
-
-
-@app.get("/stats/tracking-demo/{match_id}")
-def tracking_demo_partido(match_id: str, user=Depends(get_current_user)):
-    """Tracking completo de un partido de la demo (JSON precomprimido en gzip)."""
-    if not re.fullmatch(r"\d{3,12}", match_id):
-        raise HTTPException(400, "Id de partido invalido.")
-
-    ruta = os.path.join(_DEMO_TRACKING, f"{match_id}.json.gz")
-    if not os.path.exists(ruta):
-        raise HTTPException(404, "Ese partido no esta en la demo de tracking.")
-
-    with open(ruta, "rb") as fh:
-        cuerpo = fh.read()
-
-    return Response(
-        content=cuerpo,
-        media_type="application/json",
-        headers={
-            "Content-Encoding": "gzip",
-            "Cache-Control": "public, max-age=86400",
-        },
-    )
-
-
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
@@ -4513,23 +4373,17 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #                 boton de la pagina, que ya escribe "Opción N".
 FREE_ESPN_EVENTOS = [
     {
-        # Premier League
-        "match": ("chelsea", "manchester united"),
-        "stream": "http://38.252.215.33:8000/play/a024/index.m3u8",
-    },
-    {
-        # Premier League - 15:00Z
-        "match": ("manchester city", "brighton"),
-    },
-    {
-        # Bundesliga - 17:30Z
-        "match": ("bayern", "dortmund"),
-        "league": "ger.1",
-    },
-    {
-        # Serie A - 19:45Z
-        "match": ("inter", "milan"),
-        "league": "ita.1",
+        # LaLiga: Valencia CF vs Real Madrid (2026-11-07 20:00Z)
+        # OJO: ESPN lo publica como "Real Madrid at Valencia" (Valencia local).
+        # Señales: PENDIENTES. Cuando esten, rellenar "opciones" (una por canal)
+        # y/o "stream" con el m3u8 del partido; si no hay ninguna, la pagina usa
+        # FREE_ESPN_STREAM_PRINCIPAL (ESPN 3).
+        #   "opciones": [
+        #       {"label": "ESPN 2", "url": "http://.../index.m3u8"},
+        #       {"label": "ESPN Deportes", "url": "http://.../index.m3u8"},
+        #   ],
+        "match": ("valencia", "real madrid"),
+        "league": "esp.1",
     },
 ]
 
