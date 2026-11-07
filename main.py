@@ -4375,15 +4375,13 @@ FREE_ESPN_EVENTOS = [
     {
         # LaLiga: Valencia CF vs Real Madrid (2026-11-07 20:00Z)
         # OJO: ESPN lo publica como "Real Madrid at Valencia" (Valencia local).
-        # Señales: PENDIENTES. Cuando esten, rellenar "opciones" (una por canal)
-        # y/o "stream" con el m3u8 del partido; si no hay ninguna, la pagina usa
-        # FREE_ESPN_STREAM_PRINCIPAL (ESPN 3).
-        #   "opciones": [
-        #       {"label": "ESPN 2", "url": "http://.../index.m3u8"},
-        #       {"label": "ESPN Deportes", "url": "http://.../index.m3u8"},
-        #   ],
         "match": ("valencia", "real madrid"),
         "league": "esp.1",
+        "opciones": [
+            {"label": "DSPORTS 1", "url": "http://38.252.215.33:8000/play/a00q/index.m3u8"},
+            {"label": "ESPN", "url": "https://bigboss.bemtv.cn/STREAM/732/playlist.m3u8"},
+            {"label": "SKY SPORTS", "url": "http://190.61.101.11:7050/play/a04g/index.m3u8"},
+        ],
     },
 ]
 
