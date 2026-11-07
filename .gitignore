@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .env
+# Exportaciones de variables (contienen secretos reales): nunca al repo
+.env.northflank
+.env.migracion
+.env.railway
 *.db
 node_modules/
 dist/
@@ -20,6 +24,11 @@ audit*.err
 sse_test*.py
 *.log
 *.err
+
+# Salidas generadas por analizar_agenda_cdn.py (se regeneran en cada corrida)
+agenda_hoy_cdn.txt
+resumen_agenda.txt
+
 
 # Scripts temporales de diagnostico local (llevan credenciales de prueba)
 _*.py

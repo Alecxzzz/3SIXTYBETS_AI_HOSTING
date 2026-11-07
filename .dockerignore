@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Contexto de build del contenedor (Railway construye desde el commit de GitHub)
+# ---------------------------------------------------------------------------
+# Se excluye BASURA y SECRETOS, nunca nada que el backend necesite en runtime:
+# los .py, ai/, backend/, data_engine/, engine/, dist/, player.html, channels.js
+# y los .json se copian enteros (el Dockerfile hace "COPY . .").
+#
+# .env se excluye a proposito:
+#   - En Railway las variables llegan por el panel (Variables), no en la imagen.
+#   - Railway construye desde git, donde .env NO existe (esta en .gitignore); si
+#     alguna vez construyes la imagen en local, esto evita publicar credenciales
+#     reales dentro de una imagen que se sube al registry del host.
+
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.vscode
+.agents
+
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+node_modules/
+*.log
+*.err
+*.backup
+
+Dockerfile
+.dockerignore
+README.md
