@@ -3433,6 +3433,33 @@ def cdnlivetv_fresh(name: str, code: str):
     return None, ultimo_motivo
 
 
+_SUFIJOS_PAIS = {
+    "US", "CA", "UK", "BR", "ARG", "MX", "PT", "PL", "FR", "DE", "NL", "NZ",
+    "IL", "GR", "DK", "SE", "FI", "AT", "AU", "CY", "BG", "RU", "TR", "KSA",
+    "CH", "IT", "ES", "BE", "NO", "IE", "ZA", "IN", "JP", "KR", "CN", "RO",
+}
+
+
+def cdnlivetv_codigo(nombre: str, code: str = "") -> str:
+    """Codigo de pais para /tv/cdnlivetv/{name}/{code}.
+
+    cdnlivetv dejo de mandar `code` en el catalogo: viene vacio en 403 de 405
+    canales, y el filtro que exigia `code` dejaba el catalogo en 2 canales (la
+    TV entera vacia). El proveedor IGNORA el code (el mismo canal devuelve el
+    mismo m3u8 con "us" que con vacio), pero la ruta exige dos segmentos, asi
+    que se deduce del sufijo del nombre ("ESPN 2 FHD US" -> "us") y si no hay
+    sufijo se usa "us".
+    """
+    if code and code.strip():
+        return code.strip().lower()
+    partes = (nombre or "").replace("-", " ").replace("/", " ").split()
+    if partes:
+        ultimo = partes[-1].strip("()").upper()
+        if ultimo in _SUFIJOS_PAIS:
+            return ultimo.lower()
+    return "us"
+
+
 def cdnlivetv_catalogo():
     """Canales desde la API publica de cdnlivetv.tv, con estado en vivo.
 
@@ -3455,12 +3482,13 @@ def cdnlivetv_catalogo():
         data = [
             {
                 "name": c.get("name"),
-                "code": c.get("code"),
+                # El proveedor ya no manda code: se deduce del nombre.
+                "code": cdnlivetv_codigo(c.get("name"), c.get("code") or ""),
                 "status": c.get("status"),
                 "viewers": c.get("viewers"),
             }
             for c in canales
-            if c.get("name") and c.get("code")
+            if c.get("name")
         ]
     except Exception as exc:
         print(f"[cdnlivetv] catalogo no disponible: {exc}", flush=True)
@@ -3654,7 +3682,15 @@ def _canales_por_liga(equipo_local: str, equipo_visita: str, sport: str) -> list
     # con el equipo (p.ej. "Dodgers" -> "Sportsnet Dodgers"), sube de prioridad.
     reglas = {
         "mlb": ["mlb network", "sportsnet", "fox sports", "espn"],
-        "nba": ["nba tv", "espn", "tnt", "sky sports", "sportsnet"],
+        # NBA: desde 2025-26 los derechos en USA son ABC/ESPN, NBC y Prime Video
+        # (TNT ya NO emite NBA). Los RSNs que existen en el catalogo son MSG
+        # (Knicks), Monumental (Wizards), CHSN (Bulls), Altitude (Nuggets),
+        # Space City (Rockets) y YES (Nets, offline); TSN/RDS cubren Canada y
+        # los feeds internacionales (Sky, beIN, Sport TV, Nova, TNT Sports UK)
+        # emiten partidos sueltos.
+        "nba": ["nba tv", "espn", "abc", "nbc", "tsn", "rds", "msg",
+                "monumental", "chicago sports", "altitude", "space city",
+                "sky sport", "bein", "sport tv", "nova sport", "tnt sports"],
         "nfl": ["nfl network", "espn", "cbs", "fox sports", "sportsnet"],
         "nhl": ["nhl network", "sportsnet", "tnt", "espn"],
         "soccer": ["dazn", "bein", "fox sports", "tudn", "espn", "premier sports",
