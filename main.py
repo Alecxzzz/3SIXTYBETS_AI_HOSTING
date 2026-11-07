@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import re
 import time
@@ -2766,6 +2767,92 @@ def stats_radar(event_id: str, sport: str = "soccer", user=Depends(get_current_u
     datos["home_nombre"] = home
     datos["away_nombre"] = away
     return datos
+
+
+# ---- Widget licenciado de Sportradar (Live Match Tracker / LMT Plus) ----
+
+_LAYOUTS_LMT = {"single", "double", "topdown"}
+
+
+def _lmt_match_ids():
+    """Mapa event_id -> matchId de Sportradar, desde SPORTRADAR_WIDGET_MATCHES.
+
+    Se define como JSON en el entorno, por ejemplo:
+        SPORTRADAR_WIDGET_MATCHES={"401123456":"43219876"}
+    El matchId es el numero de sr:match:XXXXXXXX que usa el widget.
+    """
+    bruto = (os.getenv("SPORTRADAR_WIDGET_MATCHES") or "").strip()
+    if not bruto:
+        return {}
+    try:
+        datos = json.loads(bruto)
+    except Exception:
+        print("[stats/widget] SPORTRADAR_WIDGET_MATCHES no es JSON valido", flush=True)
+        return {}
+    if not isinstance(datos, dict):
+        return {}
+    return {str(k): str(v) for k, v in datos.items() if v}
+
+
+def _lmt_config(event_id: str):
+    """Configuracion del widget match.lmtPlus para un partido."""
+    client_id = (os.getenv("SPORTRADAR_WIDGET_CLIENT_ID") or "").strip()
+    layout = (os.getenv("SPORTRADAR_WIDGET_LAYOUT") or "single").strip().lower()
+    if layout not in _LAYOUTS_LMT:
+        layout = "single"
+
+    if not client_id:
+        return {
+            "ok": True,
+            "disponible": False,
+            "motivo": "sin_licencia",
+            "detalle": (
+                "Falta SPORTRADAR_WIDGET_CLIENT_ID: el Live Match Tracker es un "
+                "widget licenciado (Engagement Tools) y se sirve con un clientId "
+                "propio, distinto de SPORTRADAR_API_KEY."
+            ),
+        }
+
+    match_id = _lmt_match_ids().get(str(event_id))
+    if not match_id:
+        return {
+            "ok": True,
+            "disponible": False,
+            "motivo": "sin_match_id",
+            "detalle": (
+                "Falta el matchId de Sportradar para este partido "
+                "(SPORTRADAR_WIDGET_MATCHES)."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "disponible": True,
+        "widget": "match.lmtPlus",
+        "client_id": client_id,
+        "match_id": match_id,
+        "layout": layout,
+        "loader": f"https://widgets.sir.sportradar.com/{client_id}/widgetloader",
+    }
+
+
+@app.get("/stats/widget")
+def stats_widget(event_id: str, sport: str = "soccer", user=Depends(get_current_user)):
+    """Configuracion del widget LMT Plus de Sportradar (Engagement Tools).
+
+    OJO: esto NO usa SPORTRADAR_API_KEY. El widget es un producto aparte que
+    se carga desde https://widgets.sir.sportradar.com/{clientId}/widgetloader y
+    necesita:
+      * clientId propio de Engagement Tools (contrato/entitlement aparte), y
+      * el matchId de Sportradar del partido (sr:match:XXXXXXXX).
+
+    Mientras falte cualquiera de los dos devuelve disponible=false con el
+    motivo, y el frontend sigue mostrando el radar propio (/stats/radar).
+    """
+    if sport != "soccer":
+        raise HTTPException(400, "El Live Match Tracker solo esta disponible para futbol.")
+
+    return _lmt_config(event_id)
 
 
 @app.get("/stats/game")
