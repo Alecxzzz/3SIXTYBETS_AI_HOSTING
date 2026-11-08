@@ -53,7 +53,7 @@ app = FastAPI(
 # CORS: permitir el frontend
 frontend_origins = os.getenv(
     "FRONTEND_ORIGINS",
-    "http://localhost:5173,https://threesixtybets-chat.vercel.app"
+    "http://localhost:5173,https://www.theesixtybets.xyz"
 ).split(",")
 
 app.add_middleware(
@@ -2715,6 +2715,51 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
 # respuesta y los eventos nunca llegan al cliente (verificado en produccion).
 # La actualizacion en vivo queda cubierta por el calentador de cache + el
 # polling de 60s del frontend.
+
+@app.get("/stats/datos-partido")
+def stats_datos_partido(
+    event_id: str,
+    sport: str = "soccer",
+    league: str = None,
+    user=Depends(get_current_user),
+):
+    """Extras del partido desde FotMob: arbitro, insights, goleadores y forma."""
+    if sport != "soccer":
+        raise HTTPException(400, "Solo futbol.")
+
+    try:
+        detalle = sports.get_game_detail(sport, event_id, league_code=league)
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo leer el partido: {exc}")
+
+    equipos = detalle.get("teams") or []
+    home = next((t for t in equipos if t.get("homeAway") == "home"), None)
+    away = next((t for t in equipos if t.get("homeAway") != "home"), None)
+    if not home or not away:
+        return {"ok": False, "motivo": "sin_partido"}
+
+    fm_id = None
+    try:
+        fm_id = fotmob.buscar_partido(home.get("name"), away.get("name"), detalle.get("date"))
+    except Exception as exc:
+        print(f"[stats/datos-partido] resolver {event_id}: {exc!r}", flush=True)
+
+    if not fm_id:
+        return {"ok": False, "motivo": "sin_datos"}
+
+    try:
+        extras = fotmob.extras_partido(fm_id, home.get("name") or "", away.get("name") or "")
+    except Exception as exc:
+        print(f"[stats/datos-partido] extras {fm_id}: {exc!r}", flush=True)
+        extras = None
+
+    if not extras:
+        return {"ok": False, "motivo": "sin_datos"}
+
+    extras["ok"] = True
+    extras["fuente"] = "FotMob"
+    return extras
+
 
 @app.get("/stats/alineacion")
 def stats_alineacion(

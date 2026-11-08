@@ -388,3 +388,154 @@ def once_probable(nombre_equipo, n=6, lado="home"):
         "bajas": [],
         "partidos": partidos,
     }
+
+
+
+# ---------------------------------------------------------------------------
+# EXTRAS DEL PARTIDO: arbitro, insights, goleadores y forma reciente
+# ---------------------------------------------------------------------------
+# Sale del mismo matchDetails que la alineacion (cache compartida), asi que
+# pedirlo no cuesta una llamada extra.
+
+_ETIQUETAS_STAT = {
+    "playerRating": "Nota",
+    "goals": "Goles",
+    "expectedGoals": "xG",
+    "goalAssist": "Asistencias",
+    "minsPlayedGoal": "Min/gol",
+    "ontargetScoringAtt": "Tiros a puerta",
+    "motm": "MVP",
+    "gamesPlayed": "Partidos",
+    "minsPlayed": "Minutos",
+}
+
+# FotMob manda los insights en ingles (su web los traduce en el navegador).
+# Aqui van las plantillas al español; las que no esten se muestran tal cual.
+_PLANTILLAS_ES = {
+    "insights_goals_team": "Ha marcado {0} goles en sus últimos {1} partidos",
+    "insights_goalless_team": "No ha marcado en sus últimos {0} partidos",
+    "insights_not_won_team": "No gana desde hace {0} partidos",
+    "h2h_undefeated": "{0} no pierde con {1} en sus últimos {2} duelos ({3}V, {4}E)",
+    "h2h_winstreak": "{0} ha ganado los últimos {2} partidos con {1}",
+    "insights_player_most_shots_on_target_for_team": "{0} es el que más tiros a puerta genera de {1} ({2})",
+    "insights_player_most_chances_for_team": "{0} es el que más ocasiones claras crea en {1} ({2})",
+    "insights_player_chances_created_rank_in_competition": "{0} es el {1}.º de la competición en ocasiones claras creadas ({2})",
+    "insights_player_saves_per_match_rank_in_competition": "{0} es el {1}.º de la competición en paradas por partido ({2})",
+}
+
+
+def _formatea_insight(item, local="", visita=""):
+    """Texto del insight en español (o el original si no hay plantilla)."""
+    crudo = _repara(item.get("text") or "")
+    plantilla = _PLANTILLAS_ES.get(item.get("localizedTextId") or "")
+    if not plantilla:
+        return crudo
+
+    valores = []
+    for v in item.get("statValues") or []:
+        if isinstance(v, dict):
+            # Los equipos y jugadores llegan como id + name: se usa el nombre
+            nombre = v.get("name")
+            valores.append(nombre if nombre else v.get("value"))
+            continue
+        texto = str(v)
+        if texto in ("home_team", "away_team"):
+            texto = local if texto == "home_team" else visita
+        valores.append(texto)
+
+    try:
+        return plantilla.format(*valores)
+    except (IndexError, KeyError):
+        return crudo
+
+
+def _texto_info(valor):
+    """`infoBox` trae a veces dict ({name/value}) y a veces str/int."""
+    if valor is None:
+        return ""
+    if isinstance(valor, dict):
+        return _repara(valor.get("name") or valor.get("value") or "")
+    return _repara(str(valor))
+
+
+def extras_partido(match_id, local="", visita=""):
+    """Arbitro, insights, comparativa de goleadores y forma reciente."""
+    datos = _get("matchDetails", {"matchId": match_id}, ttl=180)
+    contenido = (datos or {}).get("content") or {}
+    mf = contenido.get("matchFacts") or {}
+    if not mf:
+        return None
+
+    info = mf.get("infoBox") or {}
+
+    arbitro = None
+    ref = info.get("Referee") or {}
+    if ref.get("text"):
+        stats = {}
+        for s in ref.get("stats") or []:
+            tipo = s.get("type")
+            if tipo in ("matches", "yellowCards", "redCards", "fouls", "penalties"):
+                stats[tipo] = {
+                    "valor": s.get("value"),
+                    "media": s.get("average"),
+                    "vs": s.get("averageType") or "",
+                    "pct": s.get("fillPercentage"),
+                }
+        arbitro = {
+            "nombre": _repara(ref.get("text") or ""),
+            "pais": _repara(ref.get("country") or ""),
+            "bandera": ref.get("imgUrl"),
+            "liga": ref.get("leagueName") or "",
+            "stats": stats,
+        }
+
+    insights = []
+    for i in mf.get("insights") or []:
+        texto = _formatea_insight(i, local, visita)
+        if texto:
+            insights.append({"texto": texto, "color": i.get("color") or "#4ade80"})
+
+    goleadores = None
+    ts = mf.get("topScorers") or {}
+    if ts.get("homePlayer") and ts.get("awayPlayer"):
+        orden = ts.get("statsOrder") or []
+
+        def _goleador(p):
+            st = p.get("stats") or {}
+            filas = [
+                {"etiqueta": _ETIQUETAS_STAT.get(clave, clave), "valor": st[clave]}
+                for clave in orden
+                if clave in st and st[clave] is not None
+            ]
+            return {
+                "nombre": _repara(p.get("lastName") or p.get("fullName") or ""),
+                "completo": _repara(p.get("fullName") or ""),
+                "foto": foto_jugador(p.get("playerId")),
+                "filas": filas[:6],
+            }
+
+        goleadores = {
+            "titulo": ts.get("section") or "Goleadores",
+            "local": _goleador(ts["homePlayer"]),
+            "visita": _goleador(ts["awayPlayer"]),
+        }
+
+    forma = []
+    for lado in (mf.get("teamForm") or [])[:2]:
+        forma.append([
+            {
+                "resultado": f.get("resultString") or "",
+                "rival": f.get("imageUrl"),
+                "fecha": (f.get("date") or {}).get("utcTime"),
+            }
+            for f in (lado or [])[:5]
+        ])
+
+    return {
+        "arbitro": arbitro,
+        "insights": insights[:6],
+        "goleadores": goleadores,
+        "forma": forma,
+        "estadio": _texto_info(info.get("Stadium")),
+        "publico": _texto_info(info.get("Attendance")),
+    }
