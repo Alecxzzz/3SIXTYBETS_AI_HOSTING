@@ -4330,6 +4330,15 @@ FREE_ESPN_EVENTOS = [
             {"label": "SKY SPORTS", "url": "http://190.61.101.11:7050/play/a04g/index.m3u8"},
         ],
     },
+    {
+        # NBA: Houston Rockets vs Phoenix Suns.
+        # Señal unica: pagina embed (iframe), no HLS.
+        "sport": "nba",
+        "match": ("rockets", "suns"),
+        "opciones": [
+            {"label": "STREAM UNICO", "url": "https://gooz.aapmains.net/new-stream-embed/59567", "embed": True},
+        ],
+    },
 ]
 
 
@@ -4347,34 +4356,38 @@ def _free_espn_referer_de(url: str) -> str:
     return ""
 
 
-def _free_espn_opcion(label: str, url: str, referer: str | None = None) -> dict:
-    """Opcion normalizada: label, url y el referer que necesita la fuente."""
+def _free_espn_opcion(label: str, url: str, referer: str | None = None, embed=None) -> dict:
+    """Opcion normalizada: label, url, referer y si es embed (iframe) o HLS."""
     url = url or FREE_ESPN_STREAM_PRINCIPAL
     return {
         "label": label or "",
         "url": url,
         "referer": referer or _free_espn_referer_de(url),
+        "embed": _free_espn_es_embed(url, embed),
     }
 
 
 def _free_espn_opciones_de(nombre: str) -> list:
-    """Señales programadas para ese partido: [{"label", "url", "referer"}, ...].
+    """Señales programadas para ese partido.
 
     Manda "opciones" si el evento define varias señales; si no, su "stream";
     y si tampoco, la señal principal. Nunca devuelve una lista vacia.
+    Cada opcion: {label, url, referer, embed}.
     """
     low = (nombre or "").lower()
     for cfg in FREE_ESPN_EVENTOS:
         tokens = _free_espn_tokens(cfg)
         if tokens and all(t in low for t in tokens):
             varias = [
-                _free_espn_opcion(o.get("label"), o.get("url"), o.get("referer") or cfg.get("referer"))
+                _free_espn_opcion(
+                    o.get("label"), o.get("url"), o.get("referer") or cfg.get("referer"), o.get("embed")
+                )
                 for o in (cfg.get("opciones") or [])
                 if (o.get("url") or "").startswith("http")
             ]
             if varias:
                 return varias
-            return [_free_espn_opcion("", cfg.get("stream"), cfg.get("referer"))]
+            return [_free_espn_opcion("", cfg.get("stream"), cfg.get("referer"), cfg.get("embed"))]
     return [_free_espn_opcion("", None)]
 
 
@@ -4383,22 +4396,29 @@ def _free_espn_stream_de(nombre: str) -> str:
     return _free_espn_opciones_de(nombre)[0]["url"]
 
 
-def _free_espn_agenda(liga: str) -> list:
-    """Partidos del dia de una liga ESPN (sports cachea la respuesta 60s)."""
+def _free_espn_agenda(sport: str, liga: str | None) -> list:
+    """Partidos del dia de un deporte/liga ESPN (sports cachea 60s)."""
     import sports
 
     try:
-        data = sports.get_sport_games(FREE_ESPN_SPORT, liga)
+        data = sports.get_sport_games(sport or FREE_ESPN_SPORT, liga)
     except Exception:
         return []
     return data.get("games") or []
 
 
+def _free_espn_es_embed(url: str, marca=None) -> bool:
+    """True si la señal es una pagina embed (iframe) y no un HLS (.m3u8)."""
+    if marca is not None:
+        return bool(marca)
+    return ".m3u8" not in (url or "").lower()
+
+
 def _free_espn_buscar_partido(ahora=None):
     """Elige cual partido de FREE_ESPN_EVENTOS toca mostrar ahora.
 
-    Cada evento puede ser de una liga distinta ("league"); la agenda se
-    consulta una sola vez por liga programada.
+    Cada evento puede ser de un deporte/liga distinto ("sport"/"league"); la
+    agenda se consulta una sola vez por combinacion.
 
     Orden de preferencia:
     1. El que esta dentro de su ventana y sin terminar (se ve en vivo).
@@ -4408,22 +4428,27 @@ def _free_espn_buscar_partido(ahora=None):
     from datetime import datetime, timezone
 
     ahora = ahora or datetime.now(timezone.utc)
-    agendas = {}  # liga -> partidos consultados
+    agendas = {}  # (deporte, liga) -> partidos consultados
 
     candidatos = []
     for cfg in FREE_ESPN_EVENTOS:
         tokens = _free_espn_tokens(cfg)
         if not tokens:
             continue
-        liga = cfg.get("league") or FREE_ESPN_LEAGUE
-        if liga not in agendas:
-            agendas[liga] = _free_espn_agenda(liga)
-        for g in agendas[liga]:
+        deporte = cfg.get("sport") or FREE_ESPN_SPORT
+        liga = cfg.get("league") or (FREE_ESPN_LEAGUE if deporte == "soccer" else None)
+        clave = (deporte, liga)
+        if clave not in agendas:
+            agendas[clave] = _free_espn_agenda(deporte, liga)
+        for g in agendas[clave]:
             home = (g.get("home") or {}).get("name") or ""
             away = (g.get("away") or {}).get("name") or ""
             if all(t in f"{home} {away}".lower() for t in tokens):
                 apertura, cierre = _free_espn_ventana(g)
-                candidatos.append((cfg, g, apertura, cierre))
+                juego = dict(g)
+                juego["_sport"] = deporte
+                juego["_liga"] = liga
+                candidatos.append((cfg, juego, apertura, cierre))
                 break  # un solo juego por evento programado
 
     if not candidatos:
@@ -4496,7 +4521,7 @@ def free_espn_match():
     detail = {}
     try:
         import sports
-        detail = sports.get_game_detail(FREE_ESPN_SPORT, str(game.get("id"))) or {}
+        detail = sports.get_game_detail(game.get("_sport") or FREE_ESPN_SPORT, str(game.get("id"))) or {}
     except Exception:
         detail = {}
 
@@ -4596,10 +4621,16 @@ def free_espn_stream(request: Request):
     # --- Señales programadas: la pagina pinta un boton por opcion ---
     if FREE_ESPN_OPCIONES_PROGRAMADAS:
         proxy_base = _proxy_base(request)
-        opciones = [
-            {"label": o["label"], "url": _wrap(o["url"], proxy_base, o.get("referer") or None)}
-            for o in _free_espn_opciones_de((game or {}).get("name") or "")
-        ]
+        opciones = []
+        for o in _free_espn_opciones_de((game or {}).get("name") or ""):
+            if o.get("embed"):
+                # Pagina embed: se sirve tal cual para pintarla en un iframe
+                opciones.append({"label": o["label"], "url": o["url"], "embed": True})
+            else:
+                opciones.append({
+                    "label": o["label"],
+                    "url": _wrap(o["url"], proxy_base, o.get("referer") or None),
+                })
         return _free_espn_payload(opciones, cierre)
 
     # --- Candidatos (en orden de preferencia) ---

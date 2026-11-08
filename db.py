@@ -1332,9 +1332,26 @@ EVENT_MAX_AGE_S = 6 * 3600
 
 
 def public_event(row):
+    """Evento publico. La columna `sport` lleva "deporte|liga|hora de inicio".
+
+    Asi la web puede ordenar por hora y pintar el icono del deporte sin
+    migrar la tabla. Los eventos viejos (sin "|") siguen funcionando.
+    """
+    bruto = (row["sport"] or "").strip()
+    deporte = bruto
+    liga = ""
+    kickoff = None
+    if "|" in bruto:
+        partes = bruto.split("|")
+        deporte = (partes[0] or "").strip() or "soccer"
+        liga = (partes[1] or "").strip() if len(partes) > 1 else ""
+        kickoff = (partes[2] or "").strip() or None if len(partes) > 2 else None
+
     return {
         "id": row["id"],
-        "sport": row["sport"],
+        "sport": deporte,
+        "liga": liga,
+        "kickoff": kickoff,
         "name": row["name"],
         "stream": row["stream"],
         "referer": row.get("referer") or None,

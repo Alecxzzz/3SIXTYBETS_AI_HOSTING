@@ -187,7 +187,7 @@ class TestSenalPorPartido(unittest.TestCase):
     def test_inter_milan_usa_espn_3(self):
         self.assertEqual(
             main._free_espn_opciones_de(INTER["name"]),
-            [{"label": "", "url": main.FREE_ESPN_STREAM_PRINCIPAL, "referer": ""}],
+            [{"label": "", "url": main.FREE_ESPN_STREAM_PRINCIPAL, "referer": "", "embed": False}],
         )
 
     def test_referer_por_host_de_la_senal(self):
@@ -228,7 +228,7 @@ class TestSenalPorPartido(unittest.TestCase):
             opciones = main._free_espn_opciones_de(BAYERN["name"])
         self.assertEqual(
             opciones,
-            [{"label": "(buena)", "url": "http://senal/buena.m3u8", "referer": ""}],
+            [{"label": "(buena)", "url": "http://senal/buena.m3u8", "referer": "", "embed": False}],
         )
 
 

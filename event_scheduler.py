@@ -211,6 +211,7 @@ def _eventos_espn() -> list:
                     unicos.append(n)
 
             salida.append({
+                "sport_key": (path.split("/") or [""])[0],
                 "liga": liga,
                 "name": nombre,
                 "home": home,
@@ -269,7 +270,12 @@ def refresh_once() -> str:
             sin_destino += 1
             continue
         eventos.append({
-            "sport": ev["liga"],
+            # deporte|liga|hora de inicio: la columna `sport` es texto libre y
+            # asi la web puede ordenar por hora y pintar el icono del deporte
+            # sin migrar la tabla `events`.
+            "sport": "|".join(
+                [ev.get("sport_key") or "soccer", ev.get("liga") or "", ev.get("fecha") or ""]
+            ),
             "name": f"{ev['name']} · {etiqueta}"[:200],
             "stream": url,
             "type": tipo,
