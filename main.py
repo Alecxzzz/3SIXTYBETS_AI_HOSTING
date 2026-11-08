@@ -4305,7 +4305,11 @@ FREE_ESPN_STREAM_PRINCIPAL = "http://38.252.215.33:8000/play/a00l/index.m3u8"  #
 # FREE_ESPN_STREAM_PRINCIPAL = "http://190.61.47.54:8000/play/a02u/index.m3u8"  # ESPN 3 (segmentos inestables)
 # FREE_ESPN_STREAM_PRINCIPAL = "https://barinaslive1.boldmss.com/ESPN_3/ESPN_3.isml/ESPN_3.m3u8"  # ESPN 3 (barinaslive, 502)
 # Referer por host: barinaslive bloquea hotlinks (sin Referer propio responde 502)
-FREE_ESPN_REFERERS = {"barinaslive1.boldmss.com": "https://barinaslive1.boldmss.com/"}
+FREE_ESPN_REFERERS = {
+    "barinaslive1.boldmss.com": "https://barinaslive1.boldmss.com/",
+    # gooz: su endpoint de playlist exige este Referer (sin el responde 403)
+    "chatgpt.hereisman.net": "https://gooz.aapmains.net/",
+}
 FREE_ESPN_OPCIONES_PROGRAMADAS = True        # devuelve SOLO las señales programadas (Opción 1, 2...), sin cadena de respaldos
 # Respaldos: solo se usan si FREE_ESPN_OPCIONES_PROGRAMADAS = False
 FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN DEPORTES
@@ -4332,11 +4336,16 @@ FREE_ESPN_EVENTOS = [
     },
     {
         # NBA: Houston Rockets vs Phoenix Suns.
-        # Señal unica: pagina embed (iframe), no HLS.
+        # La pagina embed de gooz no se puede iframear (CSP frame-ancestors),
+        # pero su propio endpoint devuelve el HLS maestro: se reproduce nativo.
         "sport": "nba",
         "match": ("rockets", "suns"),
         "opciones": [
-            {"label": "STREAM UNICO", "url": "https://gooz.aapmains.net/new-stream-embed/59567", "embed": True},
+            {
+                "label": "STREAM UNICO",
+                "url": "https://chatgpt.hereisman.net/playlist/59567/load-playlist",
+                "embed": False,
+            },
         ],
     },
 ]
