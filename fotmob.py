@@ -409,14 +409,29 @@ _ETIQUETAS_STAT = {
     "minsPlayed": "Minutos",
 }
 
+# Cabeceras que FotMob manda en ingles para la comparativa de goleadores.
+_SECCIONES_ES = {
+    "Top scorers": "Máximos goleadores",
+    "Top scorer": "Máximo goleador",
+    "Most assists": "Máximos asistentes",
+}
+
 # FotMob manda los insights en ingles (su web los traduce en el navegador).
 # Aqui van las plantillas al español; las que no esten se muestran tal cual.
 _PLANTILLAS_ES = {
     "insights_goals_team": "Ha marcado {0} goles en sus últimos {1} partidos",
     "insights_goalless_team": "No ha marcado en sus últimos {0} partidos",
     "insights_not_won_team": "No gana desde hace {0} partidos",
+    "insights_undefeated_team": "Lleva {0} partidos sin perder",
+    "insights_not_clean_sheet": "No deja la portería a cero desde hace {0} partidos",
+    "insights_clean_sheets": "Es el equipo con más porterías a cero de la competición ({0})",
+    "insights_best_away": "Es el {0}.º mejor visitante de la temporada",
+    "insights_average_goals_per_match": "Promedia {0} goles por partido",
+    "insights_penalties_awarded": "Es el equipo al que más penaltis le pitan esta temporada ({0})",
+    "insights_penalties_conceded": "Es el equipo que más penaltis concede esta temporada ({0})",
     "h2h_undefeated": "{0} no pierde con {1} en sus últimos {2} duelos ({3}V, {4}E)",
     "h2h_winstreak": "{0} ha ganado los últimos {2} partidos con {1}",
+    "h2h_no_draws_v2": "{0} y {1} no han empatado ninguno de sus últimos {2} duelos",
     "insights_player_most_shots_on_target_for_team": "{0} es el que más tiros a puerta genera de {1} ({2})",
     "insights_player_most_chances_for_team": "{0} es el que más ocasiones claras crea en {1} ({2})",
     "insights_player_chances_created_rank_in_competition": "{0} es el {1}.º de la competición en ocasiones claras creadas ({2})",
@@ -458,6 +473,13 @@ def _texto_info(valor):
     return _repara(str(valor))
 
 
+def _redondea(valor):
+    """Deja los decimales a 2 cifras (xG llega como 3.2708001136779785)."""
+    if isinstance(valor, float) and not valor.is_integer():
+        return round(valor, 2)
+    return valor
+
+
 def extras_partido(match_id, local="", visita=""):
     """Arbitro, insights, comparativa de goleadores y forma reciente."""
     datos = _get("matchDetails", {"matchId": match_id}, ttl=180)
@@ -476,10 +498,10 @@ def extras_partido(match_id, local="", visita=""):
             tipo = s.get("type")
             if tipo in ("matches", "yellowCards", "redCards", "fouls", "penalties"):
                 stats[tipo] = {
-                    "valor": s.get("value"),
-                    "media": s.get("average"),
+                    "valor": _redondea(s.get("value")),
+                    "media": _redondea(s.get("average")),
                     "vs": s.get("averageType") or "",
-                    "pct": s.get("fillPercentage"),
+                    "pct": _redondea(s.get("fillPercentage")),
                 }
         arbitro = {
             "nombre": _repara(ref.get("text") or ""),
@@ -503,7 +525,7 @@ def extras_partido(match_id, local="", visita=""):
         def _goleador(p):
             st = p.get("stats") or {}
             filas = [
-                {"etiqueta": _ETIQUETAS_STAT.get(clave, clave), "valor": st[clave]}
+                {"etiqueta": _ETIQUETAS_STAT.get(clave, clave), "valor": _redondea(st[clave])}
                 for clave in orden
                 if clave in st and st[clave] is not None
             ]
@@ -514,8 +536,9 @@ def extras_partido(match_id, local="", visita=""):
                 "filas": filas[:6],
             }
 
+        seccion = ts.get("section") or ""
         goleadores = {
-            "titulo": ts.get("section") or "Goleadores",
+            "titulo": _SECCIONES_ES.get(seccion, seccion or "Goleadores"),
             "local": _goleador(ts["homePlayer"]),
             "visita": _goleador(ts["awayPlayer"]),
         }
