@@ -2716,6 +2716,68 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
 # La actualizacion en vivo queda cubierta por el calentador de cache + el
 # polling de 60s del frontend.
 
+@app.get("/stats/alineacion")
+def stats_alineacion(
+    event_id: str,
+    sport: str = "soccer",
+    league: str = None,
+    user=Depends(get_current_user),
+):
+    """Alineacion del partido: la OFICIAL de FotMob o, si aun no salio, el ONCE PROBABLE.
+
+    FotMob trae por jugador id, dorsal, posicion, nota, coordenadas en el campo
+    y la foto (images.fotmob.com/.../playerimages/{id}.png).
+    `league` es el codigo ESPN (ej. esp.1) que la web ya conoce del detalle.
+    """
+    if sport != "soccer":
+        raise HTTPException(400, "Las alineaciones solo estan disponibles para futbol.")
+
+    try:
+        detalle = sports.get_game_detail(sport, event_id, league_code=league)
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo leer el partido: {exc}")
+
+    equipos = detalle.get("teams") or []
+    home = next((t for t in equipos if t.get("homeAway") == "home"), None)
+    away = next((t for t in equipos if t.get("homeAway") != "home"), None)
+    if not home or not away:
+        raise HTTPException(404, "El partido no tiene equipos identificables.")
+
+    fm_id = None
+    try:
+        fm_id = fotmob.buscar_partido(home.get("name"), away.get("name"), detalle.get("date"))
+    except Exception as exc:
+        print(f"[stats/alineacion] resolver {event_id}: {exc!r}", flush=True)
+
+    if fm_id:
+        try:
+            oficial = fotmob.alineacion(fm_id)
+        except Exception as exc:
+            oficial = None
+            print(f"[stats/alineacion] alineacion {fm_id}: {exc!r}", flush=True)
+        if oficial:
+            oficial["ok"] = True
+            oficial["fuente"] = "FotMob"
+            return oficial
+
+    # Sin alineacion oficial: se calcula el once probable de cada equipo
+    local = visita = None
+    try:
+        local = fotmob.once_probable(home.get("name"))
+        visita = fotmob.once_probable(away.get("name"))
+    except Exception as exc:
+        print(f"[stats/alineacion] probable {event_id}: {exc!r}", flush=True)
+
+    if not local or not visita:
+        return {
+            "ok": False,
+            "motivo": "sin_datos",
+            "detalle": "Todavia no hay alineacion ni historial suficiente para calcularla.",
+        }
+
+    return {"ok": True, "tipo": "probable", "fuente": "FotMob", "local": local, "visita": visita}
+
+
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""

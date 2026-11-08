@@ -1257,7 +1257,7 @@ def _parse_lineups(data: dict) -> list:
     return salida
 
 
-def get_game_detail(sport: str, event_id: str) -> dict:
+def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -> dict:
     """Estadisticas completas de un partido via /summary de ESPN.
 
     Devuelve marcador, estado, linescores, estadisticas por equipo,
@@ -1266,7 +1266,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     if sport not in SPORTS:
         raise ValueError(f"Deporte no soportado: {sport}")
 
-    cache_key = f"detail:{sport}:{event_id}"
+    cache_key = f"detail:{sport}:{event_id}:{league_code or ''}"
     cached = _cache_get(cache_key, ttl=DETAIL_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
@@ -1379,9 +1379,9 @@ def get_game_detail(sport: str, event_id: str) -> dict:
                 return parsed
         return {"error": "Combate no encontrado", "games": []}
 
-    # Para soccer necesitamos la liga; la buscamos en el cache del scoreboard
-    league_code = None
-    if sport == "soccer":
+    # Para soccer necesitamos la liga. Si el llamador la conoce (la web la pasa
+    # desde el detalle) se usa tal cual; si no, se busca en el scoreboard de hoy.
+    if sport == "soccer" and not league_code:
         games_data = get_sport_games(sport)
         for g in games_data.get("games", []):
             if str(g.get("id")) == str(event_id):
@@ -1473,6 +1473,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         "clock": status.get("displayClock", ""),
         "period": status.get("period"),
         "situation": situation,
+        "date": comp.get("date") or "",
         "teams": teams_out,
         "head_to_head": h2h,
         "key_players": key_players,

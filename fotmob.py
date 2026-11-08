@@ -15,7 +15,7 @@ import json
 import threading
 import unicodedata
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -167,3 +167,224 @@ def prob_partido_ambos_marcan(equipo_id, n: int = 10):
     return int(round(b * 100 / len(partidos)))
 
 
+
+
+# ---------------------------------------------------------------------------
+# ALINEACIONES (oficial y ONCE PROBABLE) con foto de cada jugador
+# ---------------------------------------------------------------------------
+# FotMob expone en matchDetails -> content.lineup los dos equipos con
+# formation, rating, starters[], subs[] y unavailable[]; cada jugador trae
+# id, dorsal, posicion, NOTA y las coordenadas (horizontalLayout.x/y en 0..1)
+# que usa su propio campo. La foto va por CDN a partir del id:
+#   https://images.fotmob.com/image_resources/playerimages/{id}.png
+
+CDN_FOTO = "https://images.fotmob.com/image_resources/playerimages/{id}.png"
+
+# Nombres de cantera/filiales que no deben ganar la busqueda del equipo
+_RUIDO_EQUIPO = ("castilla", "u19", "u21", "u23", "(w)", " ii", " b", "reserves")
+
+
+def foto_jugador(pid):
+    return CDN_FOTO.format(id=pid) if pid else None
+
+
+def equipo_id(nombre):
+    """Nombre de equipo -> id de FotMob (cache 30 dias)."""
+    if not nombre:
+        return None
+    datos = _get("search/suggest", {"term": nombre}, ttl=30 * 24 * 3600)
+    if not isinstance(datos, list):
+        return None
+    for grupo in datos:
+        for s in grupo.get("suggestions") or []:
+            if s.get("type") != "team" or not s.get("id"):
+                continue
+            nombre_fm = (s.get("name") or "").lower()
+            if any(x in nombre_fm for x in _RUIDO_EQUIPO):
+                continue
+            return int(s["id"])
+    return None
+
+
+def _partidos_equipo(tid, ttl=900):
+    """Lista de partidos (pasados y futuros) de un equipo en FotMob."""
+    datos = _get("teams", {"id": tid}, ttl=ttl)
+    fixtures = ((datos or {}).get("fixtures") or {}).get("allFixtures") or {}
+    return fixtures.get("fixtures") or []
+
+
+
+
+def buscar_partido(local, visita, fecha=None):
+    """matchId de FotMob para local vs visita (nombre normalizado + fecha)."""
+    if not local or not visita:
+        return None
+
+    objetivo = {_clave(local), _clave(visita)}
+    cuando = _ts(fecha)
+    candidatos = []
+
+    for nombre in (local, visita):
+        tid = equipo_id(nombre)
+        if not tid:
+            continue
+        for f in _partidos_equipo(tid):
+            h = _clave(((f.get("home") or {}).get("name")) or "")
+            a = _clave(((f.get("away") or {}).get("name")) or "")
+            if not h or not a or not f.get("id"):
+                continue
+            exacto = objetivo <= {h, a}
+            parecido = any(
+                o and (o in h or h in o or o in a or a in o) and abs(len(o) - len(h)) <= 5
+                for o in objetivo
+            )
+            if not (exacto or parecido):
+                continue
+            ts = _ts((f.get("status") or {}).get("utcTime"))
+            dif = abs(ts - cuando) if (ts and cuando) else 0
+            candidatos.append((0 if exacto else 1, dif, f.get("id")))
+
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda c: (c[0], c[1]))
+    return candidatos[0][2]
+
+
+def _jugador(p):
+    """Normaliza un jugador de FotMob (titular o suplente)."""
+    rend = p.get("performance") or {}
+    h = p.get("horizontalLayout") or {}
+    return {
+        "id": p.get("id"),
+        "nombre": _repara(p.get("name") or ""),
+        "dorsal": p.get("shirtNumber") or "",
+        "pos_id": p.get("positionId"),
+        "x": round(float(h.get("x") or 0), 4),
+        "y": round(float(h.get("y") or 0), 4),
+        "nota": rend.get("rating"),
+        "edad": p.get("age"),
+        "pais": _repara(p.get("countryName") or ""),
+        "valor": p.get("marketValue"),
+        "foto": foto_jugador(p.get("id")),
+    }
+
+
+def _lado(equipo, lado):
+    equipo = equipo or {}
+    titulares = [_jugador(p) for p in equipo.get("starters") or []]
+    suplentes = [_jugador(p) for p in equipo.get("subs") or []]
+    bajas = []
+    for p in equipo.get("unavailable") or []:
+        info = p.get("injuryInformation") or {}
+        bajas.append({
+            "nombre": _repara(p.get("name") or ""),
+            "foto": foto_jugador(p.get("id")),
+            "motivo": _repara(info.get("type") or ""),
+        })
+    return {
+        "lado": lado,
+        "equipo": _repara(equipo.get("name") or ""),
+        "equipo_id": equipo.get("id"),
+        "formacion": equipo.get("formation") or "",
+        "nota": equipo.get("rating"),
+        "entrenador": _repara(((equipo.get("coach") or {}).get("name")) or ""),
+        "titulares": titulares,
+        "suplentes": suplentes,
+        "bajas": bajas,
+    }
+
+def _ts(iso):
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+
+def alineacion(match_id):
+    """Alineacion OFICIAL de un partido de FotMob (o None si aun no hay)."""
+    datos = _get("matchDetails", {"matchId": match_id}, ttl=120)
+    contenido = (datos or {}).get("content") or {}
+    lin = contenido.get("lineup") or {}
+    if not lin.get("homeTeam") or not lin.get("awayTeam"):
+        return None
+
+    local = _lado(lin.get("homeTeam"), "home")
+    visita = _lado(lin.get("awayTeam"), "away")
+    if not local["titulares"] or not visita["titulares"]:
+        return None
+    return {"tipo": "oficial", "local": local, "visita": visita}
+
+
+def _ultimos_finalizados(tid, n=6):
+    """Ultimos partidos terminados de un equipo (mas reciente primero)."""
+    finalizados = []
+    for f in _partidos_equipo(tid):
+        estado = f.get("status") or {}
+        if not (estado.get("finished") or estado.get("scoreStr")):
+            continue
+        finalizados.append((_ts(estado.get("utcTime")) or 0, f))
+    finalizados.sort(key=lambda x: x[0], reverse=True)
+    return [f for _, f in finalizados[:n]]
+
+
+def once_probable(nombre_equipo, n=6, lado="home"):
+    """ONCE PROBABLE: titulares mas repetidos en los ultimos N partidos.
+
+    Devuelve None si no hay datos suficientes. Se marca tipo="probable" para
+    que la web lo etiquete como tal (nunca se hace pasar por oficial).
+    """
+    tid = equipo_id(nombre_equipo)
+    if not tid:
+        return None
+
+    from collections import Counter
+
+    apariciones = Counter()
+    datos_jugador = {}
+    formaciones = Counter()
+    partidos = 0
+
+    for f in _ultimos_finalizados(tid, n):
+        lin = alineacion(f.get("id"))
+        if not lin:
+            continue
+        equipo = lin["local"] if str(lin["local"].get("equipo_id")) == str(tid) else lin["visita"]
+        if not equipo.get("titulares"):
+            continue
+        partidos += 1
+        if equipo.get("formacion"):
+            formaciones[equipo["formacion"]] += 1
+        for j in equipo["titulares"]:
+            clave = j.get("id") or j.get("nombre")
+            apariciones[clave] += 1
+            datos_jugador[clave] = j
+
+    if partidos < 2 or len(apariciones) < 11:
+        return None
+
+    elegidos = []
+    for clave, veces in apariciones.most_common():
+        j = dict(datos_jugador[clave])
+        j["apariciones"] = veces
+        j["de"] = partidos
+        j["posibilidad"] = int(round(veces * 100 / partidos))
+        elegidos.append(j)
+        if len(elegidos) == 11:
+            break
+
+    elegidos.sort(key=lambda j: (j.get("pos_id") or 99))
+    return {
+        "lado": lado,
+        "equipo": nombre_equipo,
+        "equipo_id": tid,
+        "formacion": formaciones.most_common(1)[0][0] if formaciones else "",
+        "nota": None,
+        "entrenador": "",
+        "titulares": elegidos,
+        "suplentes": [],
+        "bajas": [],
+        "partidos": partidos,
+    }
