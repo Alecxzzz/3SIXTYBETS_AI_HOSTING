@@ -2716,50 +2716,6 @@ def favoritos_quitar(tipo: str, ref_id: str, user=Depends(get_current_user)):
 # La actualizacion en vivo queda cubierta por el calentador de cache + el
 # polling de 60s del frontend.
 
-# ---- Embed oficial de SofaScore (alineaciones) ----
-# SofaScore bloquea las peticiones de servidor (403) y su API no manda CORS,
-# asi que el id del partido no se puede resolver solo: se declara aqui.
-#   SOFASCORE_IDS = {"<event_id de ESPN>": <id de SofaScore>}
-# El id se saca de la URL del partido en sofascore.com:
-#   https://www.sofascore.com/football/match/.../KP#id:16363918  -> 16363918
-
-def _sofascore_ids():
-    bruto = (os.getenv("SOFASCORE_IDS") or "").strip()
-    if not bruto:
-        return {}
-    try:
-        datos = json.loads(bruto)
-    except Exception:
-        print("[sofascore] SOFASCORE_IDS no es JSON valido", flush=True)
-        return {}
-    if not isinstance(datos, dict):
-        return {}
-    limpio = {}
-    for clave, valor in datos.items():
-        try:
-            limpio[str(clave)] = int(str(valor).strip())
-        except (TypeError, ValueError):
-            continue
-    return limpio
-
-
-@app.get("/stats/sofascore")
-def stats_sofascore(event_id: str, user=Depends(get_current_user)):
-    """Id del partido en SofaScore, para el embed oficial de alineaciones.
-
-    Devuelve id=null cuando no hay mapeo (el frontend usa su propia alineacion).
-    """
-    sofa_id = _sofascore_ids().get(str(event_id))
-    if not sofa_id:
-        return {"ok": True, "id": None}
-
-    return {
-        "ok": True,
-        "id": sofa_id,
-        "embed": f"https://widgets.sofascore.com/en/embed/lineups?id={sofa_id}&widgetTheme=dark",
-    }
-
-
 @app.get("/stats/game")
 def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
     """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""

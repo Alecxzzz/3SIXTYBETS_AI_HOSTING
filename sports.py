@@ -1199,14 +1199,24 @@ def _parse_lineups(data: dict) -> list:
 
     Devuelve una entrada por equipo:
       {equipo, equipo_id, lado, formacion, titulares[], suplentes[]}
-    Cada jugador: {nombre, dorsal, pos, orden, foto}. `orden` es el
-    formationPlace de ESPN (1 = portero), que es el orden real en el campo.
+    Cada jugador: {id, nombre, dorsal, pos, orden, foto, goles, asistencias,
+    amarillas, rojas, entra, sale}. `orden` es el formationPlace de ESPN
+    (1 = portero) y los goles/tarjetas salen de `stats` del roster.
     """
     def _num(valor):
         try:
             return int(str(valor).strip())
         except (TypeError, ValueError):
             return 99
+
+    def _stat(stats, nombre):
+        for s in stats or []:
+            if s.get("name") == nombre:
+                try:
+                    return int(float(s.get("value") or 0))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
 
     salida = []
     for entrada in data.get("rosters") or []:
@@ -1217,13 +1227,21 @@ def _parse_lineups(data: dict) -> list:
             foto = ath.get("headshot")
             if isinstance(foto, dict):
                 foto = foto.get("href")
+            stats = p.get("stats") or []
             jugador = {
+                "id": ath.get("id"),
                 "nombre": ath.get("shortName") or ath.get("displayName") or "?",
                 "dorsal": p.get("jersey"),
                 "pos": ((p.get("position") or {}).get("abbreviation")
                         or (p.get("position") or {}).get("name") or ""),
                 "orden": _num(p.get("formationPlace")),
                 "foto": foto,
+                "goles": _stat(stats, "totalGoals"),
+                "asistencias": _stat(stats, "goalAssists"),
+                "amarillas": _stat(stats, "yellowCards"),
+                "rojas": _stat(stats, "redCards"),
+                "entra": bool(p.get("subbedIn")),
+                "sale": bool(p.get("subbedOut")),
             }
             (titulares if p.get("starter") else suplentes).append(jugador)
 
