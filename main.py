@@ -4431,6 +4431,16 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #                 boton de la pagina, que ya escribe "Opción N".
 FREE_ESPN_EVENTOS = [
     {
+        # LaLiga: Atlético Madrid vs FC Barcelona (2026-11-08 20:00Z)
+        # OJO: ESPN lo publica como "Atlético Madrid vs Barcelona", con tilde.
+        "match": ("barcelona", "atletico"),
+        "league": "esp.1",
+        "opciones": [
+            {"label": "STREAM 1", "url": "https://bigboss.bemtv.cn/STREAM/732/playlist.m3u8"},
+            {"label": "STREAM 2", "url": "http://190.61.101.11:7050/play/a04g/index.m3u8"},
+        ],
+    },
+    {
         # LaLiga: Valencia CF vs Real Madrid (2026-11-07 20:00Z)
         # OJO: ESPN lo publica como "Real Madrid at Valencia" (Valencia local).
         "match": ("valencia", "real madrid"),
@@ -4458,9 +4468,17 @@ FREE_ESPN_EVENTOS = [
 ]
 
 
+def _sin_acentos(texto: str) -> str:
+    """Minusculas y sin tildes: ESPN escribe "Atlético" y los tokens no."""
+    import unicodedata
+
+    plano = unicodedata.normalize("NFKD", (texto or "").lower())
+    return "".join(c for c in plano if not unicodedata.combining(c))
+
+
 def _free_espn_tokens(cfg: dict) -> list:
-    """Palabras (minusculas) que identifican el partido de un evento programado."""
-    return [t.lower() for t in (cfg.get("match") or ())]
+    """Palabras (minusculas, sin tildes) que identifican el partido de un evento."""
+    return [_sin_acentos(t) for t in (cfg.get("match") or ())]
 
 
 def _free_espn_referer_de(url: str) -> str:
@@ -4490,7 +4508,7 @@ def _free_espn_opciones_de(nombre: str) -> list:
     y si tampoco, la señal principal. Nunca devuelve una lista vacia.
     Cada opcion: {label, url, referer, embed}.
     """
-    low = (nombre or "").lower()
+    low = _sin_acentos(nombre)
     for cfg in FREE_ESPN_EVENTOS:
         tokens = _free_espn_tokens(cfg)
         if tokens and all(t in low for t in tokens):
@@ -4559,7 +4577,7 @@ def _free_espn_buscar_partido(ahora=None):
         for g in agendas[clave]:
             home = (g.get("home") or {}).get("name") or ""
             away = (g.get("away") or {}).get("name") or ""
-            if all(t in f"{home} {away}".lower() for t in tokens):
+            if all(t in _sin_acentos(f"{home} {away}") for t in tokens):
                 apertura, cierre = _free_espn_ventana(g)
                 juego = dict(g)
                 juego["_sport"] = deporte
