@@ -1179,6 +1179,66 @@ def _parse_team_stats(data: dict) -> dict:
     return stats_by_team
 
 
+def _logo_equipo(team: dict):
+    """URL del escudo. ESPN lo manda en `logos[]` (no en `logo`)."""
+    logos = team.get("logos") or []
+    if isinstance(logos, list) and logos:
+        primero = logos[0]
+        if isinstance(primero, dict):
+            return primero.get("href")
+        if isinstance(primero, str):
+            return primero
+    logo = team.get("logo")
+    if isinstance(logo, list):
+        return logo[0] if logo else None
+    return logo
+
+
+def _parse_lineups(data: dict) -> list:
+    """Alineaciones desde `rosters` del summary de ESPN.
+
+    Devuelve una entrada por equipo:
+      {equipo, equipo_id, lado, formacion, titulares[], suplentes[]}
+    Cada jugador: {nombre, dorsal, pos, orden, foto}. `orden` es el
+    formationPlace de ESPN (1 = portero), que es el orden real en el campo.
+    """
+    def _num(valor):
+        try:
+            return int(str(valor).strip())
+        except (TypeError, ValueError):
+            return 99
+
+    salida = []
+    for entrada in data.get("rosters") or []:
+        equipo = entrada.get("team") or {}
+        titulares, suplentes = [], []
+        for p in entrada.get("roster") or []:
+            ath = p.get("athlete") or {}
+            foto = ath.get("headshot")
+            if isinstance(foto, dict):
+                foto = foto.get("href")
+            jugador = {
+                "nombre": ath.get("shortName") or ath.get("displayName") or "?",
+                "dorsal": p.get("jersey"),
+                "pos": ((p.get("position") or {}).get("abbreviation")
+                        or (p.get("position") or {}).get("name") or ""),
+                "orden": _num(p.get("formationPlace")),
+                "foto": foto,
+            }
+            (titulares if p.get("starter") else suplentes).append(jugador)
+
+        titulares.sort(key=lambda j: j.get("orden") or 99)
+        salida.append({
+            "equipo": equipo.get("displayName") or equipo.get("name") or "",
+            "equipo_id": equipo.get("id"),
+            "lado": entrada.get("homeAway"),
+            "formacion": entrada.get("formation") or "",
+            "titulares": titulares,
+            "suplentes": suplentes,
+        })
+    return salida
+
+
 def get_game_detail(sport: str, event_id: str) -> dict:
     """Estadisticas completas de un partido via /summary de ESPN.
 
@@ -1333,7 +1393,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
             "name": team.get("displayName", "?"),
             "short_name": team.get("shortDisplayName", team.get("name", "?")),
             "abbr": team.get("abbreviation", ""),
-            "logo": (team.get("logo") or [None])[0] if isinstance(team.get("logo"), list) else team.get("logo"),
+            "logo": _logo_equipo(team),
             "color": f"#{team.get('color')}" if team.get("color") else None,
             "alt_color": f"#{team.get('alternateColor')}" if team.get("alternateColor") else None,
             "score": _parse_number(competitor.get("score")),
@@ -1367,6 +1427,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
     h2h = _parse_head_to_head(data)
     recent = _parse_recent_games(data)
     key_players = _parse_key_players(data)
+    lineups = _parse_lineups(data)
 
     # Asignar ultimos partidos a cada equipo
     for t in teams_out:
@@ -1397,6 +1458,7 @@ def get_game_detail(sport: str, event_id: str) -> dict:
         "teams": teams_out,
         "head_to_head": h2h,
         "key_players": key_players,
+        "lineups": lineups,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache_set(cache_key, result)
