@@ -1374,6 +1374,227 @@ def _parse_lineups(data: dict) -> list:
     return salida
 
 
+# ---------------------------------------------------------------------------
+# ANALYTICS NBA: cuatro factores, ritmo/eficiencia, caja de jugadores y rachas
+# ---------------------------------------------------------------------------
+# Todo se calcula desde el box score y los plays de ESPN (nada inventado).
+# Formulas: Dean Oliver (4 factores), possessions = FGA + 0.44*FTA - OREB + TOV,
+# OffRtg = 100*PTS/poss, Pace = poss*48/minutos.
+
+_STATS_JUGADOR = {
+    "minutes": "min",
+    "points": "pts",
+    "rebounds": "reb",
+    "assists": "ast",
+    "turnovers": "to",
+    "steals": "stl",
+    "blocks": "blk",
+    "offensiveRebounds": "oreb",
+    "defensiveRebounds": "dreb",
+    "fouls": "pf",
+    "plusMinus": "plus",
+}
+
+_COMBINADAS_JUGADOR = {
+    "fieldGoalsMade-fieldGoalsAttempted": ("fgm", "fga"),
+    "threePointFieldGoalsMade-threePointFieldGoalsAttempted": ("fg3m", "fg3a"),
+    "freeThrowsMade-freeThrowsAttempted": ("ftm", "fta"),
+}
+
+# Mismas claves combinadas, pero para los TOTALES del equipo
+_COMBINADAS_EQUIPO = dict(_COMBINADAS_JUGADOR)
+
+
+def _porcentaje_seguro(parte, total, decimales=1):
+    if not total:
+        return None
+    return round(parte * 100 / total, decimales)
+
+
+def _minutos_jugados(state: str, period, clock: str) -> float:
+    """Minutos que se llevan jugados (48 por partido, 5 por prorroga)."""
+    try:
+        periodo = int(period or 0)
+    except (TypeError, ValueError):
+        periodo = 0
+
+    if state == "post":
+        if periodo <= 4:
+            return 12.0 * max(periodo, 4)
+        return 48.0 + 5.0 * (periodo - 4)
+
+    if not periodo:
+        return 0.0
+    restante = 0.0
+    texto = str(clock or "").strip()
+    if ":" in texto:
+        mm, _, ss = texto.partition(":")
+        try:
+            restante = int(mm) + int(ss) / 60
+        except ValueError:
+            restante = 0.0
+    if periodo <= 4:
+        return 12.0 * (periodo - 1) + max(0.0, 12.0 - restante)
+    return 48.0 + 5.0 * (periodo - 5) + max(0.0, 5.0 - restante)
+
+
+def _totales_equipo(box_team: dict) -> dict:
+    """Totales numericos del equipo (a partir de las mismas filas que se pintan)."""
+    totales = {}
+    for s in box_team.get("statistics") or []:
+        clave = s.get("name") or ""
+        valor = s.get("displayValue")
+        if clave in _COMBINADAS_EQUIPO:
+            a, b = _COMBINADAS_EQUIPO[clave]
+            partes = str(valor or "").split("-")
+            if len(partes) == 2:
+                totales[a] = _numero(partes[0]) or 0.0
+                totales[b] = _numero(partes[1]) or 0.0
+            continue
+        totales[clave] = _numero(valor)
+    return totales
+
+
+def _analytics_equipo(totales: dict, totales_rival: dict, minutos: float) -> dict:
+    """Cuatro factores + ritmo y eficiencia (estilo Cleaning the Glass)."""
+    fga = totales.get("fga") or 0
+    fgm = totales.get("fgm") or 0
+    fg3m = totales.get("fg3m") or 0
+    fta = totales.get("fta") or 0
+    ftm = totales.get("ftm") or 0
+    oreb = totales.get("offensiveRebounds") or 0
+    dreb_rival = totales_rival.get("defensiveRebounds") or 0
+    tov = totales.get("totalTurnovers") or totales.get("turnovers") or 0
+    pts = totales.get("points")
+    if pts is None:
+        pts = 2 * fgm + fg3m + ftm
+
+    posesiones = fga + 0.44 * fta - oreb + tov
+    ortg = round(100 * pts / posesiones, 1) if posesiones else None
+    pace = round(posesiones * 48 / minutos, 1) if minutos and posesiones else None
+
+    return {
+        "posesiones": round(posesiones, 1) if posesiones else None,
+        "ortg": ortg,
+        "pace": pace,
+        "efg": _porcentaje_seguro(fgm + 0.5 * fg3m, fga),
+        "tov_pct": _porcentaje_seguro(tov, fga + 0.44 * fta + tov),
+        "oreb_pct": _porcentaje_seguro(oreb, oreb + dreb_rival),
+        "ftr": _porcentaje_seguro(fta, fga),
+        "ts": _porcentaje_seguro(pts, 2 * (fga + 0.44 * fta)),
+        "puntos": pts,
+        "minutos": round(minutos, 1),
+    }
+
+
+def _parse_players_box(data: dict) -> list:
+    """Caja completa de jugadores (15 por equipo) con metricas derivadas."""
+    salida = []
+    for bloque in (data.get("boxscore") or {}).get("players") or []:
+        equipo = bloque.get("team") or {}
+        for est in bloque.get("statistics") or []:
+            claves = list(est.get("keys") or [])
+            jugadores = []
+            for fila in est.get("athletes") or []:
+                atleta = fila.get("athlete") or {}
+                valores = fila.get("stats") or []
+                if not atleta.get("displayName") or fila.get("didNotPlay"):
+                    continue
+
+                crudos = dict(zip(claves, valores))
+                jugador = {
+                    "id": atleta.get("id"),
+                    "nombre": atleta.get("displayName"),
+                    "corto": atleta.get("shortName") or atleta.get("displayName"),
+                    "foto": (atleta.get("headshot") or {}).get("href"),
+                    "dorsal": atleta.get("jersey"),
+                    "posicion": (atleta.get("position") or {}).get("abbreviation") or "",
+                    "titular": bool(fila.get("starter")),
+                }
+
+                for clave_espn, clave in _STATS_JUGADOR.items():
+                    jugador[clave] = _numero(crudos.get(clave_espn))
+
+                for clave_espn, (a, b) in _COMBINADAS_JUGADOR.items():
+                    partes = str(crudos.get(clave_espn) or "").split("-")
+                    if len(partes) == 2:
+                        jugador[a] = _numero(partes[0]) or 0
+                        jugador[b] = _numero(partes[1]) or 0
+                    else:
+                        jugador[a], jugador[b] = 0, 0
+
+                fga = jugador.get("fga") or 0
+                fta = jugador.get("fta") or 0
+                pts = jugador.get("pts") or 0
+                jugador["ts"] = _porcentaje_seguro(pts, 2 * (fga + 0.44 * fta)) if (fga or fta) else None
+                jugador["efg"] = (
+                    _porcentaje_seguro((jugador.get("fgm") or 0) + 0.5 * (jugador.get("fg3m") or 0), fga)
+                    if fga
+                    else None
+                )
+                jugador["game_score"] = round(
+                    pts
+                    + 0.4 * (jugador.get("fgm") or 0)
+                    - 0.7 * fga
+                    - 0.4 * (fta - (jugador.get("ftm") or 0))
+                    + 0.7 * (jugador.get("oreb") or 0)
+                    + 0.3 * (jugador.get("dreb") or 0)
+                    + (jugador.get("stl") or 0)
+                    + 0.7 * (jugador.get("ast") or 0)
+                    + 0.7 * (jugador.get("blk") or 0)
+                    - 0.4 * (jugador.get("pf") or 0)
+                    - (jugador.get("to") or 0),
+                    1,
+                )
+                jugadores.append(jugador)
+
+            jugadores.sort(key=lambda j: (j.get("game_score") or 0), reverse=True)
+            salida.append({
+                "equipo": equipo.get("displayName") or "",
+                "equipo_id": str(equipo.get("id") or ""),
+                "jugadores": jugadores,
+            })
+    return salida
+
+
+def _parse_rachas(plays: list, maximo: int = 3) -> list:
+    """Rachas anotadoras (8-0 o mas seguidas) sacadas del play-by-play."""
+    rachas = []
+    actual = None
+
+    for p in plays or []:
+        if not p.get("scoringPlay"):
+            continue
+        try:
+            valor = int(p.get("scoreValue") or 0)
+        except (TypeError, ValueError):
+            valor = 0
+        if valor <= 0:
+            continue
+        equipo = str((p.get("team") or {}).get("id") or "")
+        if not equipo:
+            continue
+
+        if actual and actual["equipo"] == equipo:
+            actual["puntos"] += valor
+        else:
+            if actual and actual["puntos"] >= 8:
+                rachas.append(actual)
+            actual = {
+                "equipo": equipo,
+                "puntos": valor,
+                "periodo": (p.get("period") or {}).get("number"),
+                "reloj": (p.get("clock") or {}).get("displayValue") or "",
+                "local": p.get("homeScore"),
+                "visita": p.get("awayScore"),
+            }
+    if actual and actual["puntos"] >= 8:
+        rachas.append(actual)
+
+    rachas.sort(key=lambda r: r["puntos"], reverse=True)
+    return rachas[:maximo]
+
+
 def _parse_predictor(data: dict) -> dict | None:
     """Probabilidad de victoria del modelo de ESPN ("Matchup Predictor").
 
@@ -1433,15 +1654,29 @@ def _parse_injuries(data: dict) -> list:
     return salida
 
 
-def _parse_winprobability(data: dict, ultimos: int = 12) -> list:
-    """Curva de probabilidad en vivo (solo partidos en juego/finalizados)."""
+def _parse_winprobability(data: dict, maximo: int = 120) -> list:
+    """Curva de probabilidad en vivo (solo partidos en juego/finalizados).
+
+    ESPN manda un punto por jugada (400+): se recorta a `maximo` repartiendo
+    uniformemente para que la curva se dibuje igual pero pese poco.
+    """
     puntos = data.get("winprobability") or []
-    recortados = []
-    for p in puntos[-ultimos:]:
-        recortados.append({
-            "pct": _numero(p.get("homeWinPercentage")),
-            "juego": p.get("playId"),
-        })
+    if not puntos:
+        return []
+    paso = max(1, len(puntos) // maximo)
+
+    def _punto(p):
+        local = _numero(p.get("homeWinPercentage"))
+        empate = _numero(p.get("tiePercentage")) or 0.0
+        visita = _numero(p.get("awayWinPercentage"))
+        if visita is None and local is not None:
+            visita = round(max(0.0, 1 - local - empate), 4)
+        return {"local": local, "visita": visita, "empate": empate}
+
+    recortados = [_punto(p) for p in puntos[::paso]]
+    final = _punto(puntos[-1])
+    if recortados and recortados[-1] != final:
+        recortados.append(final)
     return recortados
 
 
@@ -1641,9 +1876,39 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
     injuries = _parse_injuries(data)
     win_probability = _parse_winprobability(data) if type_info.get("state") in ("in", "post") else []
 
+    # Analytics: cuatro factores, ritmo/eficiencia, caja de jugadores y rachas
+    analytics = {}
+    players_box = []
+    rachas = []
+    if sport == "nba" and type_info.get("state") in ("in", "post"):
+        try:
+            minutos = _minutos_jugados(type_info.get("state"), status.get("period"), status.get("displayClock"))
+            totales = {}
+            for box_team in (data.get("boxscore") or {}).get("teams") or []:
+                tid = str((box_team.get("team") or {}).get("id") or "")
+                if tid:
+                    totales[tid] = _totales_equipo(box_team)
+            if len(totales) >= 2:
+                ids = list(totales)
+                for i, tid in enumerate(ids):
+                    rival = totales[ids[1 - i]] if len(ids) > 1 else {}
+                    analytics[tid] = _analytics_equipo(totales[tid], rival, minutos)
+                # Diferencia de eficiencia (el "net rating" del partido)
+                if len(ids) >= 2:
+                    a, b = analytics[ids[0]], analytics[ids[1]]
+                    if a.get("ortg") is not None and b.get("ortg") is not None:
+                        a["net"] = round(a["ortg"] - b["ortg"], 1)
+                        b["net"] = round(b["ortg"] - a["ortg"], 1)
+            players_box = _parse_players_box(data)
+            rachas = _parse_rachas(data.get("plays"))
+        except Exception as exc:  # nunca romper el detalle por un calculo extra
+            print(f"[Detail] analytics nba {event_id}: {exc!r}", flush=True)
+            analytics, players_box, rachas = {}, [], []
+
     # Asignar ultimos partidos a cada equipo
     for t in teams_out:
         t["recent_games"] = recent.get(str(t["id"]), {}).get("recent", [])
+        t["analytics"] = analytics.get(str(t["id"]))
 
     # Backfill: si el summary no trae ultimos partidos (pasa en futbol),
     # buscarlos via scoreboard por rango de fechas.
@@ -1676,6 +1941,8 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
         "odds": odds,
         "injuries": injuries,
         "win_probability": win_probability,
+        "players_box": players_box,
+        "runs": rachas,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache_set(cache_key, result)
