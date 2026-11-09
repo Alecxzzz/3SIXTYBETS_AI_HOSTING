@@ -1595,6 +1595,135 @@ def _parse_rachas(plays: list, maximo: int = 3) -> list:
     return rachas[:maximo]
 
 
+# ---------------------------------------------------------------------------
+# PROMEDIOS DE TEMPORADA POR JUGADOR (NBA)
+# ---------------------------------------------------------------------------
+# ESPN los da en "byathlete": un array de valores por categoria y otro array con
+# los nombres de cada posicion. Se juntan ambos y se calcula TS%.
+_PROMEDIOS_URL = "https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/statistics/byathlete"
+_PROMEDIOS_TTL = 6 * 3600  # 6 h: los promedios se mueven una vez al dia
+_promedios_cache: dict = {}
+
+
+def _fila_promedios(atleta: dict, categorias: list) -> dict:
+    """Convierte un atleta de byathlete en un dict plano nombre->valor."""
+    valores = {}
+    for cat in atleta.get("categories") or []:
+        nombres = next(
+            (c.get("names") or [] for c in categorias if c.get("name") == cat.get("name")),
+            [],
+        )
+        for i, valor in enumerate(cat.get("values") or []):
+            if i < len(nombres):
+                valores[nombres[i]] = valor
+
+    fga = valores.get("avgFieldGoalsAttempted") or 0
+    fta = valores.get("avgFreeThrowsAttempted") or 0
+    pts = valores.get("avgPoints") or 0
+    ts = round(pts * 100 / (2 * (fga + 0.44 * fta)), 1) if (fga or fta) else None
+
+    def num(clave, decimales=1):
+        valor = valores.get(clave)
+        return round(valor, decimales) if isinstance(valor, (int, float)) else None
+
+    return {
+        "partidos": num("gamesPlayed", 0),
+        "min": num("avgMinutes"),
+        "pts": num("avgPoints"),
+        "reb": num("avgRebounds"),
+        "ast": num("avgAssists"),
+        "stl": num("avgSteals"),
+        "blk": num("avgBlocks"),
+        "to": num("avgTurnovers"),
+        "fga": num("avgFieldGoalsAttempted"),
+        "fg_pct": num("fieldGoalPct"),
+        "fg3_pct": num("threePointFieldGoalPct"),
+        "ft_pct": num("freeThrowPct"),
+        "ts": ts,
+        "dd": num("doubleDouble", 0),
+        "td": num("tripleDouble", 0),
+    }
+
+
+def _cargar_promedios_liga() -> dict:
+    """Descarga los promedios de TODA la liga y los agrupa por equipo.
+
+    ESPN ignora el filtro `team=`, pero con limit alto devuelve los ~582
+    jugadores de una sola vez; se agrupan por `teamId`. Una llamada cada 6 h.
+    """
+    from datetime import datetime, timezone
+
+    ahora = datetime.now(timezone.utc).timestamp()
+    cache = _promedios_cache.get("liga")
+    if cache and ahora - cache[0] < _PROMEDIOS_TTL:
+        return cache[1]
+
+    temporada = datetime.now(timezone.utc).year
+    datos = None
+    for intento in (temporada, temporada - 1):
+        try:
+            datos = _espn_get(
+                _PROMEDIOS_URL,
+                params={
+                    "region": "us",
+                    "lang": "en",
+                    "contentorigin": "espn",
+                    "isqualified": "false",
+                    "page": 1,
+                    "limit": 600,
+                    "sort": "offensive.avgPoints:desc",
+                    "season": intento,
+                    "seasontype": 2,
+                },
+                timeout=25,
+            ).json()
+        except Exception as exc:
+            print(f"[promedios] liga temporada {intento}: {exc!r}", flush=True)
+            datos = None
+        if datos and datos.get("athletes"):
+            break
+
+    if not datos:
+        _promedios_cache["liga"] = (ahora, {})
+        return {}
+
+    categorias = datos.get("categories") or []
+    por_equipo: dict = {}
+    for fila in datos.get("athletes") or []:
+        atleta = fila.get("athlete") or {}
+        team_id = str(atleta.get("teamId") or "")
+        if not atleta.get("id") or not team_id:
+            continue
+        numeros = _fila_promedios(fila, categorias)
+        if not numeros.get("partidos"):
+            continue
+        por_equipo.setdefault(team_id, []).append({
+            "id": atleta.get("id"),
+            "nombre": atleta.get("displayName"),
+            "corto": atleta.get("shortName") or atleta.get("displayName"),
+            "foto": (atleta.get("headshot") or {}).get("href"),
+            "posicion": (atleta.get("position") or {}).get("abbreviation") or "",
+            "edad": atleta.get("age"),
+            **numeros,
+        })
+
+    for lista in por_equipo.values():
+        lista.sort(key=lambda j: (j.get("pts") or 0), reverse=True)
+
+    _promedios_cache["liga"] = (ahora, por_equipo)
+    return por_equipo
+
+
+def nba_promedios_equipo(team_id, limite: int = 14) -> list:
+    """Promedios de temporada de cada jugador del equipo (cache 6 h)."""
+    try:
+        por_equipo = _cargar_promedios_liga()
+    except Exception as exc:
+        print(f"[promedios] equipo {team_id}: {exc!r}", flush=True)
+        return []
+    return (por_equipo.get(str(team_id)) or [])[:limite]
+
+
 def _parse_predictor(data: dict) -> dict | None:
     """Probabilidad de victoria del modelo de ESPN ("Matchup Predictor").
 
@@ -1636,20 +1765,32 @@ def _parse_odds_pickcenter(data: dict) -> dict | None:
 
 
 def _parse_injuries(data: dict) -> list:
-    """Bajas por equipo con estado (Out / Day-To-Day) y zona lesionada."""
+    """Bajas por equipo con estado, zona, lado, fecha de vuelta y foto."""
     salida = []
     for bloque in data.get("injuries") or []:
         equipo = (bloque.get("team") or {}).get("displayName") or ""
         for i in bloque.get("injuries") or []:
-            atleta = (i.get("athlete") or {}).get("displayName") or ""
-            if not atleta:
+            atleta = i.get("athlete") or {}
+            nombre = atleta.get("displayName") or atleta.get("fullName") or ""
+            if not nombre:
                 continue
+            detalles = i.get("details") or {}
+            estado = i.get("status") or ""
+            foto = (atleta.get("headshot") or {}).get("href")
+            if not foto and atleta.get("id"):
+                foto = f"https://a.espncdn.com/i/headshots/nba/players/full/{atleta['id']}.png"
             salida.append({
+                "id": atleta.get("id"),
                 "equipo": equipo,
-                "jugador": atleta,
-                "estado": i.get("status") or "",
-                "zona": (i.get("details") or {}).get("type") or "",
-                "comentario": ((i.get("details") or {}).get("detail") or "")[:120],
+                "jugador": nombre,
+                "corto": atleta.get("shortName") or nombre,
+                "foto": foto,
+                "estado": estado,
+                "grave": estado.lower() == "out",
+                "zona": detalles.get("type") or "",
+                "lado": detalles.get("side") or "",
+                "vuelta": detalles.get("returnDate") or "",
+                "comentario": (detalles.get("detail") or "")[:120],
             })
     return salida
 
@@ -1909,6 +2050,16 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
     for t in teams_out:
         t["recent_games"] = recent.get(str(t["id"]), {}).get("recent", [])
         t["analytics"] = analytics.get(str(t["id"]))
+
+    # Promedios de temporada de cada jugador (solo NBA): alimenta la pestaña
+    # Alineacion, que hasta ahora salia VACIA en baloncesto.
+    if sport == "nba":
+        for t in teams_out:
+            try:
+                t["promedios"] = nba_promedios_equipo(t.get("id"))
+            except Exception as exc:
+                print(f"[Detail] promedios team={t.get('id')}: {exc!r}", flush=True)
+                t["promedios"] = []
 
     # Backfill: si el summary no trae ultimos partidos (pasa en futbol),
     # buscarlos via scoreboard por rango de fechas.
