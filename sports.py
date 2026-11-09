@@ -107,6 +107,33 @@ STAT_TRANSLATIONS = {
     "benchPoints": "Puntos del banquillo",
     "leadChanges": "Cambios de liderato",
     "timesTied": "Veces empatadas",
+    # NBA: claves que ESPN manda EN EL BOX SCORE de un partido (no coinciden con
+    # las de arriba y antes se pintaban tal cual en ingles: "totalRebounds").
+    "totalRebounds": "Rebotes",
+    "fouls": "Faltas",
+    "pointsInPaint": "Puntos en la pintura",
+    "turnoverPoints": "Puntos tras perdida",
+    "pointsOffTurnovers": "Puntos tras perdida",
+    "teamTurnovers": "Perdidas de equipo",
+    "totalTurnovers": "Perdidas totales",
+    "technicalFouls": "Faltas tecnicas",
+    "totalTechnicalFouls": "Faltas tecnicas (totales)",
+    "flagrantFouls": "Faltas flagrantes",
+    "largestLead": "Mayor ventaja",
+    "leadPercentage": "Tiempo por delante %",
+    # NBA: medias de temporada que ESPN manda cuando el partido aun no empezo
+    "avgPoints": "Puntos por partido",
+    "avgPointsAgainst": "Puntos recibidos por partido",
+    "avgRebounds": "Rebotes por partido",
+    "avgAssists": "Asistencias por partido",
+    "avgBlocks": "Tapones por partido",
+    "avgSteals": "Robos por partido",
+    "avgTurnovers": "Perdidas por partido",
+    "avgTeamTurnovers": "Perdidas de equipo por partido",
+    "avgTotalTurnovers": "Perdidas totales por partido",
+    "streak": "Racha",
+    "Last Ten Games": "Ultimos 10 partidos (V-D)",
+    "gamesPlayed": "Partidos jugados",
     # NFL
     "totalYards": "Yardas totales",
     "netPassingYards": "Yardas por pase",
@@ -1139,37 +1166,127 @@ def _parse_key_players(data: dict) -> list:
     return players[:8]  # Limitar a 8 jugadores
 
 
+# ESPN manda tiros y porcentajes como claves separadas:
+#   "fieldGoalsMade-fieldGoalsAttempted" = "44-96"   (anotados-intentados)
+#   "fieldGoalPct"                       = "46"      (entero, redondeado)
+# Aqui se agrupan para poder pintar "Tiros de campo" = "44-96" y recalcular el
+# porcentaje EXACTO desde los tiros (44/96 = 45.8%), en vez de usar el 46 de ESPN.
+_STATS_COMBINADAS = {
+    "fieldGoalsMade-fieldGoalsAttempted": ("Tiros de campo", "fieldGoalPct"),
+    "threePointFieldGoalsMade-threePointFieldGoalsAttempted": ("Triples", "threePointFieldGoalPct"),
+    "freeThrowsMade-freeThrowsAttempted": ("Tiros libres", "freeThrowPct"),
+}
+
+
+def _numero(texto):
+    """Convierte "45.5", "1,234" o "45.5%" en float (None si no se puede)."""
+    if texto is None:
+        return None
+    limpio = str(texto).replace("%", "").replace(",", "").strip()
+    try:
+        return float(limpio)
+    except ValueError:
+        return None
+
+
+def _porcentaje(anotados, intentados):
+    """"44-96" -> 45.8 (un decimal, sin inventar)."""
+    if not intentados:
+        return None
+    return round(anotados * 100 / intentados, 1)
+
+
+def _texto_racha(valor):
+    """ESPN manda "W5"/"L2": en español V5/D2."""
+    texto = str(valor or "")
+    if len(texto) < 2:
+        return texto
+    letra, resto = texto[0].upper(), texto[1:]
+    if letra == "W":
+        return f"V{resto}"
+    if letra == "L":
+        return f"D{resto}"
+    return texto
+
+
 def _parse_team_stats(data: dict) -> dict:
-    """Estadisticas comparadas por equipo desde boxscore."""
+    """Estadisticas comparadas por equipo desde boxscore.
+
+    Devuelve por equipo [{name, label, value}]:
+    - name  : etiqueta traducida al español (o la de ESPN si no hay traduccion)
+    - label : valor listo para pintar ("44-96", "45.8%", "51")
+    - value : numero (para barras y para la IA); None en los valores combinados
+    """
     def _translate(name):
         return STAT_TRANSLATIONS.get(name, name)
 
+    def _etiqueta(key, item):
+        return _translate(key) if key in STAT_TRANSLATIONS else (
+            item.get("displayName") or item.get("shortDisplayName") or key or item.get("abbreviation") or ""
+        )
+
     def _flatten_stats(items):
         out = []
+        conteos = {}  # clave_pct -> (anotados, intentados)
+
         for s in items or []:
             if not s:
                 continue
             if "stats" in s:
+                # Estadisticas agrupadas por categoria (box score de futbol, etc.)
                 category = s.get("displayName") or s.get("name") or ""
                 for sub in s["stats"] or []:
-                    if sub:
-                        key = sub.get("name") or ""
-                        translated = _translate(key) if key in STAT_TRANSLATIONS else (
-                            sub.get("displayName") or sub.get("shortDisplayName") or key or ""
-                        )
-                        prefix = f"{category} - {translated}" if category else translated
-                        out.append({
-                            "name": prefix,
-                            "label": sub.get("displayValue", ""),
-                        })
-            else:
-                key = s.get("name") or ""
+                    if not sub:
+                        continue
+                    key = sub.get("name") or ""
+                    translated = _etiqueta(key, sub)
+                    prefix = f"{category} - {translated}" if category else translated
+                    out.append({
+                        "name": prefix,
+                        "label": sub.get("displayValue", ""),
+                        "value": _numero(sub.get("value") if sub.get("value") is not None else sub.get("displayValue")),
+                    })
+                continue
+
+            key = s.get("name") or ""
+            valor = s.get("displayValue", "")
+
+            # "44-96" -> fila legible + conteo para recalcular el porcentaje
+            if key in _STATS_COMBINADAS:
+                titulo, clave_pct = _STATS_COMBINADAS[key]
+                partes = str(valor).split("-")
+                if len(partes) == 2:
+                    anotados, intentados = _numero(partes[0]), _numero(partes[1])
+                    if anotados is not None and intentados is not None:
+                        conteos[clave_pct] = (anotados, intentados)
                 out.append({
-                    "name": _translate(key) if key in STAT_TRANSLATIONS else (
-                        s.get("displayName") or s.get("shortDisplayName") or key or s.get("abbreviation") or ""
-                    ),
-                    "label": s.get("displayValue", ""),
+                    "name": f"{titulo} (anotados-intentados)",
+                    "label": valor,
+                    "value": None,
                 })
+                continue
+
+            out.append({
+                "name": _etiqueta(key, s),
+                "label": _texto_racha(valor) if key == "streak" else valor,
+                "value": _numero(s.get("value") if s.get("value") is not None else valor),
+            })
+
+        # Porcentajes recalculados con los tiros reales (mas preciso que ESPN)
+        for fila in out:
+            clave = None
+            for nombre_pct in ("fieldGoalPct", "threePointFieldGoalPct", "freeThrowPct"):
+                if fila["name"] == STAT_TRANSLATIONS.get(nombre_pct, nombre_pct) and nombre_pct in conteos:
+                    clave = nombre_pct
+                    break
+            if not clave:
+                continue
+            anotados, intentados = conteos[clave]
+            exacto = _porcentaje(anotados, intentados)
+            if exacto is not None:
+                fila["label"] = f"{exacto}%"
+                fila["value"] = exacto
+
         return out
 
     stats_by_team = {}
@@ -1255,6 +1372,77 @@ def _parse_lineups(data: dict) -> list:
             "suplentes": suplentes,
         })
     return salida
+
+
+def _parse_predictor(data: dict) -> dict | None:
+    """Probabilidad de victoria del modelo de ESPN ("Matchup Predictor").
+
+    Viene SOLO antes del partido: {"homeTeam": {"gameProjection": "59.1"}, ...}.
+    Es un dato real y calibrado, mejor que una probabilidad inventada.
+    """
+    pred = data.get("predictor") or {}
+    casa = pred.get("homeTeam") or {}
+    fuera = pred.get("awayTeam") or {}
+    if not casa and not fuera:
+        return None
+    return {
+        "local": _numero(casa.get("gameProjection")),
+        "visita": _numero(fuera.get("gameProjection")),
+        "titulo": pred.get("header") or "",
+    }
+
+
+def _parse_odds_pickcenter(data: dict) -> dict | None:
+    """Cuotas del partido (DraftKings via ESPN): linea, total y moneyline.
+
+    El scoreboard de NBA suele venir sin cuotas; `pickcenter` del summary sí
+    las trae y son las que usa el mercado.
+    """
+    centro = data.get("pickcenter") or []
+    if not centro:
+        return None
+    elegido = centro[0] or {}
+    casa = elegido.get("homeTeamOdds") or {}
+    fuera = elegido.get("awayTeamOdds") or {}
+    return {
+        "casa": (elegido.get("provider") or {}).get("name") or "",
+        "linea": elegido.get("spread"),
+        "total": elegido.get("overUnder"),
+        "ml_local": casa.get("moneyLine"),
+        "ml_visita": fuera.get("moneyLine"),
+        "detalle": elegido.get("details") or "",
+    }
+
+
+def _parse_injuries(data: dict) -> list:
+    """Bajas por equipo con estado (Out / Day-To-Day) y zona lesionada."""
+    salida = []
+    for bloque in data.get("injuries") or []:
+        equipo = (bloque.get("team") or {}).get("displayName") or ""
+        for i in bloque.get("injuries") or []:
+            atleta = (i.get("athlete") or {}).get("displayName") or ""
+            if not atleta:
+                continue
+            salida.append({
+                "equipo": equipo,
+                "jugador": atleta,
+                "estado": i.get("status") or "",
+                "zona": (i.get("details") or {}).get("type") or "",
+                "comentario": ((i.get("details") or {}).get("detail") or "")[:120],
+            })
+    return salida
+
+
+def _parse_winprobability(data: dict, ultimos: int = 12) -> list:
+    """Curva de probabilidad en vivo (solo partidos en juego/finalizados)."""
+    puntos = data.get("winprobability") or []
+    recortados = []
+    for p in puntos[-ultimos:]:
+        recortados.append({
+            "pct": _numero(p.get("homeWinPercentage")),
+            "juego": p.get("playId"),
+        })
+    return recortados
 
 
 def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -> dict:
@@ -1447,6 +1635,12 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
     key_players = _parse_key_players(data)
     lineups = _parse_lineups(data)
 
+    # Datos de mercado y modelo que ESPN ya manda y antes se tiraban
+    predictor = _parse_predictor(data)
+    odds = _parse_odds_pickcenter(data)
+    injuries = _parse_injuries(data)
+    win_probability = _parse_winprobability(data) if type_info.get("state") in ("in", "post") else []
+
     # Asignar ultimos partidos a cada equipo
     for t in teams_out:
         t["recent_games"] = recent.get(str(t["id"]), {}).get("recent", [])
@@ -1478,6 +1672,10 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
         "head_to_head": h2h,
         "key_players": key_players,
         "lineups": lineups,
+        "predictor": predictor,
+        "odds": odds,
+        "injuries": injuries,
+        "win_probability": win_probability,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache_set(cache_key, result)

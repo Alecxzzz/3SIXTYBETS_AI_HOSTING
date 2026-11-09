@@ -417,8 +417,12 @@ def contexto_espn(mensaje: str) -> str:
             records = ", ".join(r for r in (t.get("records") or []) if r) or "N/A"
             lineas.append(f"\n{nombre} (record: {records})")
             for s in (t.get("statistics") or [])[:8]:
-                if s.get("displayValue"):
-                    lineas.append(f"  - {s.get('name')}: {s.get('displayValue')}")
+                # OJO: las filas traen "label" (no "displayValue", que es la clave
+                # de ESPN): con displayValue esta linea NUNCA se cumplia y la IA
+                # analizaba sin ninguna estadistica del partido.
+                valor = s.get("label") or s.get("displayValue")
+                if valor:
+                    lineas.append(f"  - {s.get('name')}: {valor}")
 
             # Los partidos recientes se procesan aqui (no se pasan crudos) porque
             # "Rays 6 @ Yankees 1" es ambiguo y el modelo lo interpretaba mal:
@@ -467,6 +471,42 @@ def contexto_espn(mensaje: str) -> str:
                         lineas.append(f"  - {str(m)[:160]}")
             except Exception:
                 pass
+
+        # Modelo y mercado: ESPN da su probabilidad (Matchup Predictor) y las
+        # cuotas reales (DraftKings). Antes se ignoraban y la IA "estimaba" la
+        # probabilidad por su cuenta, que es justo lo que el prompt prohibe.
+        try:
+            pred = detail.get("predictor") or {}
+            if pred.get("local") is not None and pred.get("visita") is not None:
+                lineas.append(
+                    f"\nProbabilidad ESPN (modelo propio): local {pred.get('local')}% "
+                    f"- visitante {pred.get('visita')}%"
+                )
+        except Exception:
+            pass
+
+        try:
+            cuotas = detail.get("odds") or {}
+            if cuotas.get("linea") or cuotas.get("total") or cuotas.get("ml_local"):
+                lineas.append(
+                    f"Cuotas reales ({cuotas.get('casa') or 'casa de apuestas'}): "
+                    f"linea={cuotas.get('linea') or 'N/A'}, total={cuotas.get('total') or 'N/A'}, "
+                    f"ML local={cuotas.get('ml_local') or 'N/A'}, ML visitante={cuotas.get('ml_visita') or 'N/A'}"
+                )
+        except Exception:
+            pass
+
+        # Bajas: en NBA (descansos, carga de partidos) es el factor que mas mueve
+        # el resultado y no se estaba pasando al modelo.
+        try:
+            bajas = detail.get("injuries") or []
+            if bajas:
+                lineas.append("\nBajas confirmadas (ESPN):")
+                for b in bajas[:10]:
+                    extra = f" ({b.get('zona')})" if b.get("zona") else ""
+                    lineas.append(f"  - {b.get('equipo')}: {b.get('jugador')} - {b.get('estado')}{extra}")
+        except Exception:
+            pass
 
         # PROMEDIOS de corners/tarjetas/faltas por equipo (cadena FotMob ->
         # ESPN). Antes el contexto de la conversacion solo traia goles y H2H,
