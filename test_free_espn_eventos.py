@@ -62,6 +62,17 @@ NUGGETS = {
 }
 MPD = ("https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/cjglydxghe/"
        "out/v1/8977baf175da4b94873194613dd3fe55/cenc.mpd?ck=token")
+# 76ers vs Celtics: la PRINCIPAL esta atada a la IP del cliente (token + ?ip=)
+SIXERS = {
+    "name": "Boston Celtics at Philadelphia 76ers",
+    "date": "2026-11-11T01:00Z",
+    "state": "in",
+    "home": {"name": "Philadelphia 76ers"},
+    "away": {"name": "Boston Celtics"},
+}
+KHALA = ("https://khala.futlivehd.com/max1/index.m3u8?ip=190.212.210.156"
+         "&token=0754be40fa1a61f2880cbb08762fd9fe1623a543-e9-1794397221-1794343221")
+CLAVE_76 = "36a385124dcdfb2f0969935065e03afa:ccecd65514dff22eae493b975ccf9a9e"
 
 
 def _utc(texto: str) -> datetime:
@@ -335,6 +346,37 @@ class TestEndpointStream(unittest.TestCase):
         self.assertEqual(opcion["label"], "STREAM 1")
         self.assertEqual(opcion["url"], MPD)
         self.assertTrue(opcion.get("dash"))
+        self.assertNotIn("/hls-proxy", opcion["url"])
+
+    def test_senal_directa_se_entrega_sin_pasar_por_el_proxy(self):
+        # La PRINCIPAL del 76ers lleva ?ip= del cliente: proxied da 403, asi que
+        # el backend entrega la URL tal cual y el navegador la pide desde su IP.
+        eventos = [{
+            "sport": "nba",
+            "match": ("celtics", "76ers"),
+            "opciones": [{"label": "PRINCIPAL", "url": KHALA, "embed": False, "directo": True}],
+        }]
+        data = self._get_stream(SIXERS, extra_eventos=eventos).json()
+        self.assertEqual(len(data["opciones"]), 1)
+        opcion = data["opciones"][0]
+        self.assertEqual(opcion["url"], KHALA)
+        self.assertTrue(opcion.get("directo"))
+        self.assertNotIn("/hls-proxy", opcion["url"])
+
+    def test_senal_dash_con_clearkey_entrega_la_llave(self):
+        eventos = [{
+            "sport": "nba",
+            "match": ("celtics", "76ers"),
+            "opciones": [{"label": "NBA DASH", "url": MPD, "embed": False,
+                          "clearkey": CLAVE_76}],
+        }]
+        opcion = self._get_stream(SIXERS, extra_eventos=eventos).json()["opciones"][0]
+        self.assertTrue(opcion.get("dash"))
+        self.assertEqual(opcion.get("drm"), {
+            "type": "clearkey",
+            "kid": "36a385124dcdfb2f0969935065e03afa",
+            "key": "ccecd65514dff22eae493b975ccf9a9e",
+        })
         self.assertNotIn("/hls-proxy", opcion["url"])
 
 

@@ -4469,7 +4469,42 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #   "opciones" -> lista [{"label", "url"}] si el partido tiene VARIAS
 #                 señales; reemplaza a "stream". El label se agrega al
 #                 boton de la pagina, que ya escribe "Opción N".
+#                 Claves opcionales de cada opcion:
+#                   "embed": False   -> es un manifest, no una pagina
+#                   "clearkey"       -> "kid:key" de un DASH CENC ClearKey
+#                   "directo": True  -> NO pasar por /hls-proxy (señal atada
+#                                       a la IP del usuario: el proxy usa otra
+#                                       IP y la fuente responde 403)
 FREE_ESPN_EVENTOS = [
+    {
+        # NBA: Boston Celtics vs Philadelphia 76ers (2026-11-11 01:00Z = 20:00 ET).
+        # OJO: ESPN lo publica como "Boston Celtics at Philadelphia 76ers"
+        # (76ers local).
+        "sport": "nba",
+        "match": ("celtics", "76ers"),
+        "opciones": [
+            {
+                # PRINCIPAL: HLS con token + ip= del cliente. CORS "*", asi que
+                # el navegador la pide directamente desde SU IP. Proxied da 403.
+                "label": "PRINCIPAL",
+                "url": ("https://khala.futlivehd.com/max1/index.m3u8?ip=190.212.210.156"
+                        "&token=0754be40fa1a61f2880cbb08762fd9fe1623a543-e9-1794397221-1794343221"),
+                "embed": False,
+                "directo": True,
+            },
+            {
+                # DASH de la NBA (Amazon IVS) cifrado CENC. El manifest anuncia
+                # Widevine/PlayReady, pero la llave es ClearKey (KID
+                # 36a38512-4dcd-fb2f-0969-935065e03afa), asi que se reproduce
+                # con dash.js + ClearKey CDM del navegador.
+                "label": "NBA DASH",
+                "url": ("https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/dx5hfbpk7u"
+                        "/out/v1/c14185a397544650b9761d43ad2e8e91/cenc.mpd"),
+                "embed": False,
+                "clearkey": "36a385124dcdfb2f0969935065e03afa:ccecd65514dff22eae493b975ccf9a9e",
+            },
+        ],
+    },
     {
         # NBA: Los Angeles Lakers vs Atlanta Hawks (2026-11-10 00:00Z = 19:00 ET).
         # OJO: ESPN lo publica como "Los Angeles Lakers at Atlanta Hawks"
@@ -4554,15 +4589,25 @@ def _free_espn_referer_de(url: str) -> str:
     return ""
 
 
-def _free_espn_opcion(label: str, url: str, referer: str | None = None, embed=None) -> dict:
-    """Opcion normalizada: label, url, referer y si es embed (iframe) o HLS."""
+def _free_espn_opcion(label: str, url: str, referer: str | None = None, embed=None,
+                      clearkey: str | None = None, directo=None) -> dict:
+    """Opcion normalizada: label, url, referer y si es embed (iframe) o HLS.
+
+    "clearkey" ("kid:key") y "directo" solo se agregan cuando el evento los
+    define: asi el resto de las opciones mantiene la misma forma de siempre.
+    """
     url = url or FREE_ESPN_STREAM_PRINCIPAL
-    return {
+    opcion = {
         "label": label or "",
         "url": url,
         "referer": referer or _free_espn_referer_de(url),
         "embed": _free_espn_es_embed(url, embed),
     }
+    if clearkey:
+        opcion["clearkey"] = str(clearkey).strip()
+    if directo:
+        opcion["directo"] = True
+    return opcion
 
 
 def _free_espn_opciones_de(nombre: str) -> list:
@@ -4570,7 +4615,8 @@ def _free_espn_opciones_de(nombre: str) -> list:
 
     Manda "opciones" si el evento define varias señales; si no, su "stream";
     y si tampoco, la señal principal. Nunca devuelve una lista vacia.
-    Cada opcion: {label, url, referer, embed}.
+    Cada opcion: {label, url, referer, embed} (+ "clearkey"/"directo" si el
+    evento los define).
     """
     low = _sin_acentos(nombre)
     for cfg in FREE_ESPN_EVENTOS:
@@ -4578,7 +4624,8 @@ def _free_espn_opciones_de(nombre: str) -> list:
         if tokens and all(t in low for t in tokens):
             varias = [
                 _free_espn_opcion(
-                    o.get("label"), o.get("url"), o.get("referer") or cfg.get("referer"), o.get("embed")
+                    o.get("label"), o.get("url"), o.get("referer") or cfg.get("referer"),
+                    o.get("embed"), o.get("clearkey"), o.get("directo"),
                 )
                 for o in (cfg.get("opciones") or [])
                 if (o.get("url") or "").startswith("http")
@@ -4840,7 +4887,21 @@ def free_espn_stream(request: Request):
                 # DASH (.mpd): se entrega la URL directa. El proxy HLS no
                 # reescribe manifests DASH, y el flag "dash" le dice a la
                 # pagina que no es un m3u8 (no debe pasarlo por hls.js).
-                opciones.append({"label": o["label"], "url": o["url"], "dash": True})
+                item = {"label": o["label"], "url": o["url"], "dash": True}
+                clave = (o.get("clearkey") or "").strip()
+                if ":" in clave:
+                    # DASH CENC con llave conocida: dash.js la usa con el CDM
+                    # ClearKey del navegador (no hace falta servidor de licencia).
+                    kid, _, key = clave.partition(":")
+                    item["drm"] = {"type": "clearkey",
+                                   "kid": kid.strip().lower(),
+                                   "key": key.strip().lower()}
+                opciones.append(item)
+            elif o.get("directo"):
+                # Señal atada a la IP del cliente (token + ?ip=): el proxy usa
+                # la IP del servidor y la fuente responde 403. Se entrega la URL
+                # tal cual y el navegador la pide desde su propia IP.
+                opciones.append({"label": o["label"], "url": o["url"], "directo": True})
             else:
                 opciones.append({
                     "label": o["label"],
