@@ -802,8 +802,19 @@ def ids_favoritos_picks(user_id: str) -> set:
 # Mercados PROHIBIDOS: "sin empate" (Draw No Bet) se retiro del catalogo
 # porque confundia ("Liverpool empate no apuesta (DNB)"). Si un modelo lo
 # devuelve igual, el pick se descarta: nunca se muestra en el dashboard.
+#
+# Tenis: los mercados de PRIMER JUEGO/PUNTO al servicio ("Primer juego con
+# servicio", "Ganador del primer juego al saque") tambien se prohiben:
+#   * No hay fuente gratis que diga quien gano el primer juego: el resolver
+#     solo tiene el marcador final, asi que esos picks se quedaban PENDIENTES
+#     para siempre (data_engine/pick_parser.py ya los devuelve como None).
+#   * Peor: la IA los publicaba renombrados como "... - Ganador", y esa
+#     palabra hacia que mercado_resoluble() los diera por buenos. Con la frase
+#     prohibida el pick se rechaza al generar (reanaliza con otro mercado) y
+#     los ya guardados dejan de mostrarse (_pick_calidad_ok).
 MERCADOS_PROHIBIDOS = (
     "sin empate", "empate no", "no apuesta", "draw no bet", "dnb",
+    "primer juego", "juego con servicio", "primer punto",
 )
 
 
@@ -948,7 +959,9 @@ MERCADOS_TENIS = [
     "Hitos de doble faltas",
     "Hitos de doble faltas jugador A",
     "Hitos de doble faltas jugador B",
-    "Primer juego con servicio",
+    # 'Primer juego con servicio' se retiro del catalogo: sin fuente de datos
+    # el resolver no lo puede comprobar y la IA lo colaba como '... - Ganador'.
+    # Ahora esta en MERCADOS_PROHIBIDOS (no se ofrece ni se muestra).
     "Primer set handicap de juegos",
     "Primer set total juegos under/over",
     "Segundo set total juegos under/over",

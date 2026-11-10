@@ -171,5 +171,52 @@ class TestMercadosDeOtroDeporte(unittest.TestCase):
                 )
 
 
+class TestMercadoProhibidoPrimerJuego(unittest.TestCase):
+    """'Primer juego con servicio' (tenis) ya no se ofrece ni se muestra.
+
+    Regresion: se publicaban picks 'Yannick Hanfmann - Primer juego con
+    servicio - Ganador' con cuota 1.22 y 82% de confianza. El resolver no
+    tiene forma de comprobarlos (solo ve el marcador final), asi que quedaban
+    pendientes para siempre; y el sufijo '- Ganador' hacia que
+    mercado_resoluble() los aceptara como si fueran un moneyline.
+    """
+
+    TITULO = "Primer juego con servicio - Ganador"
+    MERCADO = "Yannick Hanfmann - Primer juego con servicio - Ganador"
+
+    def test_fuera_del_catalogo_de_tenis(self):
+        self.assertNotIn("Primer juego con servicio", d.MERCADOS_TENIS)
+        items = d.catalogo_mercados()["tennis"]["mercados"]
+        self.assertFalse([i for i in items if "primer juego" in i["mercado"].lower()])
+
+    def test_prohibido_aunque_la_ia_lo_disfrace_de_ganador(self):
+        self.assertTrue(d._mercado_prohibido(self.MERCADO))
+        self.assertTrue(d._mercado_prohibido(self.TITULO, "Yannick Hanfmann"))
+        # El resto del catalogo de tenis no se ve afectado.
+        self.assertFalse(d._mercado_prohibido("Ganador", "Total juegos", "Over 22.5"))
+        self.assertFalse(d._mercado_prohibido("Primer set ganador"))
+
+    def test_pick_ya_guardado_deja_de_mostrarse(self):
+        pick = {
+            "homeName": "Yannick Hanfmann",
+            "awayName": "Max Dahlien",
+            "eventName": "Yannick Hanfmann vs Max Dahlien",
+            "market": self.MERCADO,
+            "titulo": self.TITULO,
+            "selection": "Yannick Hanfmann",
+            "odds": 1.22,
+            "rationale": "Saque solido en el arranque del partido.",
+        }
+        self.assertFalse(d._pick_calidad_ok(pick))
+        # Y al generarlo se rechaza con "prohibido" (se reanaliza con otro).
+        self.assertEqual(
+            d._motivo_rechazo_pick(pick, {"sport": "tennis"}, [], self.MERCADO),
+            "prohibido",
+        )
+        # El mismo pick con un mercado permitido si se muestra.
+        permitido = dict(pick, market="Ganador", titulo="Ganador - Yannick Hanfmann")
+        self.assertTrue(d._pick_calidad_ok(permitido))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
