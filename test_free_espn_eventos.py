@@ -13,6 +13,8 @@ Lo que se protege:
 - Cada partido usa SUS propias señales: "stream" (una) u "opciones" (varias,
   p.ej. Opción 1 ESPN Colombia + Opción 2 Portugués). Con
   FREE_ESPN_OPCIONES_PROGRAMADAS = True el endpoint devuelve exactamente esas.
+- Una señal DASH (.mpd) sale SIN pasar por /hls-proxy (el proxy solo reescribe
+  HLS), marcada con "dash": True.
 """
 import contextlib
 import unittest
@@ -51,6 +53,15 @@ INTER = {
     "home": {"name": "AC Milan"},
     "away": {"name": "Internazionale"},
 }
+NUGGETS = {
+    "name": "Denver Nuggets at Houston Rockets",
+    "date": "2026-11-10T01:30Z",
+    "state": "in",
+    "home": {"name": "Houston Rockets"},
+    "away": {"name": "Denver Nuggets"},
+}
+MPD = ("https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/cjglydxghe/"
+       "out/v1/8977baf175da4b94873194613dd3fe55/cenc.mpd?ck=token")
 
 
 def _utc(texto: str) -> datetime:
@@ -232,6 +243,25 @@ class TestSenalPorPartido(unittest.TestCase):
         )
 
 
+class TestSenalDash(unittest.TestCase):
+    """Una señal DASH (.mpd) NO es un m3u8 ni una pagina embed."""
+
+    def test_detecta_manifest_dash(self):
+        self.assertTrue(main._free_espn_es_dash(MPD))
+        self.assertFalse(main._free_espn_es_dash("http://senal/espn3.m3u8"))
+        self.assertFalse(main._free_espn_es_dash(""))
+
+    def test_senal_dash_marcada_embed_false_no_va_por_iframe(self):
+        eventos = [{
+            "sport": "nba",
+            "match": ("nuggets", "rockets"),
+            "opciones": [{"label": "STREAM 1", "url": MPD, "embed": False}],
+        }]
+        with mock.patch.object(main, "FREE_ESPN_EVENTOS", eventos):
+            opciones = main._free_espn_opciones_de(NUGGETS["name"])
+        self.assertEqual(opciones, [{"label": "STREAM 1", "url": MPD, "referer": "", "embed": False}])
+
+
 class TestEndpointStream(unittest.TestCase):
     """Con señales programadas, /tv-live/stream entrega una opcion por señal."""
 
@@ -290,6 +320,22 @@ class TestEndpointStream(unittest.TestCase):
         self.assertEqual(data["opciones"][1]["label"], "(Portugués)")
         self.assertIn("http%3A%2F%2Fsenal%2Fespn.m3u8", data["opciones"][0]["url"])
         self.assertIn("http%3A%2F%2Fsenal%2Fpt.m3u8", data["opciones"][1]["url"])
+
+    def test_senal_dash_se_entrega_sin_pasar_por_el_proxy_hls(self):
+        # El proxy /hls-proxy solo reescribe m3u8: un .mpd debe salir tal cual
+        # (con "dash": True) para que sus segmentos resuelvan contra su base.
+        eventos = [{
+            "sport": "nba",
+            "match": ("nuggets", "rockets"),
+            "opciones": [{"label": "STREAM 1", "url": MPD, "embed": False}],
+        }]
+        data = self._get_stream(NUGGETS, extra_eventos=eventos).json()
+        self.assertEqual(len(data["opciones"]), 1)
+        opcion = data["opciones"][0]
+        self.assertEqual(opcion["label"], "STREAM 1")
+        self.assertEqual(opcion["url"], MPD)
+        self.assertTrue(opcion.get("dash"))
+        self.assertNotIn("/hls-proxy", opcion["url"])
 
 
 if __name__ == "__main__":

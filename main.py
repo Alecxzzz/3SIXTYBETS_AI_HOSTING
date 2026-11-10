@@ -4471,6 +4471,46 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #                 boton de la pagina, que ya escribe "Opción N".
 FREE_ESPN_EVENTOS = [
     {
+        # NBA: Los Angeles Lakers vs Atlanta Hawks (2026-11-10 00:00Z = 19:00 ET).
+        # OJO: ESPN lo publica como "Los Angeles Lakers at Atlanta Hawks"
+        # (Hawks local).
+        # Señal de gooz (https://gooz.aapmains.net/new-stream-embed/59721):
+        # su pagina embed NO se puede iframear (CSP frame-ancestors), pero su
+        # propio endpoint devuelve el HLS maestro: se reproduce nativo. El
+        # Referer que exige el host (https://gooz.aapmains.net/) lo pone
+        # FREE_ESPN_REFERERS automaticamente.
+        "sport": "nba",
+        "match": ("lakers", "hawks"),
+        "opciones": [
+            {
+                "label": "STREAM 1",
+                "url": "https://chatgpt.hereisman.net/playlist/59721/load-playlist",
+                "embed": False,
+            },
+        ],
+    },
+    {
+        # NBA: Denver Nuggets vs Houston Rockets (2026-11-10 01:30Z = 20:30 ET).
+        # OJO: ESPN lo publica como "Denver Nuggets at Houston Rockets"
+        # (Rockets local).
+        # Señal de la NBA (Amazon IVS): manifest DASH ".mpd" y va CIFRADO
+        # (CENC: Widevine + PlayReady), no es un m3u8. Por eso:
+        #   - "embed": False -> es un manifest, NO una pagina para iframe.
+        #   - /tv-live/stream la entrega SIN pasar por /hls-proxy (ver
+        #     _free_espn_es_dash), porque el proxy solo reescribe HLS.
+        # El token "ck" de la URL caduca: cuando deje de responder hay que
+        # reemplazar la URL por una nueva con token fresco.
+        "sport": "nba",
+        "match": ("nuggets", "rockets"),
+        "opciones": [
+            {
+                "label": "STREAM 1",
+                "url": "https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/cjglydxghe/out/v1/8977baf175da4b94873194613dd3fe55/cenc.mpd?ck=eyI4NWIyNzdkYWY1YWFlMDU4MzNmZTQzYTY4ZjU4Nzk2OCI6ImQ1MmQ3ZTliYzBiY2Q5ODc4N2VmZDU0N2FjOTFlY2EwIn0%3D",
+                "embed": False,
+            },
+        ],
+    },
+    {
         # LaLiga: Atlético Madrid vs FC Barcelona (2026-11-08 20:00Z)
         # OJO: ESPN lo publica como "Atlético Madrid vs Barcelona", con tilde.
         "match": ("barcelona", "atletico"),
@@ -4586,6 +4626,16 @@ def _free_espn_es_embed(url: str, marca=None) -> bool:
     if marca is not None:
         return bool(marca)
     return ".m3u8" not in (url or "").lower()
+
+
+def _free_espn_es_dash(url: str) -> bool:
+    """True si la señal es un manifest DASH (.mpd) y no un HLS (.m3u8).
+
+    El proxy /hls-proxy solo reescribe manifests HLS: si se le pasa un .mpd los
+    segmentos resuelven contra su URL equivocada. Para DASH se entrega la URL
+    directa y la pagina decide con que reproductor abrirla.
+    """
+    return ".mpd" in (url or "").lower()
 
 
 def _free_espn_buscar_partido(ahora=None):
@@ -4747,7 +4797,9 @@ def free_espn_stream(request: Request):
 
     Con FREE_ESPN_OPCIONES_PROGRAMADAS = True (caso actual de /espn-gratis) se
     devuelven SOLO las señales programadas del partido: una opcion por señal
-    ("Opcion 1", "Opcion 2"...), sin cadena de respaldos.
+    ("Opcion 1", "Opcion 2"...), sin cadena de respaldos. Cada opcion puede ser
+    una pagina embed ({"embed": True}), un manifest DASH ({"dash": True}, se
+    entrega la URL directa) o un HLS (por defecto, pasa por /hls-proxy).
     """
     from datetime import datetime, timezone
 
@@ -4800,6 +4852,11 @@ def free_espn_stream(request: Request):
             if o.get("embed"):
                 # Pagina embed: se sirve tal cual para pintarla en un iframe
                 opciones.append({"label": o["label"], "url": o["url"], "embed": True})
+            elif _free_espn_es_dash(o["url"]):
+                # DASH (.mpd): se entrega la URL directa. El proxy HLS no
+                # reescribe manifests DASH, y el flag "dash" le dice a la
+                # pagina que no es un m3u8 (no debe pasarlo por hls.js).
+                opciones.append({"label": o["label"], "url": o["url"], "dash": True})
             else:
                 opciones.append({
                     "label": o["label"],
