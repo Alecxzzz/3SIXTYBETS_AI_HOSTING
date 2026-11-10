@@ -163,7 +163,13 @@ def buscar_partido(sport: str, home: str, away: str,
         fechas_a_probar.append(None)
     for f in fechas_a_probar:
         for lg in ligas:
-            if not lg and s != "tennis":
+            # NBA/NFL/MLB/NHL no necesitan liga: _espn_path ya arma
+            # "basketball/nba", "football/nfl", "baseball/mlb"... Solo el FUTBOL
+            # la exige (si falta, arriba ya se usa LIGAS_SOCCER). Antes este
+            # `continue` tambien saltaba los deportes sin liga, asi que un pick
+            # de NBA/NFL sin columna `league` jamas encontraba su partido y el
+            # panel admin lo contaba como "sin datos".
+            if not lg and s in ("soccer", "futbol", "football_soccer"):
                 continue
             try:
                 for ev in scoreboard(s, lg, dates=f):
@@ -200,18 +206,24 @@ def datos_completos(sport: str, home: str, away: str,
     """
     if not fecha:
         # Usar Eastern Time, no UTC (ESPN agrupa por fecha del Este)
-        from datetime import timedelta, timezone as tz
+        # OJO: aqui se importaba solo `timedelta` y `timezone`, y la linea
+        # siguiente usa `datetime`: cualquier llamada sin fecha moria con
+        # "name 'datetime' is not defined" y el buscador devolvia found=False
+        # (el panel admin lo contaba como 'sin datos').
+        from datetime import datetime, timedelta, timezone as tz
         now_utc = datetime.utcnow()
         try:
             from zoneinfo import ZoneInfo
             tz_eastern = ZoneInfo("America/New_York")
             now_eastern = now_utc.replace(tzinfo=tz.utc).astimezone(tz_eastern)
-            fecha = now_eastern.strftime("%Y-%m-%d")
+            # ESPN solo entiende dates=YYYYMMDD: con "2026-11-09" el scoreboard
+            # devuelve 0 eventos y el partido se daba por inexistente.
+            fecha = now_eastern.strftime("%Y%m%d")
         except (ImportError, Exception):
             # Fallback: calcular offset ET manualmente (DST simplificado)
             # En invierno UTC-5, en verano UTC-4
             # Aproximación: usar UTC-5 como default (funciona la mayor parte del año)
-            fecha = (now_utc - timedelta(hours=5)).strftime("%Y-%m-%d")
+            fecha = (now_utc - timedelta(hours=5)).strftime("%Y%m%d")
     partido = buscar_partido(sport, home, away, fecha, league)
     if not partido:
         return {"found": False, "raw": {}}
