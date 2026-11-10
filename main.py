@@ -4490,22 +4490,20 @@ FREE_ESPN_EVENTOS = [
         ],
     },
     {
-        # NBA: Denver Nuggets vs Houston Rockets (2026-11-10 01:30Z = 20:30 ET).
-        # OJO: ESPN lo publica como "Denver Nuggets at Houston Rockets"
-        # (Rockets local).
-        # Señal de la NBA (Amazon IVS): manifest DASH ".mpd" y va CIFRADO
-        # (CENC: Widevine + PlayReady), no es un m3u8. Por eso:
-        #   - "embed": False -> es un manifest, NO una pagina para iframe.
-        #   - /tv-live/stream la entrega SIN pasar por /hls-proxy (ver
-        #     _free_espn_es_dash), porque el proxy solo reescribe HLS.
-        # El token "ck" de la URL caduca: cuando deje de responder hay que
-        # reemplazar la URL por una nueva con token fresco.
+        # NBA: San Antonio Spurs vs Phoenix Suns (2026-11-10 02:00Z = 20:00 ET).
+        # OJO: ESPN lo publica como "San Antonio Spurs at Phoenix Suns"
+        # (Suns local).
+        # Señal de gooz (https://gooz.aapmains.net/new-stream-embed/59729):
+        # su pagina embed no se puede iframear (CSP frame-ancestors), pero su
+        # propio endpoint devuelve el HLS maestro (720p): se reproduce nativo.
+        # El Referer que exige el host (https://gooz.aapmains.net/) lo pone
+        # FREE_ESPN_REFERERS automaticamente.
         "sport": "nba",
-        "match": ("nuggets", "rockets"),
+        "match": ("spurs", "suns"),
         "opciones": [
             {
                 "label": "STREAM 1",
-                "url": "https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/cjglydxghe/out/v1/8977baf175da4b94873194613dd3fe55/cenc.mpd?ck=eyI4NWIyNzdkYWY1YWFlMDU4MzNmZTQzYTY4ZjU4Nzk2OCI6ImQ1MmQ3ZTliYzBiY2Q5ODc4N2VmZDU0N2FjOTFlY2EwIn0%3D",
+                "url": "https://chatgpt.hereisman.net/playlist/59729/load-playlist",
                 "embed": False,
             },
         ],
@@ -4529,20 +4527,6 @@ FREE_ESPN_EVENTOS = [
             {"label": "DSPORTS 1", "url": "http://38.252.215.33:8000/play/a00q/index.m3u8"},
             {"label": "ESPN", "url": "https://bigboss.bemtv.cn/STREAM/732/playlist.m3u8"},
             {"label": "SKY SPORTS", "url": "http://190.61.101.11:7050/play/a04g/index.m3u8"},
-        ],
-    },
-    {
-        # NBA: Houston Rockets vs Phoenix Suns.
-        # La pagina embed de gooz no se puede iframear (CSP frame-ancestors),
-        # pero su propio endpoint devuelve el HLS maestro: se reproduce nativo.
-        "sport": "nba",
-        "match": ("rockets", "suns"),
-        "opciones": [
-            {
-                "label": "STREAM UNICO",
-                "url": "https://chatgpt.hereisman.net/playlist/59567/load-playlist",
-                "embed": False,
-            },
         ],
     },
 ]
