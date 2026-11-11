@@ -4484,24 +4484,22 @@ FREE_ESPN_EVENTOS = [
         "match": ("celtics", "76ers"),
         "opciones": [
             {
-                # PRINCIPAL: HLS con token + ip= del cliente. CORS "*", asi que
-                # el navegador la pide directamente desde SU IP. Proxied da 403.
+                # PRINCIPAL: señal de gooz (embed 59787). Su pagina no se puede
+                # iframear (CSP), pero su endpoint devuelve el HLS maestro 720p.
+                # El Referer que exige (https://gooz.aapmains.net/) lo pone
+                # FREE_ESPN_REFERERS, por eso pasa por /hls-proxy.
                 "label": "PRINCIPAL",
+                "url": "https://chatgpt.hereisman.net/playlist/59787/load-playlist",
+                "embed": False,
+            },
+            {
+                # ALTERNATIVA: HLS con token + ip= del cliente (CORS "*"), asi
+                # que el navegador la pide desde SU IP. Proxied da 403.
+                "label": "ALTERNATIVA",
                 "url": ("https://khala.futlivehd.com/max1/index.m3u8?ip=190.212.210.156"
                         "&token=0754be40fa1a61f2880cbb08762fd9fe1623a543-e9-1794397221-1794343221"),
                 "embed": False,
                 "directo": True,
-            },
-            {
-                # DASH de la NBA (Amazon IVS) cifrado CENC. El manifest anuncia
-                # Widevine/PlayReady, pero la llave es ClearKey (KID
-                # 36a38512-4dcd-fb2f-0969-935065e03afa), asi que se reproduce
-                # con dash.js + ClearKey CDM del navegador.
-                "label": "NBA DASH",
-                "url": ("https://otte.cache.aiv-cdn.net/bom-nitro/live/clients/dash/enc/dx5hfbpk7u"
-                        "/out/v1/c14185a397544650b9761d43ad2e8e91/cenc.mpd"),
-                "embed": False,
-                "clearkey": "36a385124dcdfb2f0969935065e03afa:ccecd65514dff22eae493b975ccf9a9e",
             },
         ],
     },
