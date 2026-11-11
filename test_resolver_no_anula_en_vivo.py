@@ -56,7 +56,11 @@ class FakeDB:
 
 
 class ResolverNoAnulaEnVivoTest(unittest.TestCase):
-    def _run(self, detalle, anular=True, picks=None, parsed=("double_chance", "1x", None)):
+    def _run(self, detalle, anular=True, picks=None, parsed=("double_chance", "1x", None),
+             purgar=False):
+        # purgar=False por defecto: estos tests fijan la invariante de "nunca
+        # ANULADO", no la purga. La fixture es de hace meses, asi que con la
+        # purga activa el pick se borraria y 'sin_datos' seria 0.
         fake_db = FakeDB(picks if picks is not None else [pick()])
         with mock.patch.object(router, "buscar_completo", return_value=detalle), \
                 mock.patch("db.run_query", side_effect=fake_db), \
@@ -65,6 +69,7 @@ class ResolverNoAnulaEnVivoTest(unittest.TestCase):
                 limite=10,
                 solo_hoy=False,
                 anular_no_resolubles=anular,
+                purgar_vencidos=purgar,
                 admin={"role": "admin"},
             )
         return res, fake_db.updates
@@ -141,6 +146,79 @@ class ResolverNoAnulaEnVivoTest(unittest.TestCase):
         self.assertEqual(updates, [])
         self.assertEqual(res["anulados"], 0)
         self.assertEqual(res["sin_datos"], 1)
+
+
+class PurgaVencidosTest(unittest.TestCase):
+    """Los picks que no se pueden verificar se BORRAN pasadas 72h.
+
+    Antes se quedaban PENDIENTE para siempre y el panel mostraba siempre
+    "0 resueltos / N sin datos" (medido: 19 de 32 picks eran basura eterna).
+    """
+
+    def _run(self, pick_dict, detalle, parsed=None, purgar=True):
+        fake_db = FakeDB([pick_dict])
+        with mock.patch.object(router, "buscar_completo", return_value=detalle), \
+                mock.patch("db.run_query", side_effect=fake_db), \
+                mock.patch("data_engine.pick_parser.parsear_pick", return_value=parsed):
+            res = router.resolve_picks(limite=10, solo_hoy=False, anular_no_resolubles=False,
+                                       purgar_vencidos=purgar, admin={"role": "admin"})
+        return res, fake_db.updates
+
+    def test_pick_viejo_no_resoluble_se_purga(self):
+        viejo = pick(pid="viejo")  # event_date 2026-10-21: mas de 72h
+        res, updates = self._run(viejo, {"found": False})
+
+        self.assertEqual(res["purgados"], 1)
+        self.assertEqual(res["sin_datos"], 0)
+        self.assertTrue(any("delete" in sql.lower() for sql, _ in updates))
+
+    def test_pick_reciente_se_espera(self):
+        from datetime import datetime, timedelta, timezone
+
+        reciente = dict(pick(pid="nuevo"))
+        reciente["event_date"] = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime(
+            "%Y-%m-%dT%H:%MZ")
+        res, updates = self._run(reciente, {"found": False})
+
+        self.assertEqual(res["purgados"], 0)
+        self.assertEqual(res["sin_datos"], 1)
+        self.assertEqual(updates, [])
+
+    def test_mercado_prohibido_se_cuenta_y_luego_se_purga(self):
+        """'primer juego' no se intenta: se informa (omitidos) y si es viejo se borra."""
+        prohibido = pick(pid="prohibido", market="Primer juego con servicio - Ganador",
+                         selection="X")
+        res, _ = self._run(prohibido, {"found": False}, purgar=False)
+        self.assertEqual(res["omitidos"], 1)
+        self.assertEqual(res["sin_datos"], 0)
+
+        res, updates = self._run(prohibido, {"found": False}, purgar=True)
+        self.assertEqual(res["purgados"], 1)
+        self.assertEqual(res["omitidos"], 0)
+        self.assertTrue(any("delete" in sql.lower() for sql, _ in updates))
+
+    def test_suma_cuadra(self):
+        """revisados = resueltos + en_juego + sin_datos + omitidos + purgados."""
+        picks = [
+            pick(pid="a", market="Primer juego con servicio - Ganador", selection="X"),
+            pick(pid="b"),
+            dict(pick(pid="c")),
+        ]
+        picks[2]["event_date"] = "2026-11-11T03:00Z"
+        fake_db = FakeDB(picks)
+
+        def buscar(sport, home, away, fecha, liga):
+            return {"found": True, "estado": "in", "home_score": 1, "away_score": 0}
+
+        with mock.patch.object(router, "buscar_completo", side_effect=buscar), \
+                mock.patch("db.run_query", side_effect=fake_db), \
+                mock.patch("data_engine.pick_parser.parsear_pick", return_value=None):
+            res = router.resolve_picks(limite=10, solo_hoy=False, anular_no_resolubles=False,
+                                       purgar_vencidos=True, admin={"role": "admin"})
+
+        suma = (res["resueltos"] + res["en_juego"] + res["sin_datos"]
+                + res["omitidos"] + res["purgados"] + res["anulados"])
+        self.assertEqual(suma, res["total_pendientes"])
 
 
 if __name__ == "__main__":

@@ -109,23 +109,34 @@ def search_match(q: MatchQuery):
 
 @router.post("/resolve/picks")
 def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles: bool = False,
-                  admin=Depends(_admin)):
+                  purgar_vencidos: bool = True, admin=Depends(_admin)):
     """
     Resuelve los picks PENDIENTE de la tabla ai_picks con el motor de datos reales.
     anular_no_resolubles=true marca ANULADO los que no se pueden verificar.
+    purgar_vencidos=true (defecto) BORRA los picks que llevan mas de 72h sin
+    poder verificarse: son los que hacian que el panel dijera siempre
+    "0 resueltos / N sin datos" y que se acumularan para siempre (la misma
+    politica que ya aplica dashboard.revisar_picks_hoy).
 
-    INVARIANTE: solo se toca (resolver o anular) un pick cuyo partido YA TERMINO
-    segun la fuente. Un partido en juego o programado jamas se anula: antes el
-    filtro era solo `event_date < ahora`, asi que los picks de partidos EN VIVO
-    (el dashboard los genera a proposito con state="in") entraban al resolver,
-    no habia marcador final, `resolver_mercado` devolvia NO_RESOLUBLE y el boton
-    "Verificar y resolver resultados" (anular_no_resolubles=true) los marcaba
-    ANULADO minutos despues de generarlos: los picks desaparecian del dashboard
-    y el arranque siguiente los borraba con el resto de ANULADO legacy.
+    INVARIANTE: solo se toca (resolver, anular o purgar) un pick cuyo partido YA
+    TERMINO segun la fuente. Un partido en juego o programado jamas se anula.
     """
     import db as _db
     from data_engine.pick_parser import parsear_pick
     from datetime import datetime, timezone
+
+    PURGA_HORAS = 72
+
+    def _edad_horas(p: dict) -> float:
+        """Horas desde el inicio del evento (-1 si la fecha no se entiende)."""
+        try:
+            f = p.get("event_date")
+            dt = f if isinstance(f, datetime) else datetime.fromisoformat(str(f).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+        except Exception:
+            return -1
 
     # Solo partidos YA EMPEZADOS (evita resolver picks de partidos futuros);
     # que esten TERMINADOS se comprueba despues con el estado real de la fuente.
@@ -145,11 +156,36 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
     sin_datos = 0
     anulados = 0
     en_juego = 0
+    omitidos = 0
+    purgados = 0
     detalles = []
+
+    def _descartar(p: dict) -> None:
+        """Suma a 'sin datos' o BORRA el pick si ya paso el plazo de purga."""
+        nonlocal sin_datos, purgados
+        if purgar_vencidos and _edad_horas(p) > PURGA_HORAS:
+            try:
+                if _db.delete_ai_pick(p["id"]):
+                    purgados += 1
+                    return
+            except Exception as exc:
+                print(f"[resolve/picks] no pude purgar {p.get('id')}: {exc}")
+        sin_datos += 1
 
     for p in picks:
         mercado_txt = ((p.get("market") or "") + " " + (p.get("titulo") or "")).lower()
         if "primer juego" in mercado_txt or "primer punto" in mercado_txt:
+            # Mercado PROHIBIDO (sin fuente que lo compruebe): no se intenta.
+            # Antes se saltaba en silencio y el panel no cuadraba (32 revisados
+            # = 3 + 10 y faltaban 19). Ahora se cuenta y, si es viejo, se borra.
+            omitidos += 1
+            if purgar_vencidos and _edad_horas(p) > PURGA_HORAS:
+                try:
+                    if _db.delete_ai_pick(p["id"]):
+                        purgados += 1
+                        omitidos -= 1
+                except Exception as exc:
+                    print(f"[resolve/picks] no pude purgar {p.get('id')}: {exc}")
             continue
         fecha = str(p.get("event_date") or "")[:10].replace("-", "") or None
         try:
@@ -174,13 +210,14 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
                     pass
         except Exception as e:
             print(f"[resolve/picks] error buscar {p.get('id')}: {e}")
-            sin_datos += 1
+            _descartar(p)
             continue
 
         if not d.get("found"):
             # Sin datos no se puede saber si el partido termino: se deja
-            # PENDIENTE (nunca ANULADO por esta via).
-            sin_datos += 1
+            # PENDIENTE (nunca ANULADO por esta via). Si ya paso el plazo de
+            # purga (72h) se borra para que no quede eterno.
+            _descartar(p)
             continue
 
         # GUARDA DURA: solo un partido FINALIZADO admite veredicto o anulacion.
@@ -203,7 +240,7 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
                 _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
                 anulados += 1
             else:
-                sin_datos += 1
+                _descartar(p)
             continue
 
         r = resolver_mercado(market_type, d, sel, linea)
@@ -224,7 +261,7 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
                 _db.run_query("UPDATE ai_picks SET result='ANULADO', updated_at=NOW() WHERE id=%s", (p["id"],))
                 anulados += 1
             else:
-                sin_datos += 1
+                _descartar(p)
 
     return {
         "total_pendientes": len(picks),
@@ -232,6 +269,11 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
         "anulados": anulados,
         "sin_datos": sin_datos,
         "en_juego": en_juego,
+        # Los mercados prohibidos (primer juego/punto) no se intentan: se
+        # informan aparte para que el panel cuadre.
+        "omitidos": omitidos,
+        # Picks de mas de 72h que no se pudieron verificar y se borraron.
+        "purgados": purgados,
         "detalle": detalles[:40],
     }
 

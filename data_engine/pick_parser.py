@@ -51,6 +51,13 @@ def parsear_pick(pick):
     if "primer juego" in txt or "primer punto" in txt:
         return None
 
+    # TENIS: cualquier mercado medido en JUEGOS (hándicap de juegos, total de
+    # juegos, primer set handicap de juegos...) necesita el marcador juego a
+    # juego. De ESPN solo tenemos SETS, asi que resolverlo con sets da un
+    # veredicto falso: mejor dejarlo sin resolver.
+    if (pick.get("sport") or "").lower() == "tennis" and re.search(r"\bjuegos?\b", txt):
+        return None
+
     # ---- MULTIGOLES (rango) ----
     if "multigoles" in txt:
         m = re.search(r'(\d+)\s*-\s*(\d+)', sel_raw or "")

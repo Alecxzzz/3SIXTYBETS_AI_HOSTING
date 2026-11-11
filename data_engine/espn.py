@@ -232,15 +232,29 @@ def datos_completos(sport: str, home: str, away: str,
     lg = partido["league"]
     ev = partido["event"]
 
+    summ = None
     try:
         url = f"{ESPN_BASE}/{_espn_path(sport, lg)}/summary"
         r = requests.get(url, params={"event": event_id}, headers=UA, timeout=20)
-        if r.status_code != 200:
-            return {"found": False, "raw": {}}
-        summ = r.json()
+        if r.status_code == 200:
+            summ = r.json()
     except Exception as e:
         print(f"[espn summary] {e}")
-        return {"found": False, "raw": {}}
+
+    if not isinstance(summ, dict) or not summ:
+        # Deportes SIN endpoint /summary (el TENIS da 400/404) o summary caido:
+        # se arma el partido con el evento del scoreboard, que ya trae ganador
+        # y marcador por sets. Antes se devolvia found=False y el pick quedaba
+        # "sin datos" para siempre aunque el partido estuviera en el scoreboard.
+        data = _parse_evento_scoreboard(ev, sport, home, away)
+        if not data.get("equipos"):
+            return {"found": False, "raw": {}}
+        data["found"] = True
+        data["source"] = "espn-scoreboard"
+        data["event_id"] = event_id
+        data["league"] = lg
+        data["raw"] = ev
+        return data
 
     data = _parse_summary(summ, ev)
     data["found"] = True
@@ -249,6 +263,67 @@ def datos_completos(sport: str, home: str, away: str,
     data["league"] = lg
     data["raw"] = summ
     return data
+
+
+def _parse_evento_scoreboard(ev: Dict, sport: str, home: str = "", away: str = "") -> Dict[str, Any]:
+    """Datos del partido desde el evento del SCOREBOARD (sin /summary).
+
+    ESPN no expone /summary para tenis, pero el evento si trae lo que necesita
+    el resolver: quien gano y el marcador (sets). Se devuelve la misma forma
+    que _parse_summary para que el resto del motor no cambie.
+    """
+    comps = (ev.get("competitions") or [{}])[0] or {}
+    equipos = []
+    for c in comps.get("competitors") or []:
+        quien = c.get("athlete") or c.get("team") or {}
+        nombre = quien.get("displayName") or quien.get("shortName") or quien.get("fullName")
+        valor = _to_float(c.get("score"))
+        # TENIS: ESPN deja score=null y pone el resultado en linescores (juegos
+        # de cada set, con su ganador). Sin esto el partido se encontraba pero
+        # llegaba sin marcador y el resolver no podía decidir nada.
+        if valor is None:
+            sets = [s for s in (c.get("linescores") or []) if isinstance(s, dict)]
+            ganados = sum(1 for s in sets if s.get("winner"))
+            if sets:
+                valor = float(ganados)
+            elif c.get("winner") is True:
+                valor = 1.0
+            elif c.get("winner") is False:
+                valor = 0.0
+        equipos.append({
+            "name": nombre,
+            "abbr": quien.get("shortName"),
+            "home_away": c.get("homeAway"),
+            "score": valor,
+            "winner": c.get("winner"),
+            "linescores": c.get("linescores") or [],
+        })
+    estado = (((comps.get("status") or {}).get("type") or {}).get("state")
+              or ((ev.get("status") or {}).get("type") or {}).get("state"))
+
+    out: Dict[str, Any] = {"equipos": equipos, "estado": estado,
+                           "fecha": ev.get("date"), "nombre": ev.get("name")}
+
+    # Alinear LOCAL/VISITANTE con los nombres del PICK: el parser decide la
+    # seleccion comparando con home_name/away_name. En tenis ESPN marca
+    # homeAway segun el orden del cuadro, que puede ser el contrario al del
+    # pick, y el veredicto salia INVERTIDO (Rune gano y se marcaba FALLO).
+    if equipos and home and away:
+        i_home = next((i for i, e in enumerate(equipos) if _parecido(e.get("name") or "", home)), None)
+        i_away = next((i for i, e in enumerate(equipos) if _parecido(e.get("name") or "", away)), None)
+        if i_home is not None and i_away is not None and i_home != i_away:
+            equipos[i_home]["home_away"] = "home"
+            equipos[i_away]["home_away"] = "away"
+    # En tenis ESPN no marca homeAway: el primero del cuadro hace de local.
+    if equipos and not any(e.get("home_away") for e in equipos):
+        equipos[0]["home_away"] = "home"
+        equipos[-1]["home_away"] = "away"
+    for e in equipos:
+        if e.get("home_away") == "home":
+            out["home_name"], out["home_score"] = e["name"], e["score"]
+        elif e.get("home_away") == "away":
+            out["away_name"], out["away_score"] = e["name"], e["score"]
+    return out
 
 def _parse_summary(summ: Dict, ev: Dict) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
