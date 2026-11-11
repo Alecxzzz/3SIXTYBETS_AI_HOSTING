@@ -560,6 +560,70 @@ def _norm_pick(pick: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _promedios_equipo(nombre: str) -> List[Dict[str, Any]]:
+    """Promedios de temporada del plantel (solo para props de jugador)."""
+    try:
+        import sports  # import local: el modulo es pesado
+
+        eq = equipo_id(nombre)
+        if not eq:
+            return []
+        return sports.nba_promedios_equipo(eq["id"]) or []
+    except Exception as exc:  # noqa: BLE001
+        print(f"[analista] promedios de {nombre}: {exc}", flush=True)
+        return []
+
+
+def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
+    """Analiza un pick NBA con el modelo propio (ai/analista_nba.py).
+
+    Usa la MISMA base de ESPN que el dashboard: forma reciente de cada equipo
+    (puntos a favor/en contra) y, para props, los promedios de temporada del
+    plantel. Devuelve el mismo contrato que el analisis de futbol para que el
+    panel (VALOR/NEUTRO/EVITAR) funcione igual.
+    """
+    from . import analista_nba as nba
+
+    f_local = forma_equipo("nba", None, home, n=10)
+    f_visita = forma_equipo("nba", None, away, n=10)
+    if not f_local and not f_visita:
+        return {"ok": False, "motivo": "ESPN no devolvio forma reciente de ningun equipo"}
+
+    mercado = nba.clasificar_mercado_nba(pick)
+    promedios_local = promedios_visita = None
+    if mercado.get("tipo") == "prop":
+        promedios_local = _promedios_equipo(home)
+        promedios_visita = _promedios_equipo(away)
+
+    salida = nba.analizar_pick_nba(pick, f_local, f_visita, promedios_local, promedios_visita)
+    if not salida.get("ok") or not salida.get("soportado"):
+        return salida
+
+    prob = float(salida["distribucion"]["prob"])
+    try:
+        cuota = float(pick.get("odds") or 0)
+    except (TypeError, ValueError):
+        cuota = 0.0
+
+    salida["prob_justa"] = round(prob, 4)
+    salida["cuota"] = cuota
+    if cuota > 1.0:
+        implicita = 1.0 / cuota
+        ev = prob * cuota - 1.0
+        salida["prob_implicita"] = round(implicita, 4)
+        salida["edge_pct"] = round((prob - implicita) * 100, 2)
+        salida["ev_pct"] = round(ev * 100, 2)
+        salida["veredicto"] = _veredicto(ev)
+        salida["confianza"] = _confianza(
+            salida.get("fuerzas", {}).get("n_local", 0),
+            salida.get("fuerzas", {}).get("n_visita", 0), ev)
+    else:
+        salida["veredicto"] = "SIN_CUOTA"
+        salida["confianza"] = "BAJA"
+        salida["nota"] = "el pick no trae cuota: no se puede calcular el valor"
+    return salida
+
+
 def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]:
     """Analiza UN pick. Capa 1 cuantitativa siempre; capa 2 LLM si se pide.
 
@@ -574,6 +638,10 @@ def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]
 
     if not home or not away:
         return {"ok": False, "motivo": "el pick no tiene los dos equipos"}
+
+    if (sport or "").lower() == "nba":
+        # La NBA tiene su propio modelo (normal sobre PUNTOS, no Poisson).
+        return _analizar_nba(pick, home, away)
 
     if not _es_soccer(sport, league):
         return {
@@ -789,7 +857,8 @@ def informe_texto(a: Dict[str, Any]) -> str:
         f"  Probabilidad justa del modelo: {a.get('prob_justa')}",
         f"  Probabilidad de la cuota:      {a.get('prob_implicita')}",
         f"  EDGE {a.get('edge_pct')}%   EV {a.get('ev_pct')}%",
-        f"  Goles esperados: {a.get('goles_esperados', {}).get('local')} - "
+        f"  {'Puntos' if a.get('deporte') == 'nba' else 'Goles'} esperados: "
+        f"{a.get('goles_esperados', {}).get('local')} - "
         f"{a.get('goles_esperados', {}).get('visita')}",
         f"  Muestra: {a.get('fuerzas', {}).get('n_local')} y "
         f"{a.get('fuerzas', {}).get('n_visita')} partidos",
@@ -840,7 +909,7 @@ def estado() -> Dict[str, Any]:
         "modelo": MODELO,
         "modelo_fallback": MODELO_FALLBACK or None,
         "aislado_del_chat": True,
-        "deportes_modelados": ["soccer"],
+        "deportes_modelados": ["soccer", "nba"],
     }
 
 
