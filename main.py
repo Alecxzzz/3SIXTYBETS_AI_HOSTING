@@ -4756,6 +4756,27 @@ def _free_espn_payload(opciones: list, cierre) -> dict:
     return respuesta
 
 
+def _free_espn_cuartos(linescores) -> list:
+    """Normaliza los cuartos a [{"value", "displayValue"}].
+
+    ESPN NO usa el mismo formato en todos los deportes: el futbol y el tenis
+    devuelven objetos {"value", "displayValue"}, pero el BALONCESTO devuelve
+    una lista de strings (["25","21","22","28"]). Sin normalizar, la pagina
+    pintaba "-" en los cuartos de NBA.
+    """
+    salida = []
+    for q in linescores or []:
+        if isinstance(q, dict):
+            valor = q.get("value")
+            texto = q.get("displayValue") or valor
+            salida.append({"value": valor, "displayValue": str(texto if texto is not None else "-")})
+        elif q is not None:
+            texto = str(q).strip()
+            if texto:
+                salida.append({"value": texto, "displayValue": texto})
+    return salida
+
+
 @app.get("/tv-live/match")
 def free_espn_match():
     """Partido destacado + marcador + estadisticas (publico, sin registro)."""
@@ -4781,16 +4802,31 @@ def free_espn_match():
         detail = {}
 
     teams = []
-    for equipo, base in ((home, detail.get("teams")[0] if detail.get("teams") else None),
-                         (away, detail.get("teams")[1] if len(detail.get("teams") or []) > 1 else None)):
+    base_equipos = detail.get("teams") or []
+    for indice, equipo in enumerate((home, away)):
+        base = base_equipos[indice] if len(base_equipos) > indice else None
         stats = (base or {}).get("statistics") or []
         teams.append({
+            # id/abbr/homeAway/linescores los usa la pagina para pintar los
+            # CUARTOS (Q1, Q2...) y para ordenar el boxscore como en la ficha.
+            "id": str((base or {}).get("id") or equipo.get("id") or ""),
+            "abbr": (base or {}).get("abbr") or "",
+            "short_name": (base or {}).get("short_name") or "",
+            "homeAway": (base or {}).get("homeAway") or ("home" if indice == 0 else "away"),
+            "color": (base or {}).get("color"),
             "name": (base or {}).get("name") or (base or {}).get("short_name") or equipo.get("name"),
             "logo": (base or {}).get("logo") or equipo.get("logo"),
             "score": (base or {}).get("score") if base is not None else equipo.get("score"),
             "winner": (base or {}).get("winner") if base is not None else equipo.get("winner"),
             "statistics": stats,
+            "linescores": _free_espn_cuartos((base or {}).get("linescores")),
         })
+
+    # Estado real del partido (el del detalle manda sobre el del scoreboard):
+    # la caja y los cuartos SOLO existen con el partido ya iniciado.
+    estado_partido = str(detail.get("state") or game.get("state") or "").lower()
+    iniciado = estado_partido in ("in", "post")
+    boxscore = (detail.get("players_box") or []) if iniciado else []
 
     dentro_ventana = (apertura <= ahora <= cierre) and game.get("state") != "post"
     tiempo_restante = max(0, int((cierre - ahora).total_seconds())) if dentro_ventana else 0
@@ -4801,12 +4837,16 @@ def free_espn_match():
         "apertura": apertura.isoformat(),
         "cierre": cierre.isoformat(),
         "kickoff": game.get("date"),
-        "estado": game.get("state"),
+        "estado": estado_partido or game.get("state"),
         "reloj": detail.get("clock") or game.get("clock") or "",
         "status": detail.get("status") or game.get("status") or "",
+        "periodo": detail.get("period"),
         "liga": detail.get("league") or game.get("league") or "LaLiga",
         "event_id": str(game.get("id")),
         "teams": teams,
+        # Boxscore EN VIVO (una entrada por equipo, con sus jugadores). Vacio
+        # antes del salto inicial: la pagina lo oculta hasta que empieza.
+        "boxscore": boxscore,
         "suscripcion": {
             "boton_texto": "SUSCRIBETE - Todo el futbol en vivo",
             "planes_endpoint": "/pagadito/plans",

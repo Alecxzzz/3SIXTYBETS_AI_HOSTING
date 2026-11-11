@@ -380,5 +380,98 @@ class TestEndpointStream(unittest.TestCase):
         self.assertNotIn("/hls-proxy", opcion["url"])
 
 
+class TestMatchEnVivo(unittest.TestCase):
+    """/tv-live/match entrega cuartos y boxscore SOLO con el partido iniciado."""
+
+    GAME = {
+        "name": "Boston Celtics at Philadelphia 76ers",
+        "date": "2026-11-11T01:00Z",
+        "state": "pre",
+        "id": "401909961",
+        "home": {"name": "Philadelphia 76ers", "logo": "http://logo/phi.png", "score": None},
+        "away": {"name": "Boston Celtics", "logo": "http://logo/bos.png", "score": None},
+    }
+
+    def _get_match(self, estado, con_caja=True):
+        from fastapi.testclient import TestClient
+
+        import sports
+
+        ahora = datetime.now(timezone.utc)
+        ventana = (ahora - timedelta(minutes=5), ahora + timedelta(minutes=60))
+        cuartos = [{"value": 28, "displayValue": "28"}] * 4 if estado != "pre" else []
+        detail = {
+            "state": estado,
+            "status": "Q3 6:34" if estado == "in" else "",
+            "clock": "6:34",
+            "period": 3,
+            "league": "NBA",
+            "teams": [
+                {"id": "20", "name": "Philadelphia 76ers", "short_name": "76ers", "abbr": "PHI",
+                 "homeAway": "home", "color": "006bb6", "score": 88,
+                 "statistics": [], "linescores": cuartos},
+                {"id": "2", "name": "Boston Celtics", "short_name": "Celtics", "abbr": "BOS",
+                 "homeAway": "away", "color": "007a33", "score": 90,
+                 "statistics": [], "linescores": cuartos},
+            ],
+            "players_box": ([{"equipo": "Philadelphia 76ers", "equipo_id": "20",
+                              "jugadores": [{"id": "1", "nombre": "Tyrese Maxey", "corto": "T. Maxey",
+                                             "pts": 24, "reb": 3, "ast": 6}]},
+                             {"equipo": "Boston Celtics", "equipo_id": "2",
+                              "jugadores": [{"id": "2", "nombre": "Jayson Tatum", "corto": "J. Tatum",
+                                             "pts": 30, "reb": 8, "ast": 4}]}]
+                            if con_caja else []),
+        }
+        parches = [
+            mock.patch.object(main, "_free_espn_buscar_partido", return_value=dict(self.GAME, state=estado)),
+            mock.patch.object(main, "_free_espn_ventana", return_value=ventana),
+            mock.patch.object(main, "get_pagadito_plans", return_value=[]),
+            mock.patch.object(sports, "get_game_detail", return_value=detail),
+        ]
+        for p in parches:
+            p.start()
+        try:
+            return TestClient(main.app).get("/tv-live/match")
+        finally:
+            for p in reversed(parches):
+                p.stop()
+
+    def test_antes_del_partido_no_hay_boxscore_ni_cuartos(self):
+        data = self._get_match("pre").json()
+        self.assertEqual(data["boxscore"], [])
+        self.assertEqual(data["teams"][0]["linescores"], [])
+        self.assertEqual(data["estado"], "pre")
+
+    def test_en_vivo_manda_boxscore_y_cuartos(self):
+        data = self._get_match("in").json()
+        self.assertEqual(len(data["boxscore"]), 2)
+        self.assertEqual(data["boxscore"][0]["jugadores"][0]["corto"], "T. Maxey")
+        self.assertEqual(len(data["teams"][0]["linescores"]), 4)
+        self.assertEqual(data["teams"][0]["homeAway"], "home")
+        self.assertEqual(data["teams"][0]["id"], "20")
+        self.assertEqual(data["periodo"], 3)
+
+    def test_cuartos_de_baloncesto_vienen_como_strings(self):
+        """ESPN da los cuartos de NBA como ["25","21",...]: se normalizan."""
+        crudos = ["25", "21", "22", "28"]
+        self.assertEqual(main._free_espn_cuartos(crudos), [
+            {"value": "25", "displayValue": "25"},
+            {"value": "21", "displayValue": "21"},
+            {"value": "22", "displayValue": "22"},
+            {"value": "28", "displayValue": "28"},
+        ])
+        # Futbol/tenis ya vienen como objetos: se respetan (sin displayValue -> "-")
+        self.assertEqual(
+            main._free_espn_cuartos([{"value": 1, "displayValue": "1"}, {"value": None}]),
+            [{"value": 1, "displayValue": "1"}, {"value": None, "displayValue": "-"}],
+        )
+        self.assertEqual(main._free_espn_cuartos(None), [])
+
+    def test_la_pagina_no_recibe_caja_si_espn_no_la_publico(self):
+        data = self._get_match("in", con_caja=False).json()
+        self.assertEqual(data["boxscore"], [])
+        self.assertEqual(len(data["teams"][0]["linescores"]), 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
