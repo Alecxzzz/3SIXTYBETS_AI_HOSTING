@@ -175,17 +175,20 @@ def resolve_picks(limite: int = 60, solo_hoy: bool = False, anular_no_resolubles
     for p in picks:
         mercado_txt = ((p.get("market") or "") + " " + (p.get("titulo") or "")).lower()
         if "primer juego" in mercado_txt or "primer punto" in mercado_txt:
-            # Mercado PROHIBIDO (sin fuente que lo compruebe): no se intenta.
-            # Antes se saltaba en silencio y el panel no cuadraba (32 revisados
-            # = 3 + 10 y faltaban 19). Ahora se cuenta y, si es viejo, se borra.
-            omitidos += 1
-            if purgar_vencidos and _edad_horas(p) > PURGA_HORAS:
+            # Mercado PROHIBIDO (sin fuente que lo compruebe): no se intenta y
+            # NO se deja en la BD. Antes se saltaba en silencio y el pick se
+            # quedaba PENDIENTE para siempre (19 de 32 en una pasada). Ahora se
+            # borra en la misma pasada, sin esperar las 72h de la purga normal.
+            borrado = False
+            if purgar_vencidos:
                 try:
-                    if _db.delete_ai_pick(p["id"]):
-                        purgados += 1
-                        omitidos -= 1
+                    borrado = bool(_db.delete_ai_pick(p["id"]))
                 except Exception as exc:
                     print(f"[resolve/picks] no pude purgar {p.get('id')}: {exc}")
+            if borrado:
+                purgados += 1
+            else:
+                omitidos += 1
             continue
         fecha = str(p.get("event_date") or "")[:10].replace("-", "") or None
         try:

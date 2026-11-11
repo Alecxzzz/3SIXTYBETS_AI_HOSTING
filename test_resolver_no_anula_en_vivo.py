@@ -197,6 +197,20 @@ class PurgaVencidosTest(unittest.TestCase):
         self.assertEqual(res["omitidos"], 0)
         self.assertTrue(any("delete" in sql.lower() for sql, _ in updates))
 
+    def test_mercado_prohibido_reciente_tambien_se_borra(self):
+        """Los prohibidos NO se quedan en la BD: se borran aunque sean de hoy."""
+        from datetime import datetime, timedelta, timezone
+
+        reciente = pick(pid="prohibido-nuevo",
+                        market="Primer juego con servicio - Ganador", selection="X")
+        reciente["event_date"] = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%MZ")
+        res, updates = self._run(reciente, {"found": False}, purgar=True)
+
+        self.assertEqual(res["purgados"], 1)
+        self.assertEqual(res["omitidos"], 0)
+        self.assertTrue(any("delete" in sql.lower() for sql, _ in updates))
+
     def test_suma_cuadra(self):
         """revisados = resueltos + en_juego + sin_datos + omitidos + purgados."""
         picks = [
