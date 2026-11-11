@@ -2628,3 +2628,101 @@ def track_record_player_props(dias: int = 7) -> dict:
         "props": por_prop,
     }
 
+
+
+# ============================================================
+# BAJA DE CUENTA (derecho de supresion) y aceptacion de Terminos
+# ============================================================
+
+# Migracion idempotente: sella la fecha en que el usuario acepto los Terminos
+# al registrarse. Se comprueba antes con information_schema porque un ALTER
+# repetido fallaria en cada arranque.
+try:
+    _existe_terms = run_query(
+        "select 1 from information_schema.columns where table_schema = database() "
+        "and table_name = 'users' and column_name = 'terms_accepted_at'"
+    )
+    if not _existe_terms:
+        run_query("alter table users add column terms_accepted_at datetime null")
+        print("[db] columna users.terms_accepted_at creada", flush=True)
+except Exception as _err:  # noqa: BLE001
+    print(f"[db] no se pudo preparar terms_accepted_at: {_err}", flush=True)
+
+
+def marcar_terminos_aceptados(user_id: str) -> bool:
+    """Guarda que el usuario acepto los Terminos (evidencia minimima)."""
+    try:
+        return bool(run_query(
+            "update users set terms_accepted_at = %s where id = %s and terms_accepted_at is null",
+            (now_utc(), user_id),
+        ))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] terms_accepted_at {user_id}: {exc}", flush=True)
+        return False
+
+
+def delete_user_cascade(user_id: str) -> dict:
+    """Borra la cuenta y sus datos personales (derecho de supresion).
+
+    Se eliminan los datos personales sin obligacion de conservacion: sesiones,
+    tokens de email, mensajes de chat, conversaciones de soporte, favoritos y
+    la propia cuenta.
+
+    Los registros ECONOMICOS (pagos y movimientos de creditos) no se borran:
+    hay obligacion contable/legal de conservarlos. Solo se DESVINCULAN del
+    usuario (user_id pasa a 'DELETED'), de modo que dejan de ser datos
+    personales pero la contabilidad sigue cuadrando.
+    """
+    borrados = {}
+    for tabla in ("sessions", "email_tokens", "chat_messages", "support_chats",
+                  "favoritos", "player_stat_cache"):
+        try:
+            borrados[tabla] = bool(run_query(f"delete from {tabla} where user_id = %s", (user_id,)))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[db] no se pudo borrar {tabla}: {exc}", flush=True)
+            borrados[tabla] = False
+
+    for tabla in ("pagadito_orders", "credit_transactions"):
+        try:
+            run_query(f"update {tabla} set user_id = 'DELETED' where user_id = %s", (user_id,))
+            borrados[f"{tabla}_anonimizado"] = True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[db] no se pudo anonimizar {tabla}: {exc}", flush=True)
+
+    borrados["users"] = bool(run_query("delete from users where id = %s", (user_id,)))
+    return borrados
+
+
+
+
+# ============================================================
+# VISITAS POR PAGINA (analitica propia, sin cookies ni terceros)
+# ============================================================
+# Se guarda SOLO "cuantas veces se abrio esta ruta en este dia". Ni IP, ni
+# user-agent, ni identificadores: es lo minimo para saber que paginas
+# convierten sin contradecir la Politica de Privacidad.
+try:
+    run_query(
+        "create table if not exists page_views ("
+        " fecha date not null,"
+        " ruta varchar(80) not null,"
+        " vistas int not null default 0,"
+        " primary key (fecha, ruta)"
+        ")"
+    )
+except Exception as _err:  # noqa: BLE001
+    print(f"[db] no se pudo preparar page_views: {_err}", flush=True)
+
+
+def registrar_vista(ruta: str) -> bool:
+    """Suma una visita al contador del dia para esa ruta."""
+    ruta = (ruta or "/")[:80]
+    try:
+        return bool(run_query(
+            "insert into page_views (fecha, ruta, vistas) values (curdate(), %s, 1) "
+            "on duplicate key update vistas = vistas + 1",
+            (ruta,),
+        ))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] registrar_vista {ruta}: {exc}", flush=True)
+        return False

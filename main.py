@@ -74,6 +74,58 @@ app.add_middleware(
 )
 
 # ==============================
+# SEGURIDAD: cabeceras HTTP y errores
+# ==============================
+# Cabeceras que el navegador necesita para no "adivinar": sin ellas, un
+# navegador puede interpretar un .txt como HTML (XSS), o permitir que otro
+# sitio meta la web en un iframe invisible (clickjacking). No se pone CSP
+# (romperia los reproductores de terceros); el resto es seguro.
+@app.middleware("http")
+async def _cabeceras_seguridad(request: Request, call_next):
+    respuesta = await call_next(request)
+    cabeceras = respuesta.headers
+    cabeceras.setdefault("X-Content-Type-Options", "nosniff")
+    cabeceras.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    cabeceras.setdefault("X-Frame-Options", "SAMEORIGIN")
+    cabeceras.setdefault(
+        "Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()"
+    )
+    # HSTS solo cuando la peticion llego por HTTPS (en local por HTTP molesta).
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        cabeceras.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return respuesta
+
+
+# Sentry OPCIONAL: si existe SENTRY_DSN se reportan los errores del backend.
+# Sin la variable no se importa nada (no añade dependencia obligatoria).
+_SENTRY_DSN = (os.getenv("SENTRY_DSN") or "").strip()
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(dsn=_SENTRY_DSN, traces_sample_rate=0.05,
+                        environment=os.getenv("SENTRY_ENV", "production"))
+        print("[sentry] backend monitorizado", flush=True)
+    except Exception as _err:  # noqa: BLE001
+        print(f"[sentry] no se pudo iniciar: {_err}", flush=True)
+
+
+# Aviso en el arranque si NO hay proveedor de correo: sin el, "olvide mi
+# contrasena" no puede enviar el enlace (el endpoint responde igual, por
+# privacidad, pero el usuario nunca recibe nada). Ver .env.example.
+try:
+    import emailer as _emailer
+
+    if not _emailer.configurado():
+        print("[WARN] Sin correo configurado (EMAIL_PROVIDER=none): la recuperacion "
+              "de contrasena NO envia enlaces. Ver .env.example.", flush=True)
+    else:
+        print(f"[emailer] proveedor de correo: {_emailer.provider()}", flush=True)
+except Exception as _err:  # noqa: BLE001
+    print(f"[emailer] no se pudo comprobar el proveedor: {_err}", flush=True)
+
+
+# ==============================
 # MOTOR DE DATOS REALES + VERIFICACION (data_engine)
 # ==============================
 # Endpoints: /data/partido, /data/contexto-ia, /search/match, /search/prop
@@ -1438,6 +1490,17 @@ class ChangePasswordIn(BaseModel):
     current_password: str
     new_password: str
 
+
+class DeleteAccountIn(BaseModel):
+    """Baja de cuenta: exige la contraseña y una confirmación explícita."""
+    password: str
+    confirmar: bool = False
+
+
+class PageViewIn(BaseModel):
+    """Ruta visitada (sin datos personales: nada de IP ni user-agent)."""
+    path: str = "/"
+
 # ---- Auth dependency ----
 def get_current_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -1534,6 +1597,34 @@ def health():
     """Estado del backend y la base de datos."""
     return db.health_status()
 
+
+@app.post("/analytics/pv")
+def analytics_pv(data: PageViewIn, request: Request):
+    """Contador de visitas por pagina (analitica PROPIA, sin terceros).
+
+    No se guarda IP, ni user-agent, ni cookies: solo "cuantas veces se abrio
+    esta ruta hoy". El limite por IP evita que alguien infle el contador.
+    """
+    _rate_limit(f"pv:{_ip_del_cliente(request)}", 120, 60)
+    ruta = (data.path or "/").split("?")[0][:80] or "/"
+    db.registrar_vista(ruta)
+    return {"ok": True}
+
+
+@app.post("/errors/report")
+def errors_report(data: dict, request: Request):
+    """Recibe errores del navegador y los deja en el log del servidor.
+
+    Sirve para enterarse de los fallos reales de la web sin depender de un
+    servicio externo (y sin enviar datos personales: solo mensaje y pagina).
+    """
+    _rate_limit(f"err:{_ip_del_cliente(request)}", 30, 3600)
+    mensaje = str((data or {}).get("message") or "sin mensaje")[:300]
+    pagina = str((data or {}).get("path") or "-")[:80]
+    extra = str((data or {}).get("stack") or "")[:400]
+    print(f"[front-error] {pagina} :: {mensaje} :: {extra}", flush=True)
+    return {"ok": True}
+
 @app.post("/auth/signup")
 def auth_signup(data: AuthSignup, request: Request):
     # Anti fuerza bruta / creacion masiva de cuentas (el registro es gratis).
@@ -1543,6 +1634,12 @@ def auth_signup(data: AuthSignup, request: Request):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     token = db.create_session(user["id"])
+    # Evidencia de aceptación de los Términos (la web ya lo avisa antes de
+    # crear la cuenta). Si falla, no se bloquea el registro: solo se registra.
+    try:
+        db.marcar_terminos_aceptados(user["id"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[signup] no se pudo sellar la aceptacion de terminos: {exc}", flush=True)
     # Email OPCIONAL: sin el no hay recuperacion de contrasena, pero no se
     # bloquea el registro (puede añadirlo luego desde su perfil).
     if (data.email or "").strip():
@@ -1783,6 +1880,33 @@ def auth_change_password(data: ChangePasswordIn, request: Request,
     token = db.create_session(user["id"])
     return {"ok": True, "access_token": token,
             "mensaje": "Contrasena actualizada. Se cerraron las demas sesiones."}
+
+
+@app.delete("/auth/account")
+def auth_delete_account(data: DeleteAccountIn, request: Request,
+                        user=Depends(get_current_user)):
+    """Borra la cuenta y sus datos personales (derecho de supresion).
+
+    Es lo que promete la Politica de Privacidad, asi que existe de verdad y lo
+    puede ejercer el propio usuario sin escribir a soporte. Se exige la
+    contrasena (no basta un token robado) y se guarda un aviso en el log.
+    """
+    _rate_limit(f"delacc:{user['id']}", 3, 3600)
+    if not db.verify_password(data.password or "", user["password_hash"]):
+        raise HTTPException(400, "La contraseña no es correcta.")
+    if not data.confirmar:
+        raise HTTPException(400, "Confirma que quieres eliminar la cuenta.")
+
+    print(f"[baja] el usuario {user.get('username')} ({user['id']}) pidio borrar su cuenta",
+          flush=True)
+    resultado = db.delete_user_cascade(user["id"])
+    if not resultado.get("users"):
+        raise HTTPException(500, "No se pudo eliminar la cuenta. Escribe a soporte.")
+    return {
+        "ok": True,
+        "mensaje": ("Tu cuenta y tus datos personales fueron eliminados. Los registros "
+                    "de pago se conservan de forma anonima por obligación contable."),
+    }
 
 
 @app.post("/auth/set-email")
@@ -3305,6 +3429,11 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     if not url or not re.match(r"^https?://", url.strip()):
         raise HTTPException(400, "Parámetro ?url= inválido o ausente")
 
+    # Abuso del proxy como CDN: un reproductor pide ~1 segmento cada 4 s
+    # (900/hora por espectador), asi que 3000/hora deja margen a 3-4 personas
+    # tras la misma IP sin bloquear la reproduccion normal.
+    _rate_limit(f"hls-proxy:{_ip_del_cliente(request)}", 3000, 3600)
+
     target = url.strip()
     # Anti-SSRF: bloquear hosts internos (localhost, IPs privadas, metadatos)
     if not _url_tiene_host_publico(target):
@@ -4776,8 +4905,11 @@ def _free_espn_cuartos(linescores) -> list:
 
 
 @app.get("/tv-live/match")
-def free_espn_match():
+def free_espn_match(request: Request):
     """Partido destacado + marcador + estadisticas (publico, sin registro)."""
+    # Endpoint publico y sin login: el limite evita que un scraper lo martille
+    # (la pagina lo pide cada 30 s, asi que 240/hora cubren varias visitas).
+    _rate_limit(f"tv-match:{_ip_del_cliente(request)}", 240, 3600)
     game = _free_espn_buscar_partido()
     if not game:
         return {
@@ -4871,6 +5003,10 @@ def free_espn_stream(request: Request):
     entrega la URL directa) o un HLS (por defecto, pasa por /hls-proxy).
     """
     from datetime import datetime, timezone
+
+    # Señal publica (sin login): se limita por IP para que nadie use el backend
+    # como CDN ajeno. 60/hora cubre recargas y cambios de opcion de sobra.
+    _rate_limit(f"tv-stream:{_ip_del_cliente(request)}", 60, 3600)
 
     url_fija = "http://168.228.44.241:9998/play/a0dz/index.m3u8"
 

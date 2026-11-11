@@ -576,6 +576,20 @@ def html_perfil() -> str:
     <h1 style="font-size:1.05rem">Historial de pagos</h1>
     <div id="pagos" style="margin-top:10px"></div>
   </div>
+  <div class="card" style="border-color:#7f1d1d">
+    <h1 style="font-size:1.05rem;color:#f87171">Eliminar mi cuenta</h1>
+    <p class="sub" style="margin-top:6px">Borra tu cuenta y tus datos personales
+    (mensajes, favoritos, historial de uso). Es permanente y no se puede deshacer.
+    Los registros de pago se conservan de forma anonima por obligacion contable.</p>
+    <a href="/privacidad" style="color:#4ade80;font-size:.85rem">Ver Politica de Privacidad</a>
+    <input id="del_clave" type="password" placeholder="Tu contrasena para confirmar" autocomplete="current-password">
+    <label style="display:flex;gap:8px;align-items:center;margin:10px 0;font-size:.85rem;color:#9aa4b2">
+      <input id="del_ok" type="checkbox" style="width:auto;margin:0">
+      Entiendo que esta accion es permanente
+    </label>
+    <button onclick="eliminarCuenta()" style="background:#7f1d1d;border-color:#991b1b">Eliminar mi cuenta</button>
+    <div class="err" id="del_err"></div>
+  </div>
   <button onclick="setTk('');location.reload()">Cerrar sesion</button>
 </div>"""
     script = _login_js() + """
@@ -610,6 +624,24 @@ async function cambiarClave() {
   document.getElementById('clave_nueva').value = '';
   err.style.color = '#22c55e';
   err.textContent = r.data.mensaje;
+}
+async function eliminarCuenta() {
+  const err = document.getElementById('del_err');
+  err.style.color = '#f87171';
+  err.textContent = '';
+  const clave = document.getElementById('del_clave').value;
+  const confirmado = document.getElementById('del_ok').checked;
+  if (!clave) { err.textContent = 'Escribe tu contrasena.'; return; }
+  if (!confirmado) { err.textContent = 'Marca la casilla para confirmar.'; return; }
+  if (!confirm('Seguro que quieres eliminar tu cuenta? Esta accion es PERMANENTE.')) return;
+  const r = await api('/auth/account', {
+    method: 'DELETE',
+    body: JSON.stringify({password: clave, confirmar: true}),
+  });
+  if (!r.ok) { err.textContent = r.data.detail || 'No se pudo eliminar la cuenta.'; return; }
+  setTk('');
+  alert(r.data.mensaje || 'Tu cuenta fue eliminada.');
+  location.href = '/';
 }
 async function init() {
   const me = await api('/auth/me');

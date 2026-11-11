@@ -22,6 +22,12 @@ def _parecido_equipo(a, b):
 def _lado(sel, home, away):
     """Determina si la seleccion apunta a home / away / draw."""
     t = re.sub(r'\([^)]*\)', '', (sel or "")).strip().lower()
+    # "SI"/"NO" NO son un equipo: antes 'no' coincidia por substring con
+    # 'Nacional'/'Nottingham' y un pick '...: NO' se interpretaba como el
+    # equipo local (veredicto INVERTIDO). El 'no' se aplica luego en el
+    # parser como prefijo 'no_'.
+    if t in ("si", "sí", "no", "yes"):
+        return None
     if _parecido_equipo(t, home):
         return "home"
     if _parecido_equipo(t, away):
@@ -65,7 +71,8 @@ def parsear_pick(pick):
             return ("multigoles", f"{m.group(1)}-{m.group(2)}", None)
         return None
 
-    lado = _lado(sel_raw, home, away)
+    lado_directo = _lado(sel_raw, home, away)   # solo por la SELECCION
+    lado = lado_directo
     # Si la seleccion no apunta a un equipo, intentar con el mercado/titulo
     if lado is None:
         lado = _lado(market + " " + titulo, home, away)
@@ -148,8 +155,10 @@ def parsear_pick(pick):
         lado_sel = lado or _lado(f"{market} {titulo}", home, away)
         if lado_sel is None:
             return None
-        if lado is None and sel.startswith("no"):
+        if lado_directo is None and sel.startswith("no"):
             # 'Nacional gana la 1a mitad: NO' -> acierto si NO la gana.
+            # OJO: se mira la SELECCION original, no 'lado' (que ya cayo al
+            # mercado y valia 'home', asi que el NO se perdia).
             lado_sel = "no_" + lado_sel
         return ("winner_periodo", f"{lado_sel}|{indice}|{cual}", None)
 

@@ -34,3 +34,8 @@ resumen_agenda.txt
 _*.py
 _tmp_*.py
 sec_verify.py
+
+# temporales de diagnostico y copias de seguridad locales
+_tmp_*
+backups/
+*.backup.*
