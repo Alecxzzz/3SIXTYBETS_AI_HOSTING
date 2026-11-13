@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 import db
 import emailer
+import security
 import sports
 import fotmob
 import transcoder
@@ -50,49 +51,187 @@ app = FastAPI(
     version="2.0"
 )
 
-# CORS: permitir el frontend
-frontend_origins = os.getenv(
-    "FRONTEND_ORIGINS",
-    "http://localhost:5173,https://www.theesixtybets.xyz"
-).split(",")
+# CORS: SOLO los dominios propios.
+#
+# Antes habia `allow_origin_regex=r"https?://.*"`, que refleja CUALQUIER origen y
+# deja la lista blanca en papel mojado: cualquier web podia llamar a la API
+# desde el navegador del visitante. Se sustituye por una lista explicita +
+# un regex que solo cubre los previews del propio proyecto (Vercel genera un
+# subdominio por despliegue).
+frontend_origins = [
+    o.strip() for o in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://localhost:5173,https://www.theesixtybets.xyz",
+    ).split(",") if o.strip()
+]
+# Dominios propios (regex). Cubre:
+#   * cualquier subdominio de los dominios reales del proyecto,
+#   * los despliegues de Vercel del proyecto (produccion y previews), que Vercel
+#     publica como <proyecto>-<hash>.vercel.app.
+# NO se usa "https?://.*" (lo que habia antes): con cookies y credenciales, eso
+# permitiria a cualquier web leer datos del usuario autenticado.
+# Si añades un dominio nuevo, TIENES que añadirlo aqui o el CORS lo bloqueara.
+_ORIGENES_REGEX = os.getenv(
+    "FRONTEND_ORIGINS_REGEX",
+    r"^https://([a-z0-9-]+\.)*(threesixtybets\.com|theesixtybets\.xyz|3sixtybets\.com)$"
+    r"|^https://(threesixtybets|3sixtybets)(-[a-z0-9-]+)?\.vercel\.app$",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in frontend_origins],
-    # Los endpoints de streaming (/hls-proxy, /tv/cdnlivetv) son publicos y los
-    # consume hls.js desde cualquier dominio del sitio (vercel previews, dominio
-    # propio, etc.). Sin esto, un origen no listado rompe TODOS los canales
-    # dinamicos con manifestLoadError.
-    allow_origin_regex=r"https?://.*",
-    # NOTA de seguridad: allow_credentials=False es intencional. La auth va
-    # por header Authorization (Bearer), NUNCA por cookies, asi que ninguna
-    # llamada legitima necesita credenciales CORS. Con False, un sitio malo
-    # NO puede acompanar credenciales aunque el regex refleje su origen.
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=frontend_origins,
+    allow_origin_regex=_ORIGENES_REGEX or None,
+    # La auth va por cookie HttpOnly + header Authorization. Con credenciales
+    # SOLO puede cruzar un origen de la lista: por eso el regex acotado importa.
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Chat-Token", "Range"],
+    expose_headers=["Content-Length", "Content-Range", "Content-Disposition"],
+    max_age=600,
 )
 
+
 # ==============================
-# SEGURIDAD: cabeceras HTTP y errores
+# PUERTA GLOBAL: TODO PRIVADO POR DEFECTO
+# ==============================
+# En vez de poner `Depends(get_current_user)` en 70 endpoints (y olvidarlo en
+# el siguiente que se escriba), se invierte la regla: si una ruta NO esta en la
+# lista blanca de abajo, exige sesion valida. Un endpoint nuevo nace protegido
+# sin tocar nada; si tiene que ser publico, se declara aqui a proposito.
+API_PRIVADA = os.getenv("API_PRIVADA", "1").strip().lower() in ("1", "true", "yes")
+
+# Rutas que NO pueden pedir sesion. Son CUATRO y cada una es una imposibilidad
+# tecnica, no una comodidad:
+RUTAS_PUBLICAS = {
+    # 1) LO VIVE EL HOST, NO UNA PERSONA. Railway consulta esta ruta para saber
+    #    si el proceso arranco; sin auth en ella el contenedor se marca como
+    #    caido y entra en bucle de reinicio. Devuelve {ok, db_ok}: ni un dato de
+    #    usuario, ni del admin, ni del negocio.
+    #    (La ruta del healthcheck esta en railway.json -> healthcheckPath)
+    "/health",
+    # 2) y 3) SIN ESTAS DOS NO EXISTE SESION POSIBLE. Para autenticarse hay que
+    #    llamar a /auth/signin, y para tener cuenta, a /auth/signup. Si piden
+    #    sesion, nadie puede entrar nunca: es la pescadilla que se muerde la
+    #    cola. Se compensa con rate limit + bloqueo por cuenta + auditoria.
+    "/auth/signin",
+    "/auth/signup",
+    # 4) LA PAGARA EL QUE PAGA. Pagadito redirige el navegador aqui despues del
+    #    cobro; si exige sesion y el usuario pago desde otro dispositivo o la
+    #    cookie no viaja, el pago NO se acredita. No expone datos: valida el ERN
+    #    contra Pagadito y acredita por la orden ya registrada.
+    "/pagadito/return",
+}
+
+# Recuperacion de contrasena. APAGADA por defecto: sus 4 rutas
+# (/auth/forgot, /auth/reset, /recuperar, /verificar-email) se abren sin sesion
+# por definicion (el usuario olvido su clave, no puede tener sesion). Con esto en
+# 0 quedan cerradas y quien olvide la contrasena se la resetea el admin con
+# `python reset_password.py`. Con 1 se abren esas 4.
+PERMITIR_RECUPERACION = os.getenv(
+    "PERMITIR_RECUPERACION", "0"
+).strip().lower() in ("1", "true", "yes")
+
+if PERMITIR_RECUPERACION:
+    RUTAS_PUBLICAS |= {
+        "/auth/forgot", "/auth/reset", "/recuperar", "/verificar-email",
+    }
+
+# El escaparate de la TV (partido destacado de ESPN) puede quedar publico como
+# gancho de venta. POR DEFECTO NO: "todo privado" incluye esto. Si se quiere
+# abrir, TV_ESCAPARATE_PUBLICO=1.
+TV_ESCAPARATE_PUBLICO = os.getenv(
+    "TV_ESCAPARATE_PUBLICO", "0"
+).strip().lower() in ("1", "true", "yes")
+
+RUTAS_PUBLICAS_PREFIJOS = ("/tv-live",) if TV_ESCAPARATE_PUBLICO else ()
+
+
+def _ruta_publica(path: str) -> bool:
+    """True si la ruta esta declarada como publica (o su prefijo lo esta)."""
+    if not path:
+        return False
+    ruta = path.rstrip("/") or "/"
+    if ruta in RUTAS_PUBLICAS:
+        return True
+    for prefijo in RUTAS_PUBLICAS_PREFIJOS:
+        if ruta == prefijo or ruta.startswith(prefijo + "/"):
+            return True
+    return False
+
+
+def _cors_para_401(request: Request) -> dict:
+    """Cabeceras CORS para las respuestas que genera la PUERTA.
+
+    El middleware de CORS esta por dentro de esta puerta, asi que un 401 salido
+    de aqui no pasaria por el y el navegador lo mostraria como "error de red"
+    en vez de como "sesion requerida". Se replican las cabeceras SOLO para
+    origenes de la lista blanca (misma regla que el middleware).
+    """
+    origen = request.headers.get("origin") or ""
+    if not origen:
+        return {}
+    permitido = origen in frontend_origins
+    if not permitido and _ORIGENES_REGEX:
+        try:
+            permitido = bool(re.fullmatch(_ORIGENES_REGEX, origen))
+        except re.error:
+            permitido = False
+    if not permitido:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origen,
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }
+
+
+def _respuesta_401(request: Request) -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Necesitas iniciar sesion.",
+                 "codigo": "sesion_requerida"},
+        headers={"WWW-Authenticate": "Bearer", **_cors_para_401(request)},
+    )
+
+
+@app.middleware("http")
+async def _puerta_privada(request: Request, call_next):
+    """Cierra TODA la API salvo la lista blanca. 401 si no hay sesion valida.
+
+    Detalles que importan:
+      * OPTIONS pasa siempre: el preflight de CORS no lleva credenciales por
+        especificacion, y bloquearlo rompe cualquier llamada cross-origin.
+      * La sesion se valida con cache de 60 s (security.usuario_de_token), asi
+        que no hay una consulta a BD por peticion.
+      * El 401 lleva cabeceras CORS propias (ver `_cors_para_401`).
+    """
+    if not API_PRIVADA:
+        return await call_next(request)
+
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if _ruta_publica(request.url.path):
+        return await call_next(request)
+
+    token = security.token_de_request(request)
+    if not token or not security.usuario_de_token(token):
+        return _respuesta_401(request)
+    return await call_next(request)
+
+
+# ==============================
+# SEGURIDAD: cabeceras HTTP
 # ==============================
 # Cabeceras que el navegador necesita para no "adivinar": sin ellas, un
 # navegador puede interpretar un .txt como HTML (XSS), o permitir que otro
-# sitio meta la web en un iframe invisible (clickjacking). No se pone CSP
-# (romperia los reproductores de terceros); el resto es seguro.
+# sitio meta la web en un iframe invisible (clickjacking). La CSP se aplica solo
+# a HTML para no romper los reproductores de terceros.
 @app.middleware("http")
 async def _cabeceras_seguridad(request: Request, call_next):
+    """Cabeceras de seguridad (delegado en security.py, fuente unica)."""
     respuesta = await call_next(request)
-    cabeceras = respuesta.headers
-    cabeceras.setdefault("X-Content-Type-Options", "nosniff")
-    cabeceras.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    cabeceras.setdefault("X-Frame-Options", "SAMEORIGIN")
-    cabeceras.setdefault(
-        "Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()"
-    )
-    # HSTS solo cuando la peticion llego por HTTPS (en local por HTTP molesta).
-    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
-        cabeceras.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    security.aplicar_cabeceras(respuesta, request)
     return respuesta
 
 
@@ -146,30 +285,127 @@ _rate_lock = threading.Lock()
 
 
 def _ip_del_cliente(request: Request) -> str:
-    """IP real del cliente (detras del proxy del host usa X-Forwarded-For)."""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "desconocida"
+    """IP real del cliente.
+
+    Se delega en security.ip_del_cliente, que toma el salto que puso el proxy
+    de confianza contando desde el FINAL de X-Forwarded-For. El codigo anterior
+    tomaba el PRIMER valor, que es justo el que puede inventar el atacante: con
+    `curl -H "X-Forwarded-For: 1.2.3.4"` obtenia una IP nueva por peticion y se
+    saltaba todos los limites de abajo.
+    """
+    return security.ip_del_cliente(request)
 
 
 def _rate_limit(clave: str, max_eventos: int, ventana_s: int):
-    """Limitador simple en memoria (por proceso). Lanza 429 al exceder."""
-    global _rate_bucket
-    ahora = time.time()
-    with _rate_lock:
-        eventos = [t for t in _rate_bucket.get(clave, []) if ahora - t < ventana_s]
-        if len(eventos) >= max_eventos:
-            raise HTTPException(
-                429, "Demasiadas peticiones. Espera unos minutos e intenta de nuevo."
-            )
-        eventos.append(ahora)
-        _rate_bucket[clave] = eventos
-        # Poda barata para que el dict no crezaca sin limite
-        if len(_rate_bucket) > 5000:
-            _rate_bucket = {
-                k: v for k, v in _rate_bucket.items() if v and ahora - v[-1] < ventana_s
-            }
+    """Limitador en memoria (ventana deslizante). Lanza 429 al exceder."""
+    security.limite(clave, max_eventos, ventana_s)
+
+
+# ---------------------------------------------------------------------------
+# PROTECCION DE CANALES Y STREAMS (TV)
+# ---------------------------------------------------------------------------
+# Por que existe esta seccion: `/tv/canales-cdn` listaba TODOS los canales y
+# `/tv/cdnlivetv/{canal}/{codigo}` resolvia el stream, los dos SIN sesion. La
+# cadena completa (listar -> resolver -> ver) era publica, asi que cualquiera
+# veia el producto de pago sin cuenta.
+#
+# Por que la cookie y no un header: los segmentos .ts los pide hls.js (o el
+# propio navegador), y ahi NO se puede inyectar `Authorization`. La unica
+# credencial que viaja sola en esas peticiones es la cookie HttpOnly, que ya se
+# emite en el login. Firmar cada segmento con un token en la URL tambien
+# funciona, pero obliga a reescribir el manifest entero y a mantener la firma
+# sincronizada: mas piezas para el mismo resultado.
+#
+# Interruptores SEPARADOS, porque tienen requisitos distintos:
+#
+#   TV_EXIGIR_CATALOGO=1  -> /tv/canales-cdn y /tv/cdnlivetv exigen sesion con
+#        acceso. Estas dos se llaman con fetch/XHR, asi que el frontend YA puede
+#        mandar el `Authorization: Bearer` que tiene en localStorage. Se puede
+#        cerrar sin tocar el reproductor. POR DEFECTO CERRADO: es la fuga que
+#        deja ver los 405 canales sin cuenta.
+#
+#   TV_EXIGIR_STREAM=1    -> /hls-proxy y /live/index.m3u8 exigen sesion.
+#        OJO: los segmentos los pide hls.js, que NO manda el Bearer. Para que
+#        esto funcione, el reproductor tiene que enviar la cookie
+#        (xhrSetup: x => x.withCredentials = true) y estar en el mismo origen o
+#        con SameSite=None. Por eso va APAGADO por defecto: encenderlo antes de
+#        arreglar el reproductor deja la TV en negro.
+#
+# TV_EXIGIR_CUENTA=1 fuerza LOS DOS (atajo).
+_MAESTRO = os.getenv("TV_EXIGIR_CUENTA", "").strip().lower() in ("1", "true", "yes")
+TV_EXIGIR_CATALOGO = _MAESTRO or os.getenv(
+    "TV_EXIGIR_CATALOGO", "1"
+).strip().lower() in ("1", "true", "yes")
+TV_EXIGIR_STREAM = _MAESTRO or os.getenv(
+    "TV_EXIGIR_STREAM", "0"
+).strip().lower() in ("1", "true", "yes")
+# Hosts aceptados por /hls-proxy y /live/index.m3u8. Vacio = sin restriccion
+# (estado actual, y sigue bloqueando IPs internas por el anti-SSRF). Cuando se
+# conozcan los hosts reales del CDN se pone la lista y el proxy deja de poder
+# usarse como proxy abierto hacia cualquier web del mundo.
+TV_HOSTS_PERMITIDOS = [
+    h.strip().lower()
+    for h in os.getenv("TV_HOSTS_PERMITIDOS", "").split(",")
+    if h.strip()
+]
+# Hosts que NO exigen sesion aunque TV_EXIGIR_CUENTA este activo. Sirve para
+# dejar publico el partido destacado de ESPN (el escaparate de la portada)
+# mientras el catalogo de canales queda cerrado. Vacio = todo exige sesion.
+TV_HOSTS_PUBLICOS = [
+    h.strip().lower()
+    for h in os.getenv("TV_HOSTS_PUBLICOS", "").split(",")
+    if h.strip()
+]
+
+
+def _coincide_host(url: str, lista) -> bool:
+    """True si el host de la URL es alguno de la lista (o un subdominio)."""
+    if not lista:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in lista)
+
+
+def _host_permitido(url: str) -> bool:
+    """True si el host esta en la lista blanca (o si no hay lista)."""
+    if not TV_HOSTS_PERMITIDOS:
+        return True
+    return _coincide_host(url, TV_HOSTS_PERMITIDOS)
+
+
+def _es_publico(url: str) -> bool:
+    """Host del escaparate publico (no exige sesion ni con la puerta activa)."""
+    return _coincide_host(url, TV_HOSTS_PUBLICOS)
+
+
+def _exigir_acceso_tv(request: Request, user, ambito: str = "catalogo"):
+    """Puerta de la TV: sesion + acceso activo.
+
+    `ambito` decide que interruptor manda:
+      * "catalogo" -> listar canales y resolver el stream (TV_EXIGIR_CATALOGO)
+      * "stream"   -> segmentos y FFmpeg (TV_EXIGIR_STREAM)
+
+    Con el interruptor de ese ambito apagado no hace nada. Con el encendido, un
+    invitado recibe 401 y un usuario sin suscripcion 403, y los dos casos quedan
+    auditados: si alguien insiste, se ve en `security_events`.
+    """
+    exigir = TV_EXIGIR_CATALOGO if ambito == "catalogo" else TV_EXIGIR_STREAM
+    if not exigir:
+        return None
+    if not user:
+        security.evento("tv_denegado", "sin_sesion", request=request,
+                        detalle=f"{ambito}:{(request.url.path or '')[:100]}")
+        raise HTTPException(401, "Inicia sesion para ver los canales.")
+    if not db.es_premium_row(user):
+        security.evento("tv_denegado", "sin_acceso", usuario=user.get("username"),
+                        request=request, detalle=f"{ambito}:{(request.url.path or '')[:100]}")
+        raise HTTPException(403, "Tu acceso no esta activo o ha caducado.")
+    return user
 
 
 _dns_cache: dict = {}
@@ -592,12 +828,12 @@ def listar_modelos():
     from ai.model import modelos_disponibles
     return {"modelos": modelos_disponibles()}
 
-def get_current_user_optional(authorization: str = Header(None)):
+def get_current_user_optional(request: Request, authorization: str = Header(None)):
     """Igual que get_current_user pero sin fallar: None si no hay sesion."""
-    if not authorization or not authorization.startswith("Bearer "):
+    token = security.token_de_request(request)
+    if not token:
         return None
-    token = authorization[7:].strip()
-    return db.get_user_by_token(token)  # None si el token es invalido/expire
+    return db.get_user_by_token(token)  # None si el token es invalido/expiró
 
 # ---- Token de conversacion de chat (anti-abuso de la IA) ----
 #
@@ -1502,17 +1738,32 @@ class PageViewIn(BaseModel):
     path: str = "/"
 
 # ---- Auth dependency ----
-def get_current_user(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Necesitas iniciar sesion.")
-    token = authorization[7:].strip()
-    user = db.get_user_by_token(token)
+def get_current_user(request: Request, authorization: str = Header(None)):
+    """Usuario de la sesion. Acepta cookie HttpOnly O header Bearer.
+
+    Se aceptan los dos a proposito: la cookie es el camino seguro (un XSS no
+    puede leerla) y el Bearer mantiene funcionando al frontend que aun guarda el
+    token en localStorage. Cuando el frontend migre, se puede exigir solo cookie.
+    """
+    token = security.token_de_request(request)
+    user = db.get_user_by_token(token) if token else None
+    # Si la cookie estaba caducada pero el frontend sigue mandando un Bearer
+    # valido, se acepta el Bearer: una cookie vieja no debe echar a nadie.
+    if not user and authorization and authorization.startswith("Bearer "):
+        otro = authorization[7:].strip()
+        if otro and otro != token:
+            user = db.get_user_by_token(otro)
     if not user:
         raise HTTPException(401, "Sesion expirada. Vuelve a iniciar sesion.")
     return user
 
+
 def get_admin(user=Depends(get_current_user)):
     if user["role"] != "admin":
+        # Se audita: un usuario normal golpeando endpoints de admin es la señal
+        # mas temprana de una cuenta comprometida o de alguien sondeando.
+        security.evento("admin_denegado", "denegado", usuario=user.get("username"),
+                        detalle="rol insuficiente")
         raise HTTPException(403, "Acceso restringido a administradores.")
     return user
 
@@ -1625,15 +1876,38 @@ def errors_report(data: dict, request: Request):
     print(f"[front-error] {pagina} :: {mensaje} :: {extra}", flush=True)
     return {"ok": True}
 
+# Hash de relleno para igualar el tiempo de respuesta del login cuando el
+# usuario NO existe. Si se saltara PBKDF2 en ese caso, un atacante podria
+# enumerar cuentas midiendo cuanto tarda en responder.
+_HASH_FICTICIO = ("0" * 32) + ":" + ("0" * 64)
+
+# Politica de contrasena al CREAR o CAMBIAR (los usuarios antiguos pueden
+# seguir entrando con la suya: solo se valida cuando se define una nueva).
+SEC_EXIGIR_PASSWORD_FUERTE = os.getenv(
+    "SEC_PASSWORD_FUERTE", "1"
+).strip().lower() in ("1", "true", "yes")
+
+
 @app.post("/auth/signup")
-def auth_signup(data: AuthSignup, request: Request):
+def auth_signup(data: AuthSignup, request: Request, response: Response):
+    """Crea la cuenta. Devuelve el token Y marca la cookie HttpOnly."""
     # Anti fuerza bruta / creacion masiva de cuentas (el registro es gratis).
     _rate_limit(f"signup:{_ip_del_cliente(request)}", 5, 3600)
+
+    if SEC_EXIGIR_PASSWORD_FUERTE:
+        ok, motivo = security.validar_password(data.password)
+        if not ok:
+            raise HTTPException(400, motivo)
+
     try:
         user = db.create_user(data.username, data.password, data.redeem_code)
     except ValueError as exc:
+        security.evento("signup_fallido", "denegado", usuario=(data.username or ""),
+                        request=request, detalle=str(exc)[:120])
         raise HTTPException(400, str(exc))
     token = db.create_session(user["id"])
+    security.poner_cookie_sesion(response, token, request)
+    security.evento("signup", "ok", usuario=user.get("username"), request=request)
     # Evidencia de aceptación de los Términos (la web ya lo avisa antes de
     # crear la cuenta). Si falla, no se bloquea el registro: solo se registra.
     try:
@@ -1644,7 +1918,12 @@ def auth_signup(data: AuthSignup, request: Request):
     # bloquea el registro (puede añadirlo luego desde su perfil).
     if (data.email or "").strip():
         try:
-            _guardar_email_y_verificar(user["id"], data.email, data.username, request)
+            if PERMITIR_RECUPERACION:
+                _guardar_email_y_verificar(user["id"], data.email, data.username, request)
+            else:
+                # Con la recuperacion cerrada no se manda enlace: el correo
+                # verificado apuntaria a /verificar-email, que devuelve 401.
+                db.set_user_email(user["id"], data.email)
         except Exception as exc:
             print(f"[signup] no se pudo guardar el email: {exc}", flush=True)
         fresco = db.get_user_by_username(user["username"])
@@ -1653,24 +1932,59 @@ def auth_signup(data: AuthSignup, request: Request):
     return {"access_token": token, "user": user}
 
 @app.post("/auth/signin")
-def auth_signin(data: AuthSignin, request: Request):
-    # Anti fuerza bruta: 10 intentos por IP cada 15 min. Antes no habia limite
-    # y /health confirmaba ademas si el admin existia.
+def auth_signin(data: AuthSignin, request: Request, response: Response):
+    """Inicia sesion. Devuelve el token Y marca la cookie HttpOnly.
+
+    Defensas, por orden:
+      1. limite por IP (frena un atacante suelto),
+      2. limite por USUARIO (frena el reparto de intentos entre IPs),
+      3. bloqueo temporal de la CUENTA tras N fallos (frena la fuerza bruta
+         distribuida, que los dos anteriores no ven),
+      4. PBKDF2 siempre, exista o no el usuario (si no, el tiempo de respuesta
+         delata que usuarios existen),
+      5. auditoria de cada intento.
+    """
     _rate_limit(f"signin:{_ip_del_cliente(request)}", 10, 900)
-    if data.username:
-        _rate_limit(f"signin-user:{data.username.strip().lower()}", 10, 900)
-    user = db.get_user_by_username(data.username)
-    if not user or not db.verify_password(data.password, user["password_hash"]):
+    usuario = (data.username or "").strip()
+    if usuario:
+        _rate_limit(f"signin-user:{usuario.lower()}", 10, 900)
+
+    if security.bloqueado(usuario):
+        security.evento("login_bloqueado", "denegado", usuario=usuario,
+                        request=request)
+        raise HTTPException(
+            429,
+            "Cuenta bloqueada temporalmente por intentos fallidos. "
+            "Espera unos minutos o recupera tu contrasena.",
+        )
+
+    user = db.get_user_by_username(usuario)
+    # Se verifica SIEMPRE, con un hash ficticio si el usuario no existe, para
+    # que el tiempo de respuesta no revele que cuentas estan dadas de alta.
+    hash_guardado = user["password_hash"] if user else _HASH_FICTICIO
+    correcta = db.verify_password(data.password, hash_guardado)
+
+    if not user or not correcta:
+        security.registrar_fallo(usuario)
+        security.evento("login_fallido", "denegado", usuario=usuario, request=request)
         raise HTTPException(401, "Usuario o contrasena incorrecta.")
+
+    security.limpiar_fallos(usuario)
     token = db.create_session(user["id"])
+    security.poner_cookie_sesion(response, token, request)
+    security.evento("login_ok", "ok", usuario=user["username"], request=request)
     return {"access_token": token, "user": db.public_user(user)}
 
+
 @app.post("/auth/signout")
-def auth_signout(request: Request, user=Depends(get_current_user)):
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
+def auth_signout(request: Request, response: Response,
+                 user=Depends(get_current_user)):
+    token = security.token_de_request(request)
+    if token:
         db.delete_session(token)
+        security.olvidar_usuario(token)   # que no siga valiendo por la cache
+    security.borrar_cookie_sesion(response)
+    security.evento("logout", "ok", usuario=user.get("username"), request=request)
     return {"ok": True}
 
 @app.get("/auth/me")
@@ -1844,7 +2158,11 @@ def auth_reset(data: ResetIn, request: Request):
     """Cambia la contrasena usando el token del email (de un solo uso)."""
     _rate_limit(f"reset:{_ip_del_cliente(request)}", 10, 900)
     nueva = (data.password or "").strip()
-    if len(nueva) < 6:
+    if SEC_EXIGIR_PASSWORD_FUERTE:
+        ok, motivo = security.validar_password(nueva)
+        if not ok:
+            raise HTTPException(400, motivo)
+    elif len(nueva) < 6:
         raise HTTPException(400, "La contrasena debe tener al menos 6 caracteres.")
 
     fila = db.consume_email_token(data.token, "reset")
@@ -1870,7 +2188,11 @@ def auth_change_password(data: ChangePasswordIn, request: Request,
     if not db.verify_password(data.current_password or "", user["password_hash"]):
         raise HTTPException(400, "La contrasena actual no es correcta.")
     nueva = (data.new_password or "").strip()
-    if len(nueva) < 6:
+    if SEC_EXIGIR_PASSWORD_FUERTE:
+        ok, motivo = security.validar_password(nueva)
+        if not ok:
+            raise HTTPException(400, motivo)
+    elif len(nueva) < 6:
         raise HTTPException(400, "La nueva contrasena debe tener al menos 6 caracteres.")
     if not db.set_password(user["id"], nueva):
         raise HTTPException(500, "No se pudo guardar la contrasena. Intenta de nuevo.")
@@ -2653,21 +2975,16 @@ def list_transactions(user=Depends(get_current_user)):
 
 
 @app.get("/transactions/{ern}/invoice")
-def transaction_invoice(ern: str, request: Request):
+def transaction_invoice(ern: str, request: Request,
+                        user=Depends(get_current_user)):
     """
-    Factura PDF de una transaccion del usuario. Acepta el token por
-    header Authorization Bearer o por query string (?token=...) para
-    permitir descarga directa por link.
-    """
-    token = request.query_params.get("token", "").strip()
-    if not token:
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:].strip()
-    user = db.get_user_by_token(token) if token else None
-    if not user:
-        raise HTTPException(401, "Necesitas iniciar sesion.")
+    Factura PDF de una transaccion del usuario.
 
+    El token se toma de la cookie HttpOnly o del header Authorization, NUNCA de
+    la query string. Antes aceptaba `?token=...` "para permitir descarga directa
+    por link", y eso dejaba la sesion en el historial del navegador, en los logs
+    del proxy y en el `Referer` de cualquier recurso que cargara la pagina.
+    """
     order = db.get_pagadito_order_by_ern(ern)
     if not order or order["user_id"] != user["id"]:
         raise HTTPException(404, "Transaccion no encontrada.")
@@ -3438,6 +3755,19 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     # Anti-SSRF: bloquear hosts internos (localhost, IPs privadas, metadatos)
     if not _url_tiene_host_publico(target):
         raise HTTPException(400, "Host no permitido")
+    # Lista blanca de hosts (si TV_HOSTS_PERMITIDOS esta configurada). Sin esto
+    # el proxy sirve CUALQUIER m3u8 del mundo: sirve para saltarse geobloqueos y
+    # para regalar ancho de banda ajeno a costa de este servidor.
+    if not _host_permitido(target):
+        raise HTTPException(403, "Host no permitido")
+    # Puerta de la TV: cada segmento exige sesion con acceso activo. Es la unica
+    # forma de proteger el video, porque los segmentos los pide hls.js y ahi no
+    # se puede inyectar el header Authorization: la cookie viaja sola.
+    # La excepcion son los hosts del escaparate publico (partido destacado de
+    # ESPN): ese contenido SI es publico por decision de producto.
+    if not _es_publico(target):
+        _exigir_acceso_tv(request, security.usuario_de_token(
+            security.token_de_request(request)), ambito="stream")
 
     headers = {"User-Agent": HLS_USER_AGENT}
     if referer:
@@ -4119,12 +4449,16 @@ def tv_agenda(
 
 
 @app.get("/tv/canales-cdn")
-def tv_canales_cdn():
+def tv_canales_cdn(request: Request,
+                   user=Depends(get_current_user_optional)):
     """Catalogo de canales cdnlivetv con su estado en vivo.
 
-    Publico (como /hls-proxy) para que la UI pueda pintar solo los que estan
-    online y no ofrezca canales que el proveedor tiene capeados.
+    ESTA ES LA LISTA COMPLETA DE CANALES. Salió de aqui la "extraccion" de los
+    canales: era publica para que la UI pintara los que estan online, pero eso
+    regalaba el catalogo entero a cualquiera. Ahora pasa por `_exigir_acceso_tv`
+    (se activa con TV_EXIGIR_CUENTA=1).
     """
+    _exigir_acceso_tv(request, user)
     cat = cdnlivetv_catalogo()
     if not cat:
         raise HTTPException(503, "Catalogo de canales no disponible ahora mismo.")
@@ -4163,8 +4497,15 @@ def tv_canales_cdn():
 
 
 @app.get("/tv/cdnlivetv/{name}/{code}")
-def tv_cdnlivetv(request: Request, name: str, code: str):
-    """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy."""
+def tv_cdnlivetv(request: Request, name: str, code: str,
+                 user=Depends(get_current_user_optional)):
+    """Resuelve el m3u8 fresco de un canal cdnlivetv y redirige al /hls-proxy.
+
+    Es el paso que convierte "nombre de canal" en un stream reproducible, asi
+    que aqui es donde se defiende el producto: sin sesion con acceso no se
+    resuelve nada (con TV_EXIGIR_CUENTA=1).
+    """
+    _exigir_acceso_tv(request, user)
     resultado = cdnlivetv_fresh(name, code)
     # cdnlivetv_fresh devuelve solo la URL, o (None, motivo) si no pudo.
     stream, motivo = resultado if isinstance(resultado, tuple) else (resultado, None)
@@ -4357,6 +4698,13 @@ def live_index(request: Request, url: str, referer: str = None):
     # interna y usar el backend como proxy ciego.
     if not _url_tiene_host_publico(url.strip()):
         raise HTTPException(403, "Host no permitido")
+    if not _host_permitido(url.strip()):
+        raise HTTPException(403, "Host no permitido")
+    # Arrancar un FFmpeg es lo mas caro del backend: exige sesion con acceso
+    # activo (con TV_EXIGIR_CUENTA=1) ademas del limite por IP.
+    if not _es_publico(url.strip()):
+        _exigir_acceso_tv(request, security.usuario_de_token(
+            security.token_de_request(request)), ambito="stream")
     # Coste alto (proceso FFmpeg): limite por IP ademas del tope global.
     _rate_limit(f"transcode:{_ip_del_cliente(request)}", 12, 600)
     try:

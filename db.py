@@ -422,6 +422,97 @@ def init_db():
             index player_props_event_idx (event_id)
         )
         """,
+        # ------------------------------------------------------------------
+        # MOTOR ELO + MONTE CARLO (backend/apuestas/elo.py, motor.py)
+        # ------------------------------------------------------------------
+        # Tablas NUEVAS, no columnas nuevas en ai_picks: `create table if not
+        # exists` se aplica solo en la BD que ya esta en produccion, mientras
+        # que un ALTER habria que lanzarlo a mano y ademas romperia el
+        # `ai_picks_archive like ai_picks` que ya existe.
+        """
+        create table if not exists elo_ratings (
+            sport varchar(20) not null,
+            entidad_id varchar(40) not null,
+            rating decimal(10, 3) not null default 1500,
+            partidos int not null default 0,
+            fecha_ultimo datetime null,
+            pf decimal(8, 3) null,
+            pa decimal(8, 3) null,
+            total decimal(8, 3) null,
+            n_forma int not null default 0,
+            actualizado datetime not null,
+            primary key (sport, entidad_id)
+        )
+        """,
+        """
+        create table if not exists elo_calibracion (
+            id int auto_increment primary key,
+            sport varchar(20) not null,
+            a decimal(10, 4) null,
+            b decimal(10, 4) null,
+            c decimal(10, 4) null,
+            t0 decimal(10, 4) null,
+            t1 decimal(10, 4) null,
+            sigma_margen decimal(10, 4) null,
+            sigma_total decimal(10, 4) null,
+            sigma_equipo decimal(10, 4) null,
+            rho decimal(10, 4) null,
+            rho_equipos decimal(10, 4) null,
+            p_ot decimal(10, 4) null,
+            total_medio decimal(10, 4) null,
+            n_partidos int null,
+            creado datetime not null,
+            index elo_calibracion_sport_idx (sport, id)
+        )
+        """,
+        # Cada decision del motor (haya pick o no) queda registrada aqui. Sin
+        # esta tabla no se puede calcular Brier ni log-loss: `ai_picks` guarda
+        # la cuota y el resultado, pero NO la probabilidad que dijo el modelo.
+        """
+        create table if not exists ai_picks_prob (
+            id varchar(64) primary key,
+            pick_id varchar(64) null,
+            event_id varchar(64) not null,
+            sport varchar(20) not null,
+            market varchar(200) null,
+            seleccion varchar(200) null,
+            linea decimal(10, 3) null,
+            prob decimal(8, 5) null,
+            prob_low decimal(8, 5) null,
+            prob_high decimal(8, 5) null,
+            edge decimal(8, 5) null,
+            cuota decimal(10, 4) null,
+            mu_local decimal(10, 3) null,
+            mu_visita decimal(10, 3) null,
+            elo_local decimal(10, 3) null,
+            elo_visita decimal(10, 3) null,
+            n_sims int null,
+            modelo_version varchar(40) null,
+            descartado tinyint not null default 0,
+            motivo varchar(60) null,
+            creado datetime not null,
+            index ai_picks_prob_event_idx (event_id),
+            index ai_picks_prob_sport_idx (sport, creado)
+        )
+        """,
+        # AUDITORIA DE SEGURIDAD. Sin este rastro, ante un incidente no se
+        # puede responder "que paso, desde donde y que se llevaron". No guarda
+        # contrasenas ni tokens, solo el hecho y su resultado.
+        """
+        create table if not exists security_events (
+            id int auto_increment primary key,
+            tipo varchar(40) not null,
+            resultado varchar(20) not null default 'ok',
+            usuario varchar(80) null,
+            ip varchar(45) null,
+            user_agent varchar(200) null,
+            detalle varchar(300) null,
+            creado datetime not null,
+            index security_events_tipo_idx (tipo, id),
+            index security_events_user_idx (usuario, creado),
+            index security_events_fecha_idx (creado)
+        )
+        """,
     ]
 
     for statement in statements:
@@ -779,61 +870,138 @@ def get_user_by_username(username):
 
 
 def health_status():
-    db_ok = bool(run_query("select 1 as ok", fetchone=True))
-    admin_username = os.getenv("ADMIN_USERNAME", "").strip()
-    admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
-    admin = get_user_by_username(admin_username) if admin_username else None
+    """Estado MINIMO para el healthcheck del host.
 
-    return {
-        "db_ok": db_ok,
-        "admin_configured": bool(admin_username and admin_password),
-        # NOTA: el username del admin NO se expone (habilita fuerza bruta).
-        "admin_exists": bool(admin),
-        "admin_role": admin["role"] if admin else None,
-    }
+    Antes devolvia `admin_configured`, `admin_exists` y `admin_role` en un
+    endpoint PUBLICO. Eso confirma a cualquiera que existe una cuenta admin y
+    con que rol: es el dato que convierte "fuerza bruta a ciegas" en "fuerza
+    bruta a un usuario conocido". Un healthcheck solo necesita saber si la BD
+    responde.
+    """
+    return {"ok": True, "db_ok": bool(run_query("select 1 as ok", fetchone=True))}
+
+
+# --------------------------------------------------------------------------
+# AUDITORIA DE SEGURIDAD
+# --------------------------------------------------------------------------
+def registrar_evento_seguridad(tipo, resultado="ok", usuario=None, ip=None,
+                               user_agent=None, detalle=None) -> bool:
+    """Deja constancia de un evento de seguridad. Nunca lanza.
+
+    Sin este rastro no se puede responder lo unico que importa tras un
+    incidente: que paso, desde donde y que se llevaron. NO se guarda nunca la
+    contrasena ni el token, solo su existencia y resultado.
+    """
+    try:
+        return bool(run_query(
+            "insert into security_events (tipo, resultado, usuario, ip,"
+            " user_agent, detalle, creado) values (%s, %s, %s, %s, %s, %s, %s)",
+            (str(tipo)[:40], str(resultado)[:20], (usuario or None),
+             (ip or None), (user_agent or None), (detalle or None), now_utc()),
+        ))
+    except Exception:
+        return False
+
+
+def eventos_seguridad(limite=200, tipo=None):
+    """Ultimos eventos de seguridad (para el panel de admin)."""
+    if tipo:
+        return run_query(
+            "select * from security_events where tipo = %s"
+            " order by id desc limit %s", (tipo, int(limite)),
+        ) or []
+    return run_query(
+        "select * from security_events order by id desc limit %s", (int(limite),)
+    ) or []
+
 
 
 def create_session(user_id):
+    """Crea una sesion. El token se guarda HASHEADO (ver `_hash_token`).
+
+    Un dump de la tabla `sessions` con los tokens en claro entrega todas las
+    sesiones activas: el atacante no necesita contrasenas, entra directo. Con
+    el hash, la fila no sirve para autenticarse.
+    """
     token = secrets.token_urlsafe(32)
     run_query(
         "insert into sessions (token, user_id, created_at) values (%s, %s, %s)",
-        (token, user_id, now_utc()),
+        (_hash_token(token), user_id, now_utc()),
     )
+    # Al cliente se le devuelve el token EN CLARO: es el unico momento en que
+    # existe. La BD solo conserva su hash.
     return token
 
 
 def delete_session(token):
-    run_query("delete from sessions where token = %s", (token,))
+    """Borra la sesion en los dos formatos (hash nuevo y claro antiguo)."""
+    run_query(
+        "delete from sessions where token in (%s, %s)",
+        (_hash_token(token), token),
+    )
 
 
 SESION_DIAS = 30  # vida maxima de una sesion (antes: sin expiracion)
 
 
 def get_user_by_token(token):
-    fila = run_query(
-        """
-        select users.*, sessions.created_at as _session_created_at
+    """Usuario dueño del token, o None.
+
+    Acepta los DOS formatos para poder migrar sin echar a nadie:
+      * hash sha256 (formato nuevo),
+      * token en claro (sesiones creadas antes del cambio), que se MIGRAN a
+        hash en el mismo momento en que se usan.
+    """
+    if not token:
+        return None
+    consulta = """
+        select users.*, sessions.created_at as _session_created_at,
+               sessions.token as _session_token
         from sessions
         join users on users.id = sessions.user_id
         where sessions.token = %s
-        """,
-        (token,),
-        fetchone=True,
-    )
+        """
+    fila = run_query(consulta, (_hash_token(token),), fetchone=True)
+    if not fila:
+        # Compatibilidad con sesiones antiguas en claro.
+        fila = run_query(consulta, (token,), fetchone=True)
+        if fila:
+            try:
+                run_query(
+                    "update sessions set token = %s where token = %s",
+                    (_hash_token(token), token),
+                )
+            except Exception:
+                pass  # si falla la migracion, la sesion sigue funcionando
     if not fila:
         return None
-    # Expiracion de sesion: un token sirve maximo SESION_DIAS. Antes las
-    # sesiones vivian para siempre (token filtrado = acceso perpetuo).
+    fila.pop("_session_token", None)
+    # Expiracion de sesion: un token sirve maximo SESION_DIAS (un token
+    # filtrado no puede ser acceso perpetuo).
     creada = fila.pop("_session_created_at", None)
     if creada is not None:
         try:
             edad = now_utc() - creada
             if edad > timedelta(days=SESION_DIAS):
-                run_query("delete from sessions where token = %s", (token,))
+                delete_session(token)
                 return None
         except TypeError:
             pass
     return fila
+
+
+def borrar_todas_las_sesiones(user_id=None) -> int:
+    """Cierra TODAS las sesiones (de un usuario, o de todo el sistema).
+
+    Se usa al cambiar la contrasena y en respuesta a un incidente: si un token
+    se filtro, rotar la contrasena sin cerrar sesiones no sirve de nada.
+    """
+    if user_id:
+        run_query("delete from sessions where user_id = %s", (user_id,))
+    else:
+        run_query("delete from sessions")
+    return True
+
 
 
 # ==============================

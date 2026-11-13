@@ -1321,6 +1321,23 @@ MOTOR_PRIMERO_DEPORTES = {
     ).split(",") if s.strip()
 }
 
+# ---------------------------------------------------------------------------
+# MOTOR ELO + MONTE CARLO (backend/apuestas/motor.py)
+# ---------------------------------------------------------------------------
+# Deportes donde el pick se elige con probabilidad CALCULADA (Elo + simulacion
+# del partido) en vez de por el criterio anterior (peso del mercado + cuota mas
+# baja). Se activa por deporte y con variable de entorno: quitar un deporte de
+# aqui devuelve su comportamiento anterior SIN tocar codigo.
+# Se deja encendido SOLO NBA hasta que los numeros de cada deporte esten
+# calibrados (ver backend/apuestas/calibrar.py).
+MOTOR_MC_DEPORTES = {
+    s.strip() for s in os.getenv("DASHBOARD_MOTOR_MC", "nba").split(",")
+    if s.strip()
+}
+# Umbral de edge del motor. 0 = aceptar cualquier edge positivo (solo para
+# diagnostico: NUNCA en produccion).
+MOTOR_MC_MIN_EDGE = float(os.getenv("MOTOR_MC_MIN_EDGE", "0.03"))
+
 # PROBABILIDAD MINIMA exigida por el usuario: el % de acierto medido en los
 # ultimos N partidos tiene que ser 70 o mas. Por debajo se RE-ANALIZA.
 PROBABILIDAD_MINIMA = int(os.getenv("DASHBOARD_PROB_MINIMA", "70"))
@@ -1558,11 +1575,18 @@ def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: s
     # inventa un porcentaje, y el filtro de resolubilidad sigue siendo el que
     # protege. (Ej: 'Schwarber 1+ hit' daba 30% real, asi que este filtro es
     # el que de verdad evita los picks malos, no la categoria del mercado.)
-    prob = probabilidad_pick(
-        pick, partido.get("sport") or "", partido.get("league"), ULTIMOS_PARTIDOS
-    )
-    if prob is not None and prob < PROBABILIDAD_MINIMA:
-        return "baja_probabilidad"
+    #
+    # EXCEPCION: los picks del motor Elo + Monte Carlo traen su PROPIA
+    # probabilidad con intervalo, calculada sobre el partido simulado. Medirlos
+    # otra vez con el % empirico de los ultimos 10 partidos seria mezclar dos
+    # modelos distintos y, en futbol, tirar un pick con edge positivo solo
+    # porque su probabilidad (por ejemplo 58%) no llega al 70% empirico.
+    if not pick.get("_motor"):
+        prob = probabilidad_pick(
+            pick, partido.get("sport") or "", partido.get("league"), ULTIMOS_PARTIDOS
+        )
+        if prob is not None and prob < PROBABILIDAD_MINIMA:
+            return "baja_probabilidad"
 
     return None
 
@@ -1838,6 +1862,55 @@ def _pick_deterministico(partido: dict, mercados_reales: list, label: str,
     }
 
 
+def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
+                   extra_stats: list | None = None):
+    """Elige el pick con Elo + Monte Carlo (backend/apuestas/motor.py).
+
+    Devuelve None si el motor no encuentra valor, si no hay ratings calibrados o
+    si algo falla. NUNCA lanza: un fallo del motor no puede tumbar el ciclo de
+    generacion (los demas deportes siguen generandose con su criterio).
+
+    El pick que devuelve trae la marca interna `_motor`, que es la que permite:
+      * que el filtro empirico del 70% no lo tumbe (el motor ya trae su propia
+        probabilidad y su propio intervalo),
+      * aceptar su cuota sin re-consultarla (viene de mercados_reales),
+      * registrarlo en ai_picks_prob para poder medir la calibracion.
+    """
+    if not mercados_reales:
+        return None
+    try:
+        from backend.apuestas import motor as motor_mc
+    except Exception as exc:  # noqa: BLE001 - sin motor se sigue con lo de antes
+        print(f"[Dashboard] motor elo+mc no disponible: {exc}", flush=True)
+        return None
+
+    try:
+        elegido = motor_mc.decidir(
+            partido, mercados_reales, partido.get("sport") or "nba",
+            min_edge=MOTOR_MC_MIN_EDGE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Dashboard] motor elo+mc fallo en {label}: {exc}", flush=True)
+        return None
+
+    if not elegido:
+        # El motor miro el partido y NO encontro valor. Se registra igual: medir
+        # solo las apuestas publicadas sesga la calibracion (es la politica de
+        # seleccion la que queda medida, no el modelo).
+        try:
+            pred = motor_mc.predecir(partido, partido.get("sport") or "nba")
+            motor_mc.registrar(partido, None, evaluacion={"pre": pred},
+                               descartado=True, motivo="sin_edge")
+        except Exception:  # noqa: BLE001 - medir no es critico
+            pass
+        return None
+    stats = [str(s) for s in (elegido.get("stats") or [])]
+    if extra_stats:
+        stats = stats + [s for s in extra_stats if s not in stats]
+    elegido["stats"] = stats[:6]
+    return elegido
+
+
 def _priorizar_mercados(mercados: list) -> list:
     """Ordena el catalogo de un deporte: primero los que mas aciertan y mas
     se resuelven. La IA elige de esta lista, asi que subir aqui el peso de los
@@ -2036,6 +2109,11 @@ def _partidos_hoy():
                     "away_name": away_name,
                     "home_logo": home.get("logo"),
                     "away_logo": away.get("logo"),
+                    # IDs de ESPN de los dos equipos. Los necesita el motor
+                    # Elo + Monte Carlo para cruzar el rating sin volver a
+                    # buscar el equipo por nombre en cada partido.
+                    "home_id": str(home.get("id") or ""),
+                    "away_id": str(away.get("id") or ""),
                     "date": g.get("date", ""),
                     "state": g.get("state"),
                     "odds": g.get("odds"),
@@ -2428,11 +2506,24 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                 f"{'; '.join(recientes['home'])}"
             )
 
+        # MOTOR ELO + MONTE CARLO (probabilidad calculada, no "cuota mas baja").
+        # Va ANTES del motor determinista porque es el unico que estima la
+        # probabilidad de cada mercado y solo publica si hay edge. Si no
+        # encuentra valor devuelve None y se sigue con el criterio de siempre:
+        # nunca deja el panel vacio.
+        pick = None
+        if p["sport"] in MOTOR_MC_DEPORTES:
+            pick = _pick_motor_mc(p, markets_reales, label, stats_motor)
+            if pick:
+                modelo = "motor elo+mc"
+
         # MOTOR PRIMERO (prioridad: no saturar la IA): tenis/NFL/NBA/MLB
         # eligen con los mercados REALES de Doradobet + los ultimos partidos
         # reales de ESPN, sin gastar un token. La IA solo interviene si el
         # motor no encuentra ningun mercado resoluble publicable.
-        if sin_cuota or p["sport"] in MOTOR_PRIMERO_DEPORTES:
+        if pick:
+            pass
+        elif sin_cuota or p["sport"] in MOTOR_PRIMERO_DEPORTES:
             pick = _pick_deterministico(p, markets_reales, label,
                                         extra_stats=stats_motor,
                                         evitar_mercados=mercados_usados)
@@ -2605,7 +2696,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
             except (TypeError, ValueError):
                 odds_pick = None
             odds_real_heredada = (
-                modelo == "cuantitativo (sin IA)" and odds_pick is not None
+                odds_pick is not None
+                and (modelo == "cuantitativo (sin IA)" or bool(pick.get("_motor")))
             )
             if odds_real_heredada:
                 if not (ODDS_MINIMA <= odds_pick <= ODDS_MAXIMA):
@@ -2701,6 +2793,19 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
         if creado:
             generados += 1
             mercados_usados.add(_market_norm(market))
+            # MEDICION. Se guarda en ai_picks_prob la probabilidad que dijo el
+            # motor para ESTE pick. Sin esto no se puede calcular Brier ni
+            # log-loss despues: ai_picks guarda la cuota y el resultado, pero no
+            # lo que el modelo creia.
+            if pick.get("_motor"):
+                try:
+                    from backend.apuestas import motor as motor_mc
+
+                    motor_mc.registrar(p, pick, descartado=False,
+                                       pick_id=str((creado or {}).get("id") or ""))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[Dashboard] no se pudo registrar la prob: {exc}",
+                          flush=True)
             # Evita que el mismo evento se reanalice en este lote (importante
             # ahora que el pick anterior se sustituye al insertar, no antes).
             try:
