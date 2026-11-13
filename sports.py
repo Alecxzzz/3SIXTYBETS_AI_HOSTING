@@ -1795,6 +1795,116 @@ def _parse_injuries(data: dict) -> list:
     return salida
 
 
+def _records_de(competidor: dict) -> dict:
+    """Records del equipo indexados por tipo ('total', 'home', 'away'...).
+
+    ESPN NO es consistente: en el `summary` los manda en `record` (singular) y
+    en el scoreboard en `records` (plural). Leer solo uno de los dos dejaba la
+    ficha del partido sin el "4-7, 1-3 Away" que se ve en la web de ESPN.
+    """
+    crudos = competidor.get("record") or competidor.get("records") or []
+    salida = {}
+    for r in crudos:
+        if not isinstance(r, dict):
+            continue
+        tipo = (r.get("type") or r.get("name") or "").lower()
+        valor = r.get("summary") or r.get("displayValue")
+        if tipo and valor:
+            salida[tipo] = valor
+    return salida
+
+
+def _parse_game_info(data: dict) -> dict:
+    """Ficha del partido: sede, arbitros, donde verlo y asistencia.
+
+    ESPN manda todo esto en `gameInfo` y en `broadcasts`, y el codigo lo tiraba:
+    el detalle del partido solo ensenaba el marcador. Sin esto no se puede
+    pintar la ficha que el usuario ve en ESPN (cancha, ciudad, arbitros, TV).
+    """
+    gi = data.get("gameInfo") or {}
+    venue = gi.get("venue") or {}
+    direccion = venue.get("address") or {}
+
+    imagen = ""
+    for img in venue.get("images") or []:
+        if isinstance(img, dict) and img.get("href"):
+            imagen = img["href"]
+            break
+
+    arbitros = []
+    for o in gi.get("officials") or []:
+        if not isinstance(o, dict):
+            continue
+        nombre = o.get("displayName") or o.get("fullName")
+        if not nombre:
+            continue
+        arbitros.append({
+            "name": nombre,
+            "role": (o.get("position") or {}).get("displayName") or "Referee",
+            "order": o.get("order"),
+        })
+    arbitros.sort(key=lambda a: (a.get("order") or 99))
+
+    tv = []
+    for b in (data.get("broadcasts") or gi.get("broadcasts") or []):
+        if not isinstance(b, dict):
+            continue
+        nombre = (b.get("media") or {}).get("name") or b.get("station") or ""
+        if not nombre:
+            continue
+        tv.append({
+            "name": nombre,
+            "type": (b.get("type") or {}).get("slug") or "",
+            "market": (b.get("market") or {}).get("type") or "",
+            "national": bool(b.get("isNational")),
+            "lang": b.get("lang"),
+        })
+
+    return {
+        "venue": venue.get("fullName") or "",
+        "short_venue": venue.get("shortName") or "",
+        "city": direccion.get("city") or "",
+        "state": direccion.get("state") or "",
+        "indoor": venue.get("indoor"),
+        "image": imagen,
+        "attendance": gi.get("attendance"),
+        "officials": arbitros,
+        "broadcasts": tv,
+    }
+
+
+def _parse_jugadas(data: dict, maximo: int = 60) -> list:
+    """Jugada a jugada (las ultimas `maximo`), como la pestana de ESPN.
+
+    Se recorta por el final porque lo util es lo reciente; el frontend puede
+    pedir mas subiendo `maximo`. Cada jugada lleva marcador, cuarto, reloj y si
+    anoto, que es lo que necesita la lista con la linea de tiempo.
+    """
+    salida = []
+    for p in (data.get("plays") or []):
+        if not isinstance(p, dict):
+            continue
+        texto = p.get("text") or p.get("shortDescription") or ""
+        if not texto:
+            continue
+        equipo = p.get("team") or {}
+        periodo = p.get("period") or {}
+        salida.append({
+            "n": p.get("sequenceNumber"),
+            "periodo": periodo.get("number"),
+            "periodo_label": periodo.get("displayValue") or "",
+            "reloj": (p.get("clock") or {}).get("displayValue") or "",
+            "texto": texto,
+            "local": p.get("homeScore"),
+            "visita": p.get("awayScore"),
+            "anota": bool(p.get("scoringPlay")),
+            "tipo": (p.get("type") or {}).get("text") or "",
+            "equipo": equipo.get("displayName") or equipo.get("abbreviation") or "",
+            "equipo_id": equipo.get("id"),
+        })
+    return salida[-maximo:]
+
+
 def _parse_winprobability(data: dict, maximo: int = 120) -> list:
     """Curva de probabilidad en vivo (solo partidos en juego/finalizados).
 
@@ -1970,6 +2080,9 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
     teams_out = []
     for competitor in comp.get("competitors", []):
         team = competitor.get("team", {})
+        # ESPN pone los records en `record` (singular) en el summary y en
+        # `records` (plural) en el scoreboard: el helper cubre los dos.
+        por_tipo = _records_de(competitor)
         teams_out.append({
             "id": team.get("id"),
             "name": team.get("displayName", "?"),
@@ -1981,8 +2094,10 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
             "score": _parse_number(competitor.get("score")),
             "winner": competitor.get("winner"),
             "homeAway": competitor.get("homeAway"),
+            "possession": bool(competitor.get("possession")),
             "linescores": _linescores(competitor),
-            "records": [r.get("summary") for r in (competitor.get("records") or []) if r],
+            "records": [v for v in por_tipo.values()],
+            "records_by_type": por_tipo,
         })
 
     # Estadisticas por equipo
@@ -2016,6 +2131,12 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
     odds = _parse_odds_pickcenter(data)
     injuries = _parse_injuries(data)
     win_probability = _parse_winprobability(data) if type_info.get("state") in ("in", "post") else []
+
+    # FICHA DEL PARTIDO (lo de las capturas de ESPN): sede con foto, arbitros,
+    # donde verlo y asistencia. Y la jugada a jugada.
+    game_info = _parse_game_info(data)
+    jugadas = (_parse_jugadas(data)
+               if type_info.get("state") in ("in", "post") else [])
 
     # Analytics: cuatro factores, ritmo/eficiencia, caja de jugadores y rachas
     analytics = {}
@@ -2082,6 +2203,8 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
         "status": type_info.get("shortDetail", ""),
         "clock": status.get("displayClock", ""),
         "period": status.get("period"),
+        "game_info": game_info,
+        "plays": jugadas,
         "situation": situation,
         "date": comp.get("date") or "",
         "teams": teams_out,
