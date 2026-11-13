@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 import db
 import emailer
+import estadisticas
 import security
 import sports
 import fotmob
@@ -3366,6 +3367,33 @@ def stats_alineacion(
         }
 
     return {"ok": True, "tipo": "probable", "fuente": "FotMob", "local": local, "visita": visita}
+
+
+@app.get("/estadisticas", response_class=HTMLResponse)
+def pagina_estadisticas(sport: str = "nba", event_id: str = "",
+                        user=Depends(get_current_user)):
+    """Página de estadísticas del partido, renderizada en el servidor.
+
+    Por qué está aquí y no en el frontend: la ficha completa (sede, árbitros,
+    dónde verlo, parciales, probabilidad y jugada a jugada) vivía solo en la API
+    y el frontend no la pintaba. Igual que /perfil o /track, se sirve desde el
+    backend para que exista de verdad sin depender del despliegue de Vercel.
+
+    Uso: /estadisticas?sport=nba&event_id=401909978
+    """
+    if not event_id:
+        raise HTTPException(400, "Falta ?event_id= (id del partido en ESPN).")
+    try:
+        detalle = sports.get_game_detail(sport, event_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[estadisticas] fallo {sport}/{event_id}: {exc}", flush=True)
+        raise HTTPException(502, "No se pudo obtener el detalle del partido.")
+
+    if detalle.get("error"):
+        raise HTTPException(404, str(detalle["error"]))
+    return HTMLResponse(estadisticas.pagina(detalle))
 
 
 @app.get("/stats/game")
