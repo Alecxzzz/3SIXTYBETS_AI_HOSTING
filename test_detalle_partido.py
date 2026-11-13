@@ -130,5 +130,46 @@ class TestRecords(unittest.TestCase):
         self.assertEqual(sports._records_de({"record": [None, {}, {"type": "x"}]}), {})
 
 
+class TestWinProbabilidad(unittest.TestCase):
+    """La serie que alimenta el grafico: contexto por punto y resumen."""
+
+    PAYLOAD = {
+        "plays": [
+            {"id": "p1", "text": "Jump ball", "homeScore": 0, "awayScore": 0,
+             "period": {"number": 1}, "clock": {"displayValue": "12:00"}},
+            {"id": "p2", "text": "Triple", "homeScore": 9, "awayScore": 2,
+             "period": {"number": 1}, "clock": {"displayValue": "9:41"}},
+        ],
+        "winprobability": [
+            {"playId": "p1", "homeWinPercentage": 0.55, "tiePercentage": 0.0},
+            {"playId": "p2", "homeWinPercentage": 0.78, "tiePercentage": 0.0},
+        ],
+    }
+
+    def test_cada_punto_lleva_el_contexto_de_su_jugada(self):
+        serie = sports._parse_winprobability(self.PAYLOAD)
+        self.assertEqual(len(serie), 2)
+        ultimo = serie[-1]
+        self.assertEqual(ultimo["local"], 0.78)
+        self.assertAlmostEqual(ultimo["visita"], 0.22, places=4)
+        self.assertEqual(ultimo["periodo"], 1)
+        self.assertEqual(ultimo["reloj"], "9:41")
+        self.assertEqual(ultimo["marcador_local"], 9)
+        self.assertEqual(ultimo["marcador_visita"], 2)
+
+    def test_resumen_da_los_maximos_de_los_dos_equipos(self):
+        serie = sports._parse_winprobability(self.PAYLOAD)
+        r = sports._resumen_winprob(serie)
+        self.assertAlmostEqual(r["max_local"], 0.78, places=4)
+        self.assertAlmostEqual(r["min_local"], 0.55, places=4)
+        # El maximo del visita NO es el del local: es 1 - minimo del local.
+        self.assertAlmostEqual(r["max_visita"], 0.45, places=4)
+        self.assertEqual(r["n"], 2)
+
+    def test_sin_datos(self):
+        self.assertEqual(sports._parse_winprobability({}), [])
+        self.assertEqual(sports._resumen_winprob([]), {})
+
+
 if __name__ == "__main__":
     unittest.main()

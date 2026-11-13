@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<!--
+  GRAFICO DE PROBABILIDAD DE VICTORIA (como ESPN)
+
+  Por que existe este archivo: el grafico anterior rellenaba el area desde 0,
+  no tenia linea de 50%, no marcaba los cuartos y pintaba 482 puntos: parecia
+  una montana y no se entendia nada.
+
+  Lo que hace bien este:
+    - LINEA BASE EN 50%: la referencia real es "quien gana ahora", no el cero.
+    - Dos colores: por encima de la linea manda el local; por debajo, el visita.
+    - Separadores de cuarto (Q1|Q2|Q3|Q4) en su posicion real de la serie.
+    - Marcador y reloj en cada punto (tooltip al pasar el raton).
+    - Etiquetas de maximo de CADA equipo, calculadas de la serie.
+    - Sin librerias: SVG puro. Se puede copiar tal cual a React.
+
+  Uso:
+    Abrir directamente -> usa una serie de ejemplo.
+    Con datos reales:  ?event=401909978&token=TU_TOKEN
+-->
+<meta charset="utf-8">
+<title>Probabilidad de victoria</title>
+<style>
+  body { margin:0; background:#0b0f19; color:#e6e8ee;
+         font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .card { max-width:900px; margin:24px auto; background:#111827;
+          border:1px solid #1f2937; border-radius:14px; padding:18px 20px; }
+  h2 { font-size:15px; margin:0 0 14px; letter-spacing:.02em; }
+  .pie { display:flex; justify-content:space-between; color:#9aa4b2;
+         font-size:12px; margin-top:8px; }
+  .pie b { color:#e6e8ee; }
+  #tip { position:fixed; pointer-events:none; background:#0b0f19;
+         border:1px solid #374151; border-radius:8px; padding:7px 9px;
+         font-size:12px; max-width:320px; display:none; z-index:9; }
+  .vacio { color:#9aa4b2; padding:30px 0; text-align:center; }
+</style>
+
+<div class="card">
+  <h2>📊 Probabilidad de victoria</h2>
+  <div id="chart"></div>
+  <div class="pie">
+    <span id="izq"></span><span id="der"></span>
+  </div>
+</div>
+<div id="tip"></div>
+
+<script>
+const W = 860, H = 300;          // lienzo
+const PL = 46, PR = 18, PT = 16, PB = 30;   // margenes
+const COLOR_LOCAL = "#7c3aed";   // morado
+const COLOR_VISITA = "#f97316";  // naranja
+const BASE = 0.5;                // la linea que importa
+
+const params = new URLSearchParams(location.search);
+const API = params.get("api") || "https://xn--sixtyserver--b61q52a.up.railway.app";
+
+// Serie de ejemplo (forma real: local/visita + cuarto/reloj/marcador)
+const EJEMPLO = [
+  {local:.62,periodo:1,reloj:"12:00",marcador_local:0,marcador_visita:0,jugada:"Inicio"},
+  {local:.55,periodo:1,reloj:"8:20",marcador_local:6,marcador_visita:8,jugada:"Triple del visita"},
+  {local:.38,periodo:1,reloj:"4:10",marcador_local:14,marcador_visita:20,jugada:"Parcial 0-8"},
+  {local:.47,periodo:2,reloj:"10:05",marcador_local:26,marcador_visita:28,jugada:"Dos del local"},
+  {local:.68,periodo:2,reloj:"3:30",marcador_local:44,marcador_visita:34,jugada:"Parcial 12-2"},
+  {local:.74,periodo:3,reloj:"9:12",marcador_local:58,marcador_visita:46,jugada:"Mate en contraataque"},
+  {local:.61,periodo:3,reloj:"2:00",marcador_local:66,marcador_visita:60,jugada:"Triples seguidos"},
+  {local:.52,periodo:4,reloj:"9:40",marcador_local:78,marcador_visita:76,jugada:"Se acerca el visita"},
+  {local:.44,periodo:4,reloj:"5:15",marcador_local:88,marcador_visita:92,jugada:"Parcial 2-10"},
+  {local:.59,periodo:4,reloj:"1:02",marcador_local:101,marcador_visita:99,jugada:"Canasta y falta"},
+  {local:.72,periodo:4,reloj:"0:04",marcador_local:104,marcador_visita:99,jugada:"Dos tiros libres"},
+];
+
+function puntos(lista) {
+  return lista.filter(p => typeof p.local === "number");
+}
+function resumen(lista) {
+  const v = lista.map(p => p.local);
+  return { max_local: Math.max(...v), min_local: Math.min(...v),
+           max_visita: 1 - Math.min(...v), n: lista.length };
+}
+
+/* ---------- dibujo ---------- */
+function dibujar(datos, nombres) {
+  const pts = puntos(datos);
+  const host = document.getElementById("chart");
+  if (pts.length < 2) {
+    host.innerHTML = '<div class="vacio">Sin datos de probabilidad para este partido.</div>';
+    return;
+  }
+
+  const n = pts.length;
+  const x = i => PL + (i / (n - 1)) * (W - PL - PR);
+  const y = v => PT + (1 - v) * (H - PT - PB);
+
+  // La linea
+  const linea = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.local).toFixed(1)}`).join(" ");
+
+  // Area: se cierra contra la linea del 50%. El degradado hace que por encima
+  // salga del color del local y por debajo del color del visita.
+  const area = `M${x(0).toFixed(1)},${y(BASE).toFixed(1)} ` +
+               pts.map((p, i) => `L${x(i).toFixed(1)},${y(p.local).toFixed(1)}`).join(" ") +
+               ` L${x(n - 1).toFixed(1)},${y(BASE).toFixed(1)} Z`;
+
+  // Separadores de cuarto: donde cambia `periodo`
+  const cortes = [];
+  for (let i = 1; i < n; i++) {
+    if (pts[i].periodo && pts[i - 1].periodo && pts[i].periodo !== pts[i - 1].periodo) {
+      cortes.push({ i, etiqueta: "Q" + pts[i].periodo });
+    }
+  }
+
+  const ultimo = pts[n - 1];
+  const r = resumen(pts);
+
+  host.innerHTML = `
+  <svg viewBox="0 0 ${W} ${H}" width="100%" height="auto" role="img"
+       aria-label="Probabilidad de victoria jugada a jugada">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="${COLOR_LOCAL}" stop-opacity=".55"/>
+        <stop offset="${(y(BASE) / H * 100).toFixed(1)}%" stop-color="${COLOR_LOCAL}" stop-opacity=".30"/>
+        <stop offset="${(y(BASE) / H * 100).toFixed(1)}%" stop-color="${COLOR_VISITA}" stop-opacity=".30"/>
+        <stop offset="100%" stop-color="${COLOR_VISITA}" stop-opacity=".55"/>
+      </linearGradient>
+    </defs>
+
+    <!-- zona del visita (fondo) -->
+    <rect x="${PL}" y="${y(BASE)}" width="${W - PL - PR}" height="${y(0) - y(BASE)}" fill="#0f1523"/>
+
+    <!-- area -->
+    <path d="${area}" fill="url(#g)" stroke="none"/>
+
+    <!-- linea del 50% -->
+    <line x1="${PL}" y1="${y(BASE)}" x2="${W - PR}" y2="${y(BASE)}"
+          stroke="#4b5563" stroke-width="1" stroke-dasharray="5 5"/>
+    <text x="${PL - 8}" y="${y(BASE) + 4}" fill="#9aa4b2" font-size="11"
+          text-anchor="end">50%</text>
+
+    <!-- cuartos -->
+    ${cortes.map(c => `
+      <line x1="${x(c.i)}" y1="${PT}" x2="${x(c.i)}" y2="${H - PB}"
+            stroke="#374151" stroke-width="1"/>
+      <text x="${x(c.i) + 4}" y="${PT + 11}" fill="#6b7280" font-size="10">${c.etiqueta}</text>
+    `).join("")}
+
+    <!-- linea principal -->
+    <path d="${linea}" fill="none" stroke="${ultimo.local >= BASE ? COLOR_LOCAL : COLOR_VISITA}"
+          stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+
+    <!-- punto actual -->
+    <circle cx="${x(n - 1)}" cy="${y(ultimo.local)}" r="4.5"
+            fill="${ultimo.local >= BASE ? COLOR_LOCAL : COLOR_VISITA}"
+            stroke="#0b0f19" stroke-width="2"/>
+
+    <!-- eje X: primer y ultimo cuarto -->
+    <text x="${PL}" y="${H - 8}" fill="#6b7280" font-size="10">Inicio</text>
+    <text x="${W - PR}" y="${H - 8}" fill="#6b7280" font-size="10" text-anchor="end">
+      ${ultimo.reloj || "Final"} · Q${ultimo.periodo || "-"}
+    </text>
+
+    <!-- zona de captura del raton -->
+    <rect id="hover" x="${PL}" y="${PT}" width="${W - PL - PR}" height="${H - PT - PB}"
+          fill="transparent"/>
+    <line id="cursor" y1="${PT}" y2="${H - PB}" stroke="#9aa4b2" stroke-width="1"
+          stroke-dasharray="3 3" opacity="0"/>
+  </svg>`;
+
+  document.getElementById("der").innerHTML =
+    `Máx. ${nombres.local} <b>${(r.max_local * 100).toFixed(0)}%</b>`;
+  document.getElementById("izq").innerHTML =
+    `Máx. ${nombres.visita} <b>${(r.max_visita * 100).toFixed(0)}%</b> · ` +
+    `${r.n} jugadas`;
+
+  conectarHover(pts, x, y);
+}
+
+/* ---------- tooltip ---------- */
+function conectarHover(pts, x, y) {
+  const svg = document.querySelector("#chart svg");
+  const zona = document.getElementById("hover");
+  const cursor = document.getElementById("cursor");
+  const tip = document.getElementById("tip");
+
+  zona.addEventListener("mousemove", (ev) => {
+    const caja = svg.getBoundingClientRect();
+    // pixel del raton -> coordenada del viewBox
+    const vx = (ev.clientX - caja.left) * (W / caja.width);
+    const t = Math.min(1, Math.max(0, (vx - PL) / (W - PL - PR)));
+    const i = Math.round(t * (pts.length - 1));
+    const p = pts[i];
+
+    cursor.setAttribute("x1", x(i));
+    cursor.setAttribute("x2", x(i));
+    cursor.setAttribute("opacity", "1");
+
+    const pct = (p.local * 100).toFixed(1);
+    tip.innerHTML =
+      `<b>${pct}%</b> ${p.local >= BASE ? "local" : "visita"}<br>` +
+      `${p.marcador_visita ?? "?"}-${p.marcador_local ?? "?"} · ` +
+      `Q${p.periodo ?? "-"} ${p.reloj || ""}<br>` +
+      `<span style="color:#9aa4b2">${p.jugada || ""}</span>`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(window.innerWidth - 340, ev.clientX + 14) + "px";
+    tip.style.top = (ev.clientY - 60) + "px";
+  });
+
+  zona.addEventListener("mouseleave", () => {
+    tip.style.display = "none";
+    cursor.setAttribute("opacity", "0");
+  });
+}
+
+/* ---------- datos ---------- */
+async function iniciar() {
+  const ev = params.get("event");
+  const tok = params.get("token");
+  let datos = EJEMPLO;
+  let nombres = { local: "LOCAL", visita: "VISITA" };
+
+  if (ev) {
+    try {
+      const r = await fetch(`${API}/stats/game?sport=nba&event_id=${ev}`, {
+        headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      const equipos = d.teams || [];
+      const local = equipos.find(t => t.homeAway === "home") || equipos[0] || {};
+      const visita = equipos.find(t => t.homeAway === "away") || equipos[1] || {};
+      if ((d.win_probability || []).length > 1) {
+        datos = d.win_probability;
+        nombres = {
+          local: local.abbr || local.name || "LOCAL",
+          visita: visita.abbr || visita.name || "VISITA",
+        };
+      }
+    } catch (e) {
+      console.warn("No se pudo cargar el partido:", e.message,
+                   "— se muestra la serie de ejemplo.");
+    }
+  }
+  dibujar(datos, nombres);
+}
+
+iniciar();
+</script>
+
+</script>

@@ -1905,15 +1905,35 @@ def _parse_jugadas(data: dict, maximo: int = 60) -> list:
     return salida[-maximo:]
 
 
-def _parse_winprobability(data: dict, maximo: int = 120) -> list:
-    """Curva de probabilidad en vivo (solo partidos en juego/finalizados).
+def _parse_winprobability(data: dict, maximo: int = 140) -> list:
+    """Curva de probabilidad en vivo, con el contexto de cada punto.
 
-    ESPN manda un punto por jugada (400+): se recorta a `maximo` repartiendo
-    uniformemente para que la curva se dibuje igual pero pese poco.
+    ESPN manda un punto por jugada (400+) y solo con el porcentaje. Asi el
+    grafico no puede poner cuartos, ni eje de tiempo, ni marcador: sale una
+    sierra sin referencia. Aqui cada punto se cruza con su jugada (por playId)
+    para llevar cuarto, reloj y marcador, y se recorta para que la linea se
+    pueda leer.
     """
     puntos = data.get("winprobability") or []
     if not puntos:
         return []
+
+    # playId -> contexto de la jugada (cuarto, reloj, marcador)
+    contexto = {}
+    for p in (data.get("plays") or []):
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id") or "")
+        if not pid:
+            continue
+        contexto[pid] = {
+            "periodo": (p.get("period") or {}).get("number"),
+            "reloj": (p.get("clock") or {}).get("displayValue") or "",
+            "marcador_local": p.get("homeScore"),
+            "marcador_visita": p.get("awayScore"),
+            "jugada": (p.get("text") or "")[:90],
+        }
+
     paso = max(1, len(puntos) // maximo)
 
     def _punto(p):
@@ -1922,13 +1942,43 @@ def _parse_winprobability(data: dict, maximo: int = 120) -> list:
         visita = _numero(p.get("awayWinPercentage"))
         if visita is None and local is not None:
             visita = round(max(0.0, 1 - local - empate), 4)
-        return {"local": local, "visita": visita, "empate": empate}
+        ctx = contexto.get(str(p.get("playId") or ""), {})
+        return {
+            "local": local,
+            "visita": visita,
+            "empate": empate,
+            "periodo": ctx.get("periodo"),
+            "reloj": ctx.get("reloj"),
+            "marcador_local": ctx.get("marcador_local"),
+            "marcador_visita": ctx.get("marcador_visita"),
+            "jugada": ctx.get("jugada"),
+        }
 
     recortados = [_punto(p) for p in puntos[::paso]]
     final = _punto(puntos[-1])
     if recortados and recortados[-1] != final:
         recortados.append(final)
     return recortados
+
+
+def _resumen_winprob(puntos: list) -> dict:
+    """Maximos y minimos REALES de la serie (para las etiquetas del grafico).
+
+    Va aparte de la lista a proposito: si se metiera como un punto mas, el
+    grafico leeria `local` de un objeto que no lo tiene y la linea se rompe.
+    """
+    locales = [p["local"] for p in puntos
+               if isinstance(p, dict) and p.get("local") is not None]
+    if not locales:
+        return {}
+    return {
+        "max_local": max(locales),
+        "min_local": min(locales),
+        "max_visita": round(1 - min(locales), 4),
+        "min_visita": round(1 - max(locales), 4),
+        "n": len(puntos),
+        "actual_local": locales[-1],
+    }
 
 
 def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -> dict:
@@ -2215,6 +2265,7 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
         "odds": odds,
         "injuries": injuries,
         "win_probability": win_probability,
+        "win_probability_resumen": _resumen_winprob(win_probability),
         "players_box": players_box,
         "runs": rachas,
         "updated_at": datetime.now(timezone.utc).isoformat(),
