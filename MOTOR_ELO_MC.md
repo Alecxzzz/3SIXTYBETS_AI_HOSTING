@@ -59,6 +59,47 @@ python generar_picks_nba.py --forzar          # publica los picks de NBA
 python -m backend.apuestas.backtest           # calidad de lo ya resuelto
 ```
 
+## El analista (panel de picks) también usa este motor
+
+Desde este cambio, `ai/analista_picks.py` **precia los picks NBA con Elo + Monte
+Carlo**, no con el modelo de forma de 10 partidos que tenía antes:
+
+| Antes | Ahora |
+|---|---|
+| `forma_equipo()` → medias de 10 partidos | `motor.predecir()` → ratings Elo + descanso |
+| Margen y total a mano | `simulacion.simular_nba()` → 10.000 simulaciones |
+| No ajustaba por rival | Ajusta por rival (es lo que hace Elo) |
+| Sin calibrar | Calibrado con 2.632 partidos (Brier 0.210) |
+
+Orden de decisión en `_analizar_nba()`:
+
+1. `_salida_elo()` — motor Elo + MC. Devuelve también el **intervalo** de la
+   probabilidad (`prob_low`/`prob_high`), que el modelo de forma no podía dar.
+2. Si no hay ratings (o el mercado no se modela) → respaldo: modelo de forma.
+
+El respaldo también cubre los mercados de **props de jugador** (`Minimo de
+puntos del jugador`), que el motor de partido no simula: ahí manda el modelo de
+forma con los promedios de temporada del plantel.
+
+Notas de rendimiento (un lote de 25 picks tarda ~26 s):
+
+- `equipo_id()` cachea en memoria: antes se preguntaba el id a ESPN **dos veces
+  por pick** (50 peticiones por lote).
+- `elo.estado()` cachea los ratings 12 h; a partir del primer pick son gratis.
+- 10.000 simulaciones por pick (no 20.000): el precio no cambia y baja a la mitad
+  el tiempo.
+
+## Cuántos picks por análisis
+
+`POST /analisis/pendientes` analiza **25 picks por defecto** (antes 10), y acepta
+hasta **60** con `{"limite": N}`. El resumen devuelve, además de
+`valor / neutro / evitar`, dos contadores nuevos:
+
+- `dudosos` — el modelo discrepa más de 10 puntos de la cuota. **No se publican.**
+- `revisar` — el edge supera el 25%, imposible en un mercado líquido.
+- `motor_elo_mc` — cuántos picks usaron el motor (el resto, el respaldo).
+
+
 ## Resultado de la calibración NBA (3 temporadas, 2.632 partidos)
 
 ```

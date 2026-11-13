@@ -94,7 +94,11 @@ class TestAnalisisCompleto(unittest.TestCase):
     """analizar_pick con NBA: veredicto real a partir de probabilidad y cuota."""
 
     def _analizar(self, pick, f_local, f_visita):
-        with mock.patch.object(A, "forma_equipo", side_effect=[f_local, f_visita]):
+        # Estos tests fijan el RESPALDO (modelo de forma): se fuerza Elo+MC a
+        # "no disponible". El motor Elo+MC tiene sus propios tests en
+        # test_motor.py / test_simulacion.py y en TestMotorElo.
+        with mock.patch.object(A, "_salida_elo", return_value=None), \
+                mock.patch.object(A, "forma_equipo", side_effect=[f_local, f_visita]):
             return A.analizar_pick(pick)
 
     def test_local_algo_mejor_da_valor_justificado(self):
@@ -157,12 +161,79 @@ class TestAnalisisCompleto(unittest.TestCase):
                 "away_name": "Washington Wizards", "market": "Minimo de puntos del jugador",
                 "titulo": "Minimo de puntos del jugador",
                 "selection": "Jugador Inexistente Over 20.5", "odds": 1.85}
-        with mock.patch.object(A, "forma_equipo", side_effect=[forma(120, 110), forma(110, 110)]), \
+        with mock.patch.object(A, "_salida_elo", return_value=None), \
+                mock.patch.object(A, "forma_equipo", side_effect=[forma(120, 110), forma(110, 110)]), \
                 mock.patch.object(A, "_promedios_equipo", return_value=[]):
             r = A.analizar_pick(pick)
         self.assertTrue(r["ok"])
         self.assertFalse(r["soportado"])
         self.assertIn("jugador", r["motivo"])
+
+
+def _salida_elo_falsa(prob=0.58, low=0.55, high=0.61):
+    """Lo que devolveria el motor Elo+MC para un pick NBA."""
+    return {
+        "ok": True, "deporte": "nba", "motor": "elo+mc",
+        "partido": "Indiana Pacers vs Washington Wizards",
+        "soportado": True, "mercado_detectado": "ganador",
+        "distribucion": {"prob": prob},
+        "prob_low": low, "prob_high": high,
+        "goles_esperados": {"local": 114.2, "visita": 109.7},
+        "fuerzas": {"n_local": 58, "n_visita": 57, "elo_local": 1615.0,
+                    "elo_visita": 1417.0, "descanso_local": 2, "descanso_visita": 1},
+        "info": "Elo 1615 vs 1417 · marcador esperado 114.2-109.7 · 10000 simulaciones",
+    }
+
+
+class TestMotorElo(unittest.TestCase):
+    """El analista NBA debe usar Elo+MC de ahora en adelante."""
+
+    def _pick(self, odds=1.90):
+        return {"id": "9", "sport": "nba", "home_name": "Indiana Pacers",
+                "away_name": "Washington Wizards", "market": "Ganador (incl. prorroga)",
+                "titulo": "Ganador", "selection": "Indiana Pacers", "odds": odds}
+
+    def test_usa_el_motor_elo_y_no_la_forma(self):
+        with mock.patch.object(A, "_salida_elo", return_value=_salida_elo_falsa(0.58)), \
+                mock.patch.object(A, "forma_equipo") as forma_mock:
+            r = A.analizar_pick(self._pick())
+        self.assertEqual(r["motor"], "elo+mc")
+        self.assertAlmostEqual(r["prob_justa"], 0.58, places=4)
+        # No se consulto la forma de ESPN: el motor manda.
+        forma_mock.assert_not_called()
+        self.assertEqual(r["veredicto"], "VALOR")
+        self.assertIn("Elo 1615", r["info"])
+
+    def test_si_el_mercado_no_se_modela_no_cae_al_modelo_viejo(self):
+        salida = {"ok": True, "soportado": False, "deporte": "nba", "motor": "elo+mc",
+                  "partido": "A vs B", "mercado_detectado": "no_soportado",
+                  "motivo": "mercado no modelable"}
+        with mock.patch.object(A, "_salida_elo", return_value=salida), \
+                mock.patch.object(A, "forma_equipo") as forma_mock:
+            r = A.analizar_pick(self._pick())
+        self.assertFalse(r["soportado"])
+        forma_mock.assert_not_called()
+
+    def test_sin_cuota_el_motor_tampoco_inventa_valor(self):
+        with mock.patch.object(A, "_salida_elo", return_value=_salida_elo_falsa(0.58)):
+            r = A.analizar_pick(self._pick(odds=None))
+        self.assertEqual(r["veredicto"], "SIN_CUOTA")
+
+    def test_el_reporte_muestra_el_motor_y_el_intervalo(self):
+        with mock.patch.object(A, "_salida_elo", return_value=_salida_elo_falsa(0.58)):
+            r = A.analizar_pick(self._pick())
+        txt = A.informe_texto(r)
+        self.assertIn("Motor: elo+mc", txt)
+        self.assertIn("IC", txt)
+        self.assertIn("simulaciones", txt)
+
+    def test_el_lote_cuenta_los_dudosos_y_el_motor(self):
+        pick = self._pick(odds=2.20)  # 58% a 2.20: discrepancia de 12.5 pts
+        with mock.patch.object(A, "_salida_elo", return_value=_salida_elo_falsa(0.58)):
+            lote = A.analizar_lote([pick])
+        self.assertEqual(lote["resumen"]["dudosos"], 1)
+        self.assertEqual(lote["resumen"]["valor"], 0)
+        self.assertEqual(lote["resumen"]["motor_elo_mc"], 1)
 
 
 if __name__ == "__main__":

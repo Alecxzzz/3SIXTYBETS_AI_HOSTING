@@ -1856,7 +1856,7 @@ class AnalisisIn(BaseModel):
     pick: dict | None = None
     pick_id: str | None = None
     con_llm: bool = False
-    limite: int = 10
+    limite: int = 25
     # El modelo cuantitativo es de goles: por defecto solo futbol. Con
     # sport="" se analizan todos y se informa de los que no se pueden modelar.
     sport: str = "soccer"
@@ -1894,12 +1894,12 @@ def analisis_pendientes(data: AnalisisIn, user=Depends(get_admin)):
     if not _analista_ok:
         raise HTTPException(503, "El analista no esta disponible.")
 
-    limite = max(1, min(int(data.limite or 10), 60))
+    limite = max(1, min(int(data.limite or 25), 60))
     sport = (data.sport or "").strip().lower()
     if sport:
         # Solo el deporte pedido y los mas recientes: el modelo es de goles y
         # los pendientes mas viejos suelen ser de otros deportes.
-        picks = db.list_picks_pendientes_sport(sport, limite=60) or []
+        picks = db.list_picks_pendientes_sport(sport, limite=limite) or []
     else:
         picks = db.list_picks_pendientes() or []
 

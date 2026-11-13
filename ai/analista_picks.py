@@ -139,10 +139,22 @@ def _es_soccer(sport: str, league: Optional[str]) -> bool:
     return p.startswith("soccer/")
 
 
+_EQUIPO_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
 def equipo_id(nombre: str) -> Optional[Dict[str, Any]]:
-    """Busca el id de un equipo en ESPN. {id, name, league}."""
+    """Busca el id de un equipo en ESPN. {id, name, league}.
+
+    Cacheado en memoria: un lote de 25 picks hacia 50 busquedas a ESPN (dos por
+    pick) y el analisis tardaba minutos. El id de un equipo no cambia, asi que
+    no hay motivo para preguntarlo dos veces en el mismo proceso.
+    """
     if not nombre:
         return None
+    clave = nombre.strip().lower()
+    if clave in _EQUIPO_CACHE:
+        return _EQUIPO_CACHE[clave]
+    resultado = None
     try:
         r = requests.get(
             ESPN_SEARCH,
@@ -150,18 +162,19 @@ def equipo_id(nombre: str) -> Optional[Dict[str, Any]]:
             headers=UA,
             timeout=15,
         )
-        if r.status_code != 200:
-            return None
-        for item in r.json().get("items", []):
-            if item.get("type") == "team":
-                return {
-                    "id": item.get("id"),
-                    "name": item.get("displayName"),
-                    "league": item.get("defaultLeagueSlug"),
-                }
+        if r.status_code == 200:
+            for item in r.json().get("items", []):
+                if item.get("type") == "team":
+                    resultado = {
+                        "id": item.get("id"),
+                        "name": item.get("displayName"),
+                        "league": item.get("defaultLeagueSlug"),
+                    }
+                    break
     except Exception as e:  # noqa: BLE001 - red externa, no debe tumbar el analisis
         print(f"[analista equipo_id] {e}", flush=True)
-    return None
+    _EQUIPO_CACHE[clave] = resultado
+    return resultado
 
 
 def forma_equipo(sport: str, league: Optional[str], equipo: str,
@@ -626,29 +639,123 @@ def _promedios_equipo(nombre: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
-    """Analiza un pick NBA con el modelo propio (ai/analista_nba.py).
+def _salida_elo(pick: Dict[str, Any], home: str,
+                away: str) -> Optional[Dict[str, Any]]:
+    """Precio del pick con ELO + MONTE CARLO (backend/apuestas).
 
-    Usa la MISMA base de ESPN que el dashboard: forma reciente de cada equipo
-    (puntos a favor/en contra) y, para props, los promedios de temporada del
-    plantel. Devuelve el mismo contrato que el analisis de futbol para que el
-    panel (VALOR/NEUTRO/EVITAR) funcione igual.
+    Por que se usa esto y no solo la forma de 10 partidos: el modelo de forma
+    no ajusta por rival (un 3-0 contra el colista pesa igual que contra el
+    lider) y nunca se valido contra resultados. El motor Elo esta calibrado con
+    2.632 partidos: Brier 0.210 contra 0.250 del azar, y el MAE del margen baja
+    de 13.0 a 11.3 puntos.
+
+    Devuelve None si no hay ratings o el mercado no se puede modelar; entonces
+    el llamador cae al modelo anterior.
+    """
+    try:
+        from backend.apuestas import motor as motor_mc
+        from backend.apuestas import simulacion
+    except Exception as exc:  # noqa: BLE001 - sin motor se sigue como antes
+        print(f"[analista] motor elo+mc no disponible: {exc}", flush=True)
+        return None
+
+    eq_l, eq_v = equipo_id(home), equipo_id(away)
+    if not eq_l or not eq_v or not eq_l.get("id") or not eq_v.get("id"):
+        return None
+
+    partido = {
+        "event_id": str(pick.get("event_id") or ""),
+        "home_name": home, "away_name": away,
+        "home_id": str(eq_l["id"]), "away_id": str(eq_v["id"]),
+        "date": pick.get("event_date") or pick.get("date") or "",
+    }
+    entrada = {
+        "market": pick.get("market") or "",
+        "titulo": pick.get("titulo") or "",
+        "selection": pick.get("selection") or "",
+        "odds": pick.get("odds"),
+    }
+    clas = motor_mc.clasificar(entrada, home, away)
+    if clas.get("tipo") == "no_soportado":
+        return {"ok": True, "soportado": False, "deporte": "nba",
+                "partido": f"{home} vs {away}",
+                "mercado_detectado": clas.get("tipo"),
+                "motivo": clas.get("motivo") or "mercado no modelable"}
+
+    pre = motor_mc.predecir(partido, "nba")
+    if not pre.get("ok"):
+        return None  # sin ratings: que decida el modelo de forma
+
+    sim = simulacion.simular_nba(
+        pre["mu_local"], pre["mu_visita"], pre["sigma_equipo"],
+        pre["rho_equipos"], n=10000, p_ot=pre["p_ot"],
+        semilla=motor_mc._semilla(partido),
+    )
+    precio = simulacion.precio(sim, clas)
+    prob = precio.get("prob")
+    if prob is None:
+        return None
+
+    return {
+        "ok": True,
+        "deporte": "nba",
+        "motor": "elo+mc",
+        "partido": f"{home} vs {away}",
+        "soportado": True,
+        "mercado_detectado": clas.get("tipo"),
+        "distribucion": {"prob": prob},
+        "prob_low": precio.get("prob_low"),
+        "prob_high": precio.get("prob_high"),
+        "goles_esperados": {"local": pre["mu_local"], "visita": pre["mu_visita"]},
+        "fuerzas": {
+            "n_local": pre.get("partidos_local") or 0,
+            "n_visita": pre.get("partidos_visita") or 0,
+            "elo_local": pre.get("elo_local"),
+            "elo_visita": pre.get("elo_visita"),
+            "descanso_local": pre.get("descanso_local"),
+            "descanso_visita": pre.get("descanso_visita"),
+        },
+        "info": (f"Elo {pre['elo_local']:.0f} vs {pre['elo_visita']:.0f} · "
+                 f"marcador esperado {pre['mu_local']:.1f}-{pre['mu_visita']:.1f} · "
+                 f"{sim.get('n')} simulaciones"),
+    }
+
+
+def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
+    """Analiza un pick NBA con ELO + MONTE CARLO, con respaldo al modelo de forma.
+
+    Orden de preferencia:
+      1. Motor Elo + Monte Carlo (backend/apuestas): calibrado con 2.632
+         partidos, ajusta por rival y por descanso.
+      2. Modelo de forma de 10 partidos (ai/analista_nba.py): solo si faltan
+         ratings o el partido no tiene ids de ESPN.
+
+    Devuelve el mismo contrato que el analisis de futbol para que el panel
+    (VALOR/NEUTRO/EVITAR) funcione igual.
     """
     from . import analista_nba as nba
 
-    f_local = forma_equipo("nba", None, home, n=10)
-    f_visita = forma_equipo("nba", None, away, n=10)
-    if not f_local and not f_visita:
-        return {"ok": False, "motivo": "ESPN no devolvio forma reciente de ningun equipo"}
+    salida = _salida_elo(pick, home, away)
+    if salida is None:
+        # Respaldo: forma reciente de ESPN (la MISMA base del dashboard).
+        f_local = forma_equipo("nba", None, home, n=10)
+        f_visita = forma_equipo("nba", None, away, n=10)
+        if not f_local and not f_visita:
+            return {"ok": False,
+                    "motivo": "sin ratings Elo y ESPN no devolvio forma reciente"}
 
-    mercado = nba.clasificar_mercado_nba(pick)
-    promedios_local = promedios_visita = None
-    if mercado.get("tipo") == "prop":
-        promedios_local = _promedios_equipo(home)
-        promedios_visita = _promedios_equipo(away)
+        mercado = nba.clasificar_mercado_nba(pick)
+        promedios_local = promedios_visita = None
+        if mercado.get("tipo") == "prop":
+            promedios_local = _promedios_equipo(home)
+            promedios_visita = _promedios_equipo(away)
 
-    salida = nba.analizar_pick_nba(pick, f_local, f_visita, promedios_local, promedios_visita)
-    if not salida.get("ok") or not salida.get("soportado"):
+        salida = nba.analizar_pick_nba(pick, f_local, f_visita,
+                                       promedios_local, promedios_visita)
+        salida.setdefault("motor", "forma-10")
+        if not salida.get("ok") or not salida.get("soportado"):
+            return salida
+    elif not salida.get("ok") or not salida.get("soportado"):
         return salida
 
     prob = float(salida["distribucion"]["prob"])
@@ -864,21 +971,45 @@ def _prompt_analisis(a: Dict[str, Any], pick: Dict[str, Any]) -> str:
     f = a.get("fuerzas") or {}
     d = a.get("distribucion") or {}
     ge = a.get("goles_esperados") or {}
+    nba = a.get("deporte") == "nba"
+    if nba and a.get("motor") == "elo+mc":
+        motor_txt = "ELO + MONTE CARLO (calibrado con 2.632 partidos NBA)"
+    elif nba:
+        motor_txt = "FORMA de los ultimos 10 partidos (ESPN)"
+    else:
+        motor_txt = "POISSON sobre la forma real de ESPN"
     lineas = [
         f"PARTIDO: {a.get('partido')}",
         f"PICK A REVISAR: {pick.get('titulo') or pick.get('market')} -> "
         f"{pick.get('selection')} (cuota {a.get('cuota')})",
         "",
-        "MODELO CUANTITATIVO (Poisson sobre la forma real de ESPN):",
-        f"  Goles a favor por partido: {f.get('gf_local')} y {f.get('gf_visita')}",
-        f"  Goles en contra por partido: {f.get('ga_local')} y {f.get('ga_visita')}",
-        f"  Muestra: {f.get('n_local')} y {f.get('n_visita')} partidos",
-        f"  Marcador esperado: {ge.get('local')} - {ge.get('visita')}",
-        f"  Probabilidad 1X2: {d.get('local')} / {d.get('empate')} / {d.get('visita')}",
-        f"  Probabilidad del pick: {a.get('prob_justa')}",
+        f"MODELO CUANTITATIVO ({motor_txt}):",
+    ]
+    if nba:
+        lineas += [
+            f"  Rating Elo: {f.get('elo_local')} y {f.get('elo_visita')}",
+            f"  Puntos esperados: {ge.get('local')} - {ge.get('visita')}",
+            f"  Partidos en el rating: {f.get('n_local')} y {f.get('n_visita')}",
+        ]
+    else:
+        lineas += [
+            f"  Goles a favor por partido: {f.get('gf_local')} y {f.get('gf_visita')}",
+            f"  Goles en contra por partido: {f.get('ga_local')} y {f.get('ga_visita')}",
+            f"  Muestra: {f.get('n_local')} y {f.get('n_visita')} partidos",
+            f"  Marcador esperado: {ge.get('local')} - {ge.get('visita')}",
+            f"  Probabilidad 1X2: {d.get('local')} / {d.get('empate')} / {d.get('visita')}",
+        ]
+    lineas += [
+        f"  Probabilidad del pick: {a.get('prob_justa')}"
+        + (f" (intervalo {a.get('prob_low')}-{a.get('prob_high')})"
+           if a.get("prob_low") is not None else ""),
         f"  Probabilidad implicita de la cuota: {a.get('prob_implicita')}",
         f"  EDGE: {a.get('edge_pct')}%   EV: {a.get('ev_pct')}%",
         f"  Veredicto del modelo: {a.get('veredicto')} (confianza {a.get('confianza')})",
+    ]
+    if a.get("nota"):
+        lineas.append(f"  Motivo del veredicto: {a['nota']}")
+    lineas += [
         "",
         "Redacta en espanol, maximo 120 palabras, sin tablas ni markdown:",
         "1) que dice el modelo y por que;",
@@ -912,7 +1043,10 @@ def informe_texto(a: Dict[str, Any]) -> str:
 
     L = [
         f"{a.get('partido')}  [{a.get('veredicto')} / confianza {a.get('confianza')}]",
-        f"  Probabilidad justa del modelo: {a.get('prob_justa')}",
+        f"  Motor: {a.get('motor') or 'forma-10'}",
+        f"  Probabilidad justa del modelo: {a.get('prob_justa')}"
+        + (f"  (IC {a.get('prob_low')} - {a.get('prob_high')})"
+           if a.get("prob_low") is not None else ""),
         f"  Probabilidad de la cuota:      {a.get('prob_implicita')}",
         f"  EDGE {a.get('edge_pct')}%   EV {a.get('ev_pct')}%",
         f"  {'Puntos' if a.get('deporte') == 'nba' else 'Goles'} esperados: "
@@ -921,6 +1055,10 @@ def informe_texto(a: Dict[str, Any]) -> str:
         f"  Muestra: {a.get('fuerzas', {}).get('n_local')} y "
         f"{a.get('fuerzas', {}).get('n_visita')} partidos",
     ]
+    if a.get("info"):
+        L.append(f"  {a['info']}")
+    if a.get("nota"):
+        L.append(f"  Motivo: {a['nota']}")
     if a.get("informe_llm"):
         L.append(f"  Informe: {a['informe_llm']}")
     return "\n".join(L)
@@ -939,16 +1077,22 @@ def analizar_lote(picks: List[Dict[str, Any]], con_llm: bool = False,
                             "motivo": f"error inesperado: {e}"})
 
     con_veredicto = [d for d in detalle if d.get("veredicto") in
-                     ("VALOR", "NEUTRO", "EVITAR")]
+                     ("VALOR", "NEUTRO", "EVITAR", "DUDOSO", "REVISAR")]
     resumen = {
         "analizados": len(detalle),
         "con_modelo": len(con_veredicto),
         "valor": sum(1 for d in con_veredicto if d["veredicto"] == "VALOR"),
         "neutro": sum(1 for d in con_veredicto if d["veredicto"] == "NEUTRO"),
         "evitar": sum(1 for d in con_veredicto if d["veredicto"] == "EVITAR"),
+        # Los que el modelo NO se cree: discrepa demasiado del mercado o el
+        # edge es absurdamente grande. No se publican y no cuentan como valor.
+        "dudosos": sum(1 for d in con_veredicto if d["veredicto"] == "DUDOSO"),
+        "revisar": sum(1 for d in con_veredicto if d["veredicto"] == "REVISAR"),
         "no_modelables": sum(1 for d in detalle if d.get("ok") and not d.get("soportado")),
         "sin_datos": sum(1 for d in detalle if not d.get("ok")),
     }
+    # Cuantos picks usaron el motor Elo + Monte Carlo (el resto, el respaldo).
+    resumen["motor_elo_mc"] = sum(1 for d in detalle if d.get("motor") == "elo+mc")
     if con_veredicto:
         resumen["ev_promedio_pct"] = round(
             sum(d.get("ev_pct") or 0 for d in con_veredicto) / len(con_veredicto), 2)
