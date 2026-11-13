@@ -72,6 +72,15 @@ _MULTIINQUILINO = ("vercel.app", "railway.app", "netlify.app", "onrender.com",
                    "github.io", "web.app")
 
 
+# DOMINIO DEL PRODUCTO: siempre permitido, pase lo que pase en el panel.
+# Por que esta escrito aqui y no solo en la variable: el 13/11 la variable
+# FRONTEND_ORIGINS apuntaba a otro host y, al no incluir threesixtybets.xyz, el
+# preflight devolvia 400 y TODA la web fallaba con "Failed to fetch". El dominio
+# propio del producto no puede depender de que alguien rellene bien una variable.
+# Los subdominios (www, app, api...) entran solos.
+DOMINIOS_PRODUCTO = ("threesixtybets.xyz",)
+
+
 def _regex_desde_origenes(origins) -> str:
     """Construye el regex de CORS a partir de FRONTEND_ORIGINS.
 
@@ -102,7 +111,7 @@ def _regex_desde_origenes(origins) -> str:
 
 # Se puede sobreescribir por env si algun dia hace falta un caso raro.
 _ORIGENES_REGEX = os.getenv("FRONTEND_ORIGINS_REGEX") or _regex_desde_origenes(
-    frontend_origins
+    frontend_origins + [f"https://{d}" for d in DOMINIOS_PRODUCTO]
 )
 
 # Se imprime al arrancar para que este fallo no vuelva a ser invisible: si el
