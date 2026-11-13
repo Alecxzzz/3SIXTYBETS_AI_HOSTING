@@ -390,6 +390,19 @@ TV_EXIGIR_CATALOGO = _MAESTRO or os.getenv(
 TV_EXIGIR_STREAM = _MAESTRO or os.getenv(
     "TV_EXIGIR_STREAM", "0"
 ).strip().lower() in ("1", "true", "yes")
+# TRANSCODIFICADOR (FFmpeg). Apagado = /live/index.m3u8 responde 410 y el
+# reproductor NO puede caer a el.
+#
+# Por que existe este interruptor: el transcodificador es un recurso ESCASO
+# (MAX_TRANSCODER_SESIONES, 4 por defecto) y una sesion = un proceso FFmpeg.
+# Cuando varios canales lo piden a la vez, el quinto recibe 503 y el reproductor
+# se queda mostrando "iniciando transcodificador" indefinidamente. Si el 80% de
+# los canales son H.264, es mejor NO ofrecerlo y resolver el canal de nuevo
+# cuando falla, que dejar al usuario esperando un proceso que no va a arrancar.
+TRANSCODER_PERMITIDO = os.getenv(
+    "TRANSCODER_PERMITIDO", "1"
+).strip().lower() in ("1", "true", "yes")
+
 # Hosts aceptados por /hls-proxy y /live/index.m3u8. Vacio = sin restriccion
 # (estado actual, y sigue bloqueando IPs internas por el anti-SSRF). Cuando se
 # conozcan los hosts reales del CDN se pone la lista y el proxy deja de poder
@@ -4744,6 +4757,11 @@ def live_index(request: Request, url: str, referer: str = None):
     """
     if not url or not re.match(r"^https?://", url.strip()):
         raise HTTPException(400, "URL invalida")
+    # Interruptor del transcodificador. Con 410 el reproductor recibe "esto no
+    # existe" en vez de un 503 que invita a reintentar, y deja de mostrar
+    # "iniciando transcodificador" para siempre.
+    if not TRANSCODER_PERMITIDO:
+        raise HTTPException(410, "El transcodificador esta desactivado.")
     # Anti-SSRF: FFmpeg descargaria la URL desde el servidor. Sin este filtro
     # cualquiera podia apuntarlo a localhost / metadatos de la nube / red
     # interna y usar el backend como proxy ciego.
