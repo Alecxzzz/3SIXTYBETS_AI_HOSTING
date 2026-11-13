@@ -51,7 +51,9 @@ TABLAS = [
         total_medio decimal(10, 4) null,
         n_partidos int null,
         creado datetime not null,
-        index elo_calibracion_sport_idx (sport, id)
+        -- UNA calibracion por deporte. Sin esta restriccion el motor acumulo 7
+        -- filas de 'nba' y cada consulta veia una distinta.
+        unique key elo_calibracion_sport_unico (sport)
     )
     """,
     """

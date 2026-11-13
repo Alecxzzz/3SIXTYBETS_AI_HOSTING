@@ -148,7 +148,7 @@ Sin las redes, la primera corrida publicó `Más de 218.5 @ 1.909` con edge
 porque el modelo arrastraba la media de 3 temporadas. Se corrigió anclando el
 nivel a la ventana de 21 días **y** se añadieron las redes.
 
-## Dos bugs reales que encontraron los tests
+## Tres bugs reales que encontraron los tests
 
 - **Sistema singular**: si la columna de descanso es constante (partidos sin
   fecha), `X'X` no se puede invertir y el ajuste devolvía ceros → el modelo
@@ -157,6 +157,13 @@ nivel a la ventana de 21 días **y** se añadieron las redes.
 - **Datos corruptos**: 9 partidos con marcador imposible inflaban `sigma_total`
   de 18.9 a 23.3, lo que hacía que cualquier diferencia con la línea pareciera
   un edge. Ahora se filtran por rango de cordura antes de calibrar.
+- **Calibraciones duplicadas**: `guardar()` insertaba una fila nueva en cada
+  calibración sin borrar la anterior, y la tabla llegó a tener **7 filas de
+  `nba`** con `sigma_total` 23.27 al lado de 18.91 y `p_ot` 0 al lado de 0.065.
+  `cargar()` lee la última (`order by id desc`), así que el motor funcionaba,
+  pero cualquier consulta sin `ORDER BY` veía otra calibración y parecía roto.
+  Ahora `guardar()` borra antes de insertar y la tabla tiene clave única por
+  deporte (`elo_calibracion_sport_unico`).
 
 ## Añadir un deporte
 

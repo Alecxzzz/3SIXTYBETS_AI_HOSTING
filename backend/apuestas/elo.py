@@ -630,6 +630,12 @@ def guardar(sport: str, ratings: Dict[str, Any], calibracion: Dict[str, Any]) ->
                   "ejecuta crear_tablas_elo.py); se sigue solo en memoria",
                   flush=True)
             return False
+        # La calibracion tambien se REEMPLAZA, no se acumula. Antes cada
+        # calibracion insertaba una fila nueva: la tabla acabo con 7 filas de
+        # 'nba' (sigma_total 23.27 al lado de 18.91). `cargar()` lee la ultima,
+        # pero cualquier consulta sin ORDER BY veia una calibracion vieja y el
+        # motor parecia roto.
+        base.run_query("delete from elo_calibracion where sport = %s", (sport,))
         for tid, datos in ratings.items():
             base.run_query(
                 "insert into elo_ratings (sport, entidad_id, rating, partidos,"

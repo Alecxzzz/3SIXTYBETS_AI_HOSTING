@@ -462,7 +462,7 @@ def init_db():
             total_medio decimal(10, 4) null,
             n_partidos int null,
             creado datetime not null,
-            index elo_calibracion_sport_idx (sport, id)
+            unique key elo_calibracion_sport_unico (sport)
         )
         """,
         # Cada decision del motor (haya pick o no) queda registrada aqui. Sin

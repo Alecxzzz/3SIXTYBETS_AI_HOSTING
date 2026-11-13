@@ -151,6 +151,63 @@ class TestAjustar(unittest.TestCase):
         self.assertEqual(calib["n_partidos"], 0)
 
 
+class TestGuardarReemplaza(unittest.TestCase):
+    """La calibracion se REEMPLAZA, no se acumula.
+
+    Bug real: `guardar()` insertaba una fila nueva en cada calibracion y la
+    tabla acabo con 7 filas de 'nba' (sigma_total 23.27 junto a 18.91). El motor
+    leia la ultima, pero cualquier consulta sin ORDER BY veia otra calibracion.
+    """
+
+    def tearDown(self):
+        # guardar() escribe en la cache de proceso: no debe filtrarse a otros tests.
+        elo._memoria.pop("nba", None)
+
+    def test_borra_la_calibracion_anterior_antes_de_insertar(self):
+        llamadas = []
+
+        class Base:
+            def run_query(self, sql, params=None):
+                llamadas.append(" ".join(str(sql).split()).lower())
+                return [{"ok": 1}]
+
+            def now_utc(self):
+                return "2026-01-01 00:00:00"
+
+        with mock.patch.object(elo, "_db", return_value=Base()):
+            ok = elo.guardar(
+                "nba", {"1": {"rating": 1500, "partidos": 10}},
+                {"a": 1.0, "b": 2.0, "c": 0.0, "t0": -17.4, "t1": 1.05,
+                 "sigma_margen": 14.5, "sigma_total": 18.9, "sigma_equipo": 11.9,
+                 "rho": 0.1, "rho_equipos": 0.26, "p_ot": 0.065,
+                 "total_medio": 229.2, "n_partidos": 2636})
+        self.assertTrue(ok)
+        self.assertIn("delete from elo_ratings where sport = %s", llamadas)
+        self.assertIn("delete from elo_calibracion where sport = %s", llamadas)
+
+        i_del = llamadas.index("delete from elo_calibracion where sport = %s")
+        i_ins = next(i for i, c in enumerate(llamadas)
+                     if c.startswith("insert into elo_calibracion"))
+        # Si el insert fuera antes del delete, la clave unica (sport) lo rechaza.
+        self.assertLess(i_del, i_ins)
+
+    def test_si_la_tabla_de_ratings_no_responde_no_inserta_nada(self):
+        llamadas = []
+
+        class BaseRota:
+            def run_query(self, sql, params=None):
+                llamadas.append(" ".join(str(sql).split()).lower())
+                return []
+
+            def now_utc(self):
+                return "2026-01-01 00:00:00"
+
+        with mock.patch.object(elo, "_db", return_value=BaseRota()):
+            ok = elo.guardar("nba", {"1": {"rating": 1500}}, {"a": 1.0})
+        self.assertFalse(ok)
+        self.assertFalse([c for c in llamadas if c.startswith("insert")])
+
+
 if __name__ == "__main__":
     unittest.main()
 
