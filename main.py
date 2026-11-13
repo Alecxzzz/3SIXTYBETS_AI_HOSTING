@@ -61,22 +61,57 @@ app = FastAPI(
 frontend_origins = [
     o.strip() for o in os.getenv(
         "FRONTEND_ORIGINS",
-        "http://localhost:5173,https://www.theesixtybets.xyz",
+        "http://localhost:5173,https://threesixtybets.xyz",
     ).split(",") if o.strip()
 ]
-# Dominios propios (regex). Cubre:
-#   * cualquier subdominio de los dominios reales del proyecto,
-#   * los despliegues de Vercel del proyecto (produccion y previews), que Vercel
-#     publica como <proyecto>-<hash>.vercel.app,
-#   * localhost/127.0.0.1 en HTTP, para desarrollo.
-# NO se usa "https?://.*" (lo que habia antes): con cookies y credenciales, eso
-# permitiria a cualquier web leer datos del usuario autenticado.
-# Si añades un dominio nuevo, TIENES que añadirlo aqui o el CORS lo bloqueara.
-_ORIGENES_REGEX = os.getenv(
-    "FRONTEND_ORIGINS_REGEX",
-    r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
-    r"|^https://([a-z0-9-]+\.)*(threesixtybets\.com|theesixtybets\.xyz|3sixtybets\.com)$"
-    r"|^https://(threesixtybets|3sixtybets)(-[a-z0-9-]+)?\.vercel\.app$",
+
+# Sufijos MULTI-INQUILINO: en estos, permitir "el dominio y sus subdominios"
+# equivaldria a permitir CUALQUIER web alojada ahi (cualquiera puede publicar en
+# vercel.app). Para ellos solo vale el host EXACTO de la lista.
+_MULTIINQUILINO = ("vercel.app", "railway.app", "netlify.app", "onrender.com",
+                   "github.io", "web.app")
+
+
+def _regex_desde_origenes(origins) -> str:
+    """Construye el regex de CORS a partir de FRONTEND_ORIGINS.
+
+    Por que se calcula y no se escribe a mano: la version anterior llevaba los
+    dominios escritos a mano y se dejo fuera el dominio REAL del producto
+    (threesixtybets.xyz), asi que el navegador bloqueaba TODAS las llamadas con
+    "Failed to fetch". Configurando FRONTEND_ORIGINS bien, ahora el dominio y
+    sus subdominios (www, app, api...) quedan permitidos solos.
+    """
+    familias = set()
+    for origen in origins:
+        try:
+            host = (urlparse(origen).hostname or "").lower()
+        except ValueError:
+            continue
+        if not host:
+            continue
+        if any(host == s or host.endswith("." + s) for s in _MULTIINQUILINO):
+            continue  # ya cubierto por allow_origins (host exacto)
+        partes = host.split(".")
+        if len(partes) >= 2:
+            familias.add(".".join(partes[-2:]))
+    if not familias:
+        return ""
+    alternativas = "|".join(re.escape(f) for f in sorted(familias))
+    return rf"^https://([a-z0-9-]+\.)*({alternativas})$|^http://localhost(:\d+)?$"
+
+
+# Se puede sobreescribir por env si algun dia hace falta un caso raro.
+_ORIGENES_REGEX = os.getenv("FRONTEND_ORIGINS_REGEX") or _regex_desde_origenes(
+    frontend_origins
+)
+
+# Se imprime al arrancar para que este fallo no vuelva a ser invisible: si el
+# dominio real del frontend no aparece en esta lista, el navegador bloqueara
+# TODO con "Failed to fetch" y desde el servidor no se ve el motivo.
+print(
+    f"[cors] origenes exactos: {frontend_origins or '(ninguno)'} | "
+    f"regex: {_ORIGENES_REGEX or '(ninguno)'}",
+    flush=True,
 )
 
 app.add_middleware(
