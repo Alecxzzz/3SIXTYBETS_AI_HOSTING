@@ -67,13 +67,15 @@ frontend_origins = [
 # Dominios propios (regex). Cubre:
 #   * cualquier subdominio de los dominios reales del proyecto,
 #   * los despliegues de Vercel del proyecto (produccion y previews), que Vercel
-#     publica como <proyecto>-<hash>.vercel.app.
+#     publica como <proyecto>-<hash>.vercel.app,
+#   * localhost/127.0.0.1 en HTTP, para desarrollo.
 # NO se usa "https?://.*" (lo que habia antes): con cookies y credenciales, eso
 # permitiria a cualquier web leer datos del usuario autenticado.
 # Si añades un dominio nuevo, TIENES que añadirlo aqui o el CORS lo bloqueara.
 _ORIGENES_REGEX = os.getenv(
     "FRONTEND_ORIGINS_REGEX",
-    r"^https://([a-z0-9-]+\.)*(threesixtybets\.com|theesixtybets\.xyz|3sixtybets\.com)$"
+    r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+    r"|^https://([a-z0-9-]+\.)*(threesixtybets\.com|theesixtybets\.xyz|3sixtybets\.com)$"
     r"|^https://(threesixtybets|3sixtybets)(-[a-z0-9-]+)?\.vercel\.app$",
 )
 
@@ -81,11 +83,16 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
     allow_origin_regex=_ORIGENES_REGEX or None,
-    # La auth va por cookie HttpOnly + header Authorization. Con credenciales
-    # SOLO puede cruzar un origen de la lista: por eso el regex acotado importa.
+    # CORS: el control de seguridad es el ORIGEN (la lista blanca de arriba).
+    # Restringir metodos y cabeceras solo rompe al cliente: Sentry añade
+    # `sentry-trace` y `baggage` a TODAS las peticiones del navegador, y con una
+    # lista fija el preflight falla y el navegador bloquea cada llamada con
+    # "Failed to fetch". Comprobado en produccion: el preflight no permitia
+    # sentry-trace y toda la app quedaba muerta. Con "*" Starlette devuelve las
+    # cabeceras que pide el navegador; el origen sigue filtrado.
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Chat-Token", "Range"],
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["Content-Length", "Content-Range", "Content-Disposition"],
     max_age=600,
 )
