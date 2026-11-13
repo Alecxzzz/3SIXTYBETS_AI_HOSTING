@@ -261,16 +261,47 @@ class TestPuertaGlobal(unittest.TestCase):
         self.assertTrue(self.m._ruta_publica("/health/"))
         self.assertFalse(self.m._ruta_publica("/dashboard/picks/"))
 
+    def test_regex_se_deriva_del_dominio_real(self):
+        """El regex sale de FRONTEND_ORIGINS: dominio + subdominios, nada mas.
+
+        Es lo que evita el fallo que dejo la web muerta: la lista se calculaba
+        con dominios escritos a mano y faltaba el de verdad.
+        """
+        regex = self.m._regex_desde_origenes(
+            ["https://threesixtybets.xyz", "https://otro-vercel.vercel.app"]
+        )
+        import re
+
+        for permitido in ("https://threesixtybets.xyz",
+                          "https://www.threesixtybets.xyz",
+                          "https://app.threesixtybets.xyz",
+                          "http://localhost:5173"):
+            self.assertTrue(re.fullmatch(regex, permitido), f"deberia permitir {permitido}")
+        for bloqueado in ("https://evil.com",
+                          "https://threesixtybets.xyz.evil.com",
+                          "https://otro-vercel.vercel.app",
+                          "https://cualquiera.vercel.app",
+                          "http://threesixtybets.xyz"):
+            self.assertFalse(re.fullmatch(regex, bloqueado), f"NO deberia permitir {bloqueado}")
+
     def test_401_lleva_cors_del_origen_permitido(self):
-        req = _Req(headers={"Origin": "https://threesixtybets.com"})
-        cabeceras = self.m._respuesta_401(req).headers
-        self.assertEqual(cabeceras.get("access-control-allow-origin"),
-                         "https://threesixtybets.com")
+        origen = "https://www.threesixtybets.xyz"
+        with mock.patch.object(self.m, "frontend_origins", []), \
+                mock.patch.object(
+                    self.m, "_ORIGENES_REGEX",
+                    self.m._regex_desde_origenes(["https://threesixtybets.xyz"])):
+            req = _Req(headers={"Origin": origen})
+            cabeceras = self.m._respuesta_401(req).headers
+        self.assertEqual(cabeceras.get("access-control-allow-origin"), origen)
         self.assertEqual(cabeceras.get("www-authenticate"), "Bearer")
 
     def test_401_no_da_cors_a_un_origen_ajeno(self):
-        req = _Req(headers={"Origin": "https://evil.com"})
-        cabeceras = self.m._respuesta_401(req).headers
+        with mock.patch.object(self.m, "frontend_origins", []), \
+                mock.patch.object(
+                    self.m, "_ORIGENES_REGEX",
+                    self.m._regex_desde_origenes(["https://threesixtybets.xyz"])):
+            req = _Req(headers={"Origin": "https://evil.com"})
+            cabeceras = self.m._respuesta_401(req).headers
         self.assertIsNone(cabeceras.get("access-control-allow-origin"))
 
 
