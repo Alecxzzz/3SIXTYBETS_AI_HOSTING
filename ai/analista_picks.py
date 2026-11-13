@@ -527,7 +527,12 @@ def prob_del_pick(pick: Dict[str, Any], dist: Dict[str, Any],
 # ANALISIS
 # --------------------------------------------------------------------------
 def _veredicto(ev: float) -> str:
-    """VALOR si el precio paga de mas, EVITAR si paga de menos."""
+    """VALOR si el precio paga de mas, EVITAR si paga de menos.
+
+    OJO: esto NO mira el mercado. Un EV del 39% no es "mucho valor", es una
+    senal de que el modelo esta mal. Para eso existe `_veredicto_mercado`, que
+    compara con la cuota implicita y es la que se usa en el analisis.
+    """
     if ev >= 0.05:
         return "VALOR"
     if ev <= -0.05:
@@ -535,8 +540,55 @@ def _veredicto(ev: float) -> str:
     return "NEUTRO"
 
 
-def _confianza(n_local: int, n_visita: int, ev: float) -> str:
-    """Cuanta evidencia respalda el veredicto. Muestra corta => confianza baja."""
+# Tope de desacuerdo con el mercado. Medido en el motor Elo: cuando el modelo
+# se separa mas de 10 puntos de probabilidad de una cuota liquida, casi siempre
+# el equivocado es el modelo (no conoce lesiones, descanso ni plantilla).
+MAX_DESVIO = float(os.getenv("ANALISTA_MAX_DESVIO", "0.10"))
+# Tope de EV. Por encima de esto el "valor" es tan grande que huele a error.
+MAX_EV = float(os.getenv("ANALISTA_MAX_EV", "0.25"))
+
+
+def _veredicto_mercado(prob: float, cuota: float, ev: float):
+    """Veredicto comparando con el MERCADO. Devuelve (veredicto, motivo).
+
+    Por que: el analista marcaba "VALOR / confianza ALTA" con EV del 30-40%,
+    que en la practica significa que el modelo discrepa 15-18 puntos de
+    probabilidad de la casa. Eso no es una oportunidad, es un error del modelo.
+    """
+    try:
+        prob = float(prob)
+        cuota = float(cuota)
+    except (TypeError, ValueError):
+        return "SIN_CUOTA", "el pick no trae cuota"
+    if cuota <= 1.0:
+        return "SIN_CUOTA", "cuota invalida"
+    implicita = 1.0 / cuota
+    desvio = prob - implicita
+    # El guardia SOLO protege el lado peligroso: que se publique algo como
+    # VALOR. Si el modelo dice que la cuota paga de MENOS, un desacuerdo grande
+    # es inofensivo (y a veces tiene razon: un Under 150.5 en NBA es basura
+    # aunque el modelo se separe 50 puntos de la cuota).
+    if ev > 0 and abs(desvio) > MAX_DESVIO:
+        return ("DUDOSO",
+                f"el modelo discrepa {desvio * 100:+.1f} puntos de la cuota "
+                f"({prob * 100:.1f}% vs {implicita * 100:.1f}%): en un mercado "
+                f"liquido eso suele ser informacion que el modelo no tiene "
+                f"(lesiones, descanso, plantilla), no valor")
+    if ev > MAX_EV:
+        return ("REVISAR",
+                f"edge de {ev * 100:+.1f}%: demasiado grande para ser real")
+    return _veredicto(ev), None
+
+
+def _confianza(n_local: int, n_visita: int, ev: float,
+               veredicto: str = "") -> str:
+    """Cuanta evidencia respalda el veredicto. Muestra corta => confianza baja.
+
+    Un veredicto DUDOSO o REVISAR NUNCA puede ser de confianza alta: la
+    discrepancia con el mercado es precisamente la senal de alarma.
+    """
+    if veredicto in ("DUDOSO", "REVISAR", "SIN_CUOTA"):
+        return "BAJA"
     muestra = min(n_local, n_visita)
     if muestra >= 5 and abs(ev) >= 0.08:
         return "ALTA"
@@ -613,10 +665,13 @@ def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
         salida["prob_implicita"] = round(implicita, 4)
         salida["edge_pct"] = round((prob - implicita) * 100, 2)
         salida["ev_pct"] = round(ev * 100, 2)
-        salida["veredicto"] = _veredicto(ev)
+        veredicto, motivo = _veredicto_mercado(prob, cuota, ev)
+        salida["veredicto"] = veredicto
+        if motivo:
+            salida["nota"] = motivo
         salida["confianza"] = _confianza(
             salida.get("fuerzas", {}).get("n_local", 0),
-            salida.get("fuerzas", {}).get("n_visita", 0), ev)
+            salida.get("fuerzas", {}).get("n_visita", 0), ev, veredicto)
     else:
         salida["veredicto"] = "SIN_CUOTA"
         salida["confianza"] = "BAJA"
@@ -710,9 +765,12 @@ def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]
         salida["prob_implicita"] = round(implicita, 4)
         salida["edge_pct"] = round((prob - implicita) * 100, 2)
         salida["ev_pct"] = round(ev * 100, 2)
-        salida["veredicto"] = _veredicto(ev)
+        veredicto, motivo = _veredicto_mercado(prob, cuota, ev)
+        salida["veredicto"] = veredicto
+        if motivo:
+            salida["nota"] = motivo
         salida["confianza"] = _confianza(
-            fuerzas["n_local"], fuerzas["n_visita"], ev)
+            fuerzas["n_local"], fuerzas["n_visita"], ev, veredicto)
     else:
         salida["veredicto"] = "SIN_CUOTA"
         salida["confianza"] = "BAJA"

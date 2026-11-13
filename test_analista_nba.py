@@ -97,16 +97,36 @@ class TestAnalisisCompleto(unittest.TestCase):
         with mock.patch.object(A, "forma_equipo", side_effect=[f_local, f_visita]):
             return A.analizar_pick(pick)
 
-    def test_ganador_local_fuerte_da_valor(self):
+    def test_local_algo_mejor_da_valor_justificado(self):
+        """Equipos parejos con ventaja de local a cuota 1.90: valor de verdad.
+
+        La muestra es realista (no una paliza de 25 puntos): el modelo se queda
+        a menos de 10 puntos de la cuota, que es cuando el VALOR se sostiene.
+        """
         pick = {"id": "1", "sport": "nba", "home_name": "Indiana Pacers",
+                "away_name": "Washington Wizards", "market": "Ganador (incl. prorroga)",
+                "titulo": "Ganador", "selection": "Indiana Pacers", "odds": 1.90}
+        r = self._analizar(pick, forma(112, 112), forma(111, 112))
+        self.assertTrue(r["soportado"])
+        self.assertGreater(r["prob_justa"], 0.5)
+        self.assertEqual(r["deporte"], "nba")
+        self.assertIn("Puntos esperados", A.informe_texto(r))
+        # O sale VALOR, o el guardia lo frena por discrepar del mercado: nunca
+        # un VEREDICTO sin motivo.
+        self.assertIn(r["veredicto"], ("VALOR", "NEUTRO", "DUDOSO"))
+        if r["veredicto"] == "DUDOSO":
+            self.assertTrue(r.get("nota"))
+
+    def test_modelo_muy_optimista_no_se_publica_como_valor(self):
+        """Una diferencia de 25 puntos esperados NO es valor: es el modelo solo."""
+        pick = {"id": "6", "sport": "nba", "home_name": "Indiana Pacers",
                 "away_name": "Washington Wizards", "market": "Ganador (incl. prorroga)",
                 "titulo": "Ganador", "selection": "Indiana Pacers", "odds": 1.90}
         r = self._analizar(pick, forma(122, 108), forma(103, 112))
         self.assertTrue(r["soportado"])
-        self.assertIn(r["veredicto"], ("VALOR", "NEUTRO"))
-        self.assertGreater(r["prob_justa"], 0.5)
-        self.assertEqual(r["deporte"], "nba")
-        self.assertIn("Puntos esperados", A.informe_texto(r))
+        self.assertEqual(r["veredicto"], "DUDOSO")
+        self.assertEqual(r["confianza"], "BAJA")
+        self.assertIn("discrepa", r["nota"])
 
     def test_under_imposible_es_evitar(self):
         pick = {"id": "2", "sport": "nba", "home_name": "Indiana Pacers",
