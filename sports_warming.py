@@ -19,7 +19,7 @@ import traceback
 
 import sports
 
-WARM_INTERVAL_S = 45
+WARM_INTERVAL_S = 180
 PAUSA_ENTRE_DEPORTES_S = 2.5   # respiro entre deporte y deporte (cortesia ESPN)
 _FIRST_RUN = threading.Event()
 _lock = threading.Lock()
@@ -38,15 +38,22 @@ def _warm_sport(sport: str) -> None:
 
 
 def _warm_soccer_leagues() -> None:
-    """Ligas individuales de futbol (para el selector del frontend)."""
-    for codigo in sports.SOCCER_LEAGUES:
+    """Ligas individuales de futbol (para el selector del frontend).
+
+    Solo las PRIORITARIAS: con 67 competiciones, calentarlas todas cada vuelta
+    son 200 peticiones que dejan sin aire al calendario general (que es el que
+    ve el usuario). Las demas se construyen la primera vez que alguien entra a
+    esa liga, y se cachean.
+    """
+    for codigo in sports.LIGAS_PRIORITARIAS:
+        if codigo not in sports.SOCCER_LEAGUES:
+            continue
         try:
-            data = sports.get_sport_games("soccer", codigo)
-            time.sleep(0.5)  # respiro entre liga y liga
+            sports.get_sport_games("soccer", codigo)
+            time.sleep(0.2)  # respiro entre liga y liga
         except Exception as exc:
             print(f"[warm] liga {codigo} fallo: {exc}", flush=True)
             continue
-        # Si la general de futbol se lleno bien, esto es mantenimiento ligero.
 
 
 def _loop() -> None:

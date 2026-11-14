@@ -38,6 +38,45 @@ SOCCER_LEAGUES = {
     # Asia/Other
     "sau.1": "Saudi Pro League",
     "jpn.1": "J-League (Japon)",
+    "tur.1": "Super Lig (Turquia)",
+    # ---- SEGUNDAS DIVISIONES ------------------------------------------------
+    # Todas verificadas contra ESPN el 2026-11-13 (responden con eventos).
+    # por.2 / usa.2 / bol.2 NO existen como slug en ESPN (HTTP 400): no se
+    # añaden para no meter peticiones que siempre fallan.
+    "eng.2": "Championship (Inglaterra 2)",
+    "esp.2": "LaLiga 2 (Espana 2)",
+    "ita.2": "Serie B (Italia 2)",
+    "ger.2": "2. Bundesliga (Alemania 2)",
+    "fra.2": "Ligue 2 (Francia 2)",
+    "ned.2": "Keuken Kampioen Divisie (Holanda 2)",
+    "mex.2": "Liga de Expansion MX (Mexico 2)",
+    "arg.2": "Primera Nacional (Argentina 2)",
+    "bra.2": "Serie B (Brasil 2)",
+    "col.2": "Primera B (Colombia 2)",
+    "chi.2": "Segunda Division (Chile 2)",
+    "per.2": "Segunda Division (Peru 2)",
+    "uru.2": "Segunda Division (Uruguay 2)",
+    "ecu.2": "Serie B (Ecuador 2)",
+    "par.2": "Segunda Division (Paraguay 2)",
+    "ven.2": "Segunda Division (Venezuela 2)",
+    # ---- COPAS NACIONALES E INTERNACIONALES --------------------------------
+    "eng.fa": "FA Cup",
+    "eng.league_cup": "Carabao Cup",
+    "esp.copa_del_rey": "Copa del Rey",
+    "ita.coppa_italia": "Coppa Italia",
+    "ger.dfb_pokal": "DFB Pokal",
+    "fra.coupe_de_france": "Coupe de France",
+    "mex.copa_mx": "Copa MX",
+    "usa.open": "US Open Cup",
+    "esp.super_cup": "Supercopa de Espana",
+    "ita.super_cup": "Supercoppa Italiana",
+    "fra.super_cup": "Trophee des Champions",
+    "ger.super_cup": "Supercopa de Alemania",
+    "conmebol.sudamericana": "Copa Sudamericana",
+    "concacaf.champions": "Concacaf Champions Cup",
+    "uefa.champions_qual": "Champions League (clasificacion)",
+    "uefa.europa_qual": "Europa League (clasificacion)",
+    "uefa.europa.conf_qual": "Conference League (clasificacion)",
     # ---- SELECCIONES (fechas FIFA) -------------------------------------------
     # Sin estas, en una fecha FIFA el calendario de futbol sale VACIO: los clubes
     # paran y lo unico que se juega son eliminatorias, amistosos y Nations
@@ -58,6 +97,31 @@ SOCCER_LEAGUES = {
     "afc.asian.cup": "Copa Asiatica",
 }
 
+# Orden de PRIORIDAD cuando hay que recortar (cupo de props, de picks, etc.).
+# Con ~50 competiciones, una segunda division con 30 partidos programados
+# desplazaria a LaLiga del cupo por pura fecha. Menor indice = primero.
+LIGAS_PRIORITARIAS = (
+    "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
+    "uefa.champions", "uefa.europa", "uefa.europa.conf", "uefa.nations",
+    "mex.1", "usa.1", "arg.1", "bra.1", "col.1", "por.1", "ned.1",
+    "fifa.worldq.conmebol", "fifa.worldq.uefa", "fifa.worldq.concacaf",
+    "fifa.world", "fifa.friendly", "conmebol.libertadores", "conmebol.america",
+)
+
+
+def prioridad_liga(league_code: str | None) -> int:
+    """Posicion de la competicion en el orden de interes (0 = la primera).
+
+    Las que no estan en la lista van al final, pero conservan su orden relativo
+    (el sort de Python es estable), asi que dos segundas divisiones se ordenan
+    entre si por fecha.
+    """
+    codigo = (league_code or "").strip().lower()
+    try:
+        return LIGAS_PRIORITARIAS.index(codigo)
+    except ValueError:
+        return len(LIGAS_PRIORITARIAS)
+
 # Deportes soportados: clave -> (path ESPN, etiqueta)
 SPORTS = {
     "soccer": ("soccer", "Futbol"),
@@ -69,6 +133,15 @@ SPORTS = {
 }
 
 CACHE_TTL_SECONDS = 60
+# El calendario de futbol agrega MUCHAS competiciones (clubes, segundas
+# divisiones, copas y selecciones). Pide ~67 scoreboards y tarda decenas de
+# segundos la primera vez; con la cache de 60 s cada ciclo del dashboard volvia a
+# pagarlo entero. Los partidos de un dia no cambian cada minuto: 4 minutos es de
+# sobra y el usuario no nota ninguna diferencia.
+# OJO: tiene que ser MAYOR que `sports_warming.WARM_INTERVAL_S`, o el warmer
+# (que es quien construye esto en segundo plano) no llega a tiempo y el primer
+# usuario despues de cada vencimiento se come la espera.
+SOCCER_CACHE_TTL_SECONDS = 240
 DETAIL_CACHE_TTL_SECONDS = 30
 
 # Traduccion de nombres de estadisticas a espanol
@@ -854,20 +927,40 @@ def get_standings(league: str) -> dict:
         hoy = datetime.now(timezone.utc).date()
         desde = (hoy - timedelta(days=21)).strftime("%Y%m%d")
         hasta = hoy.strftime("%Y%m%d")
+        # Forma: ultimos resultados del scoreboard.
+        # OJO: antes se pedia UN rango (dates=20261024-20261114) y ESPN responde
+        # 400 desde sep/2026, asi que la columna "forma" salia vacia en TODAS las
+        # ligas y el log se llenaba de "[Standings] forma no disponible". Se pide
+        # dia por dia (en paralelo) y se fusionan los eventos.
         sb = None
         ultimo_exc = None
-        for _intento in range(2):
-            try:
-                sb = _espn_get(
-                    f"{ESPN_HOSTS[_espn_host_idx['i'] % len(ESPN_HOSTS)]}/soccer/{league}/scoreboard",
-                    params={"dates": f"{desde}-{hasta}"},
-                    timeout=15,
-                ).json()
-                break
-            except Exception as exc:
-                ultimo_exc = exc
-                import time as _time
-                _time.sleep(2)
+        dias = [(hoy - timedelta(days=d)).strftime("%Y%m%d") for d in range(0, 21)]
+        try:
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
+            url_sb = (f"{ESPN_HOSTS[_espn_host_idx['i'] % len(ESPN_HOSTS)]}"
+                      f"/soccer/{league}/scoreboard")
+
+            def _dia(fecha):
+                try:
+                    return _espn_get(url_sb, params={"dates": fecha},
+                                     timeout=15).json().get("events") or []
+                except Exception:  # noqa: BLE001 - un dia que falla no tira la forma
+                    return []
+
+            with _TPE(max_workers=7) as _ex:
+                trozos = list(_ex.map(_dia, dias))
+            eventos, vistos = [], set()
+            for trozo in trozos:
+                for ev in trozo:
+                    eid = str(ev.get("id") or "")
+                    if eid and eid in vistos:
+                        continue
+                    vistos.add(eid)
+                    eventos.append(ev)
+            sb = {"events": eventos}
+        except Exception as exc:  # noqa: BLE001
+            ultimo_exc = exc
         if sb is None:
             raise ultimo_exc or Exception("scoreboard sin respuesta")
         resultados: dict = {}
@@ -954,7 +1047,10 @@ def get_standings(league: str) -> dict:
         raise ValueError(f"Deporte no soportado: {sport}")
 
     cache_key = f"sport:{sport}:{league or 'all'}"
-    cached = _cache_get(cache_key)
+    # El futbol tarda mucho mas (decenas de competiciones) y sus partidos no
+    # cambian cada minuto: se le da una cache mas larga.
+    ttl = SOCCER_CACHE_TTL_SECONDS if sport == "soccer" else CACHE_TTL_SECONDS
+    cached = _cache_get(cache_key, ttl=ttl)
     if cached is not None:
         return cached
 
@@ -983,7 +1079,7 @@ def get_standings(league: str) -> dict:
                 except Exception:
                     return []  # una liga que falla no tira todo el deporte
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with ThreadPoolExecutor(max_workers=24) as ex:
                 for trozo in ex.map(_una, list(leagues_to_fetch.items())):
                     games.extend(trozo)
         elif sport == "tennis":

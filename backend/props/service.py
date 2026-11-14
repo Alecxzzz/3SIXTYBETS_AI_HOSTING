@@ -260,7 +260,13 @@ def props_deporte(sport: str, n: int = 5, limite_eventos: int = 15,
     eventos = list(data.get("games") or [])
     if solo_pendientes:
         eventos = [e for e in eventos if (e.get("state") or "pre") == "pre"]
-    eventos.sort(key=lambda e: e.get("date") or "")
+    # PRIORIDAD antes que fecha. Con ~50 competiciones de futbol (segundas
+    # divisiones y copas incluidas), ordenar solo por fecha hacia que una liga
+    # menor con 30 partidos programados se comiera el cupo y dejara fuera a
+    # LaLiga o la Premier. Ahora entran primero las competiciones grandes y,
+    # dentro de cada una, los partidos mas proximos.
+    eventos.sort(key=lambda e: (sports.prioridad_liga(e.get("league_code")),
+                                e.get("date") or ""))
     eventos = eventos[:limite_eventos]
 
     props, procesados, omitidos, descartadas = [], 0, 0, 0
