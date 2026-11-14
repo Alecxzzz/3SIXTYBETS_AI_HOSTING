@@ -73,6 +73,50 @@ def _clave(t):
     t = unicodedata.normalize("NFKD", t)
     return "".join(c for c in t if c.isalnum()).lower()
 
+_PALABRAS_VACIAS = ("de", "del", "la", "las", "los", "el", "the", "of", "and", "y")
+
+
+def _clave_equipo(t):
+    """Clave de EQUIPO, como _clave pero sin conectores.
+
+    'Estudiantes de Buenos Aires' == 'Estudiantes Buenos Aires'. NO se quitan
+    palabras que identifican al club: 'United' no es un conector, es parte del
+    nombre (quitarlo fue justo lo que confundio a Atlanta con Atlanta United).
+    """
+    t = _repara(t or "").lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(c if (c.isalnum() or c.isspace()) else " " for c in t)
+    return "".join(p for p in t.split() if p not in _PALABRAS_VACIAS)
+
+
+
+
+def _empareja(a, b):
+    """True si dos claves de equipo son el MISMO club.
+
+    Solo se admite contencion cuando el nombre corto tiene cuerpo suficiente y
+    lo que sobra es minimo ('realmadridcf' vs 'realmadrid' -> si; 'atlanta' vs
+    'atlantaunited' -> NO, son clubes distintos).
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    corto, largo = (a, b) if len(a) <= len(b) else (b, a)
+    if len(corto) < 5:
+        return False
+    if corto in largo:
+        return (len(largo) - len(corto)) <= 3
+    return False
+
+
+def mismo_partido(local_a, visita_a, local_b, visita_b):
+    """True si los dos pares de nombres describen el mismo partido (en cualquier orden)."""
+    a, b = _clave_equipo(local_a), _clave_equipo(visita_a)
+    c, d = _clave_equipo(local_b), _clave_equipo(visita_b)
+    return (_empareja(a, c) and _empareja(b, d)) or (_empareja(a, d) and _empareja(b, c))
+
+
 
 def buscar_equipo(nombre):
     """'Arsenal' -> {'id': 9825, ...}. Devuelve None si no lo encuentra."""
@@ -215,12 +259,30 @@ def _partidos_equipo(tid, ttl=900):
 
 
 
-def buscar_partido(local, visita, fecha=None):
-    """matchId de FotMob para local vs visita (nombre normalizado + fecha)."""
+def buscar_partido(local, visita, fecha=None, ventana_h: int = 48):
+    """matchId de FotMob para local vs visita (nombre normalizado + fecha).
+
+    BUG REAL QUE ESTO CORRIGE: con ("Atlanta", "Estudiantes (Buenos Aires)") la
+    version anterior devolvia el partido "Red Bull New York vs Atlanta United"
+    (otro club, a 6 dias de distancia) porque:
+      1) aceptaba "parecido" con que UN solo nombre estuviera contenido en el
+         rival, y comparaba longitudes siempre contra el local;
+      2) la diferencia de fecha solo ORDENABA, nunca filtraba.
+    Resultado: el panel mostraba un XI oficial de un partido ajeno.
+
+    Ahora:
+      - los DOS equipos deben aparecer, uno por cada lado del partido;
+      - la tolerancia de nombre es minima (ver _empareja);
+      - si hay fecha, el partido debe caer dentro de `ventana_h` horas.
+    Si no se cumple, None: mejor sin alineacion que con la de otro partido.
+    """
     if not local or not visita:
         return None
 
-    objetivo = {_clave(local), _clave(visita)}
+    ol, ov = _clave_equipo(local), _clave_equipo(visita)
+    if not ol or not ov or ol == ov:
+        return None
+
     cuando = _ts(fecha)
     candidatos = []
 
@@ -229,20 +291,21 @@ def buscar_partido(local, visita, fecha=None):
         if not tid:
             continue
         for f in _partidos_equipo(tid):
-            h = _clave(((f.get("home") or {}).get("name")) or "")
-            a = _clave(((f.get("away") or {}).get("name")) or "")
+            h = _clave_equipo(((f.get("home") or {}).get("name")) or "")
+            a = _clave_equipo(((f.get("away") or {}).get("name")) or "")
             if not h or not a or not f.get("id"):
                 continue
-            exacto = objetivo <= {h, a}
-            parecido = any(
-                o and (o in h or h in o or o in a or a in o) and abs(len(o) - len(h)) <= 5
-                for o in objetivo
-            )
-            if not (exacto or parecido):
+
+            directo = _empareja(ol, h) and _empareja(ov, a)
+            cruzado = _empareja(ol, a) and _empareja(ov, h)
+            if not (directo or cruzado):
                 continue
+
             ts = _ts((f.get("status") or {}).get("utcTime"))
+            if cuando and ts and abs(ts - cuando) > ventana_h * 3600:
+                continue
             dif = abs(ts - cuando) if (ts and cuando) else 0
-            candidatos.append((0 if exacto else 1, dif, f.get("id")))
+            candidatos.append((0 if directo else 1, dif, f.get("id")))
 
     if not candidatos:
         return None
@@ -303,8 +366,86 @@ def _ts(iso):
 
 
 
+def _eventos_partido(mf):
+    """Goles, asistencias y tarjetas del partido (para pintarlos en el campo)."""
+    salida = []
+    for e in ((mf or {}).get("events") or {}).get("events") or []:
+        jug = e.get("player") or {}
+        tipo = e.get("type") or ""
+        if not tipo or not (jug.get("id") or e.get("assistPlayerId")):
+            continue
+        salida.append({
+            "tipo": tipo,                                   # Goal / Card / Substitution...
+            "minuto": e.get("timeStr") or e.get("time"),
+            "jugador_id": jug.get("id"),
+            "jugador": _repara(jug.get("name") or ""),
+            "asistente_id": e.get("assistPlayerId"),
+            "asistente": _repara(e.get("assistStr") or ""),
+            "es_local": bool(e.get("isHome")),
+            "propio": bool(e.get("ownGoal")),
+        })
+    return salida
+
+
+def _stats_jugadores(player_stats, ids):
+    """Stats del partido por jugador.
+
+    Forma real de FotMob (verificada):
+      playerStats["<id>"] = { name, shirtNumber, isGoalkeeper,
+                              stats: [ {title, key, stats: { "<etiqueta>": {stat:{value,total}} }} ] }
+    El portero puede traer stats vacias.
+    """
+    salida = {}
+    ps = player_stats or {}
+    for pid in ids:
+        p = ps.get(str(pid)) or ps.get(pid)
+        if not isinstance(p, dict):
+            continue
+        grupos = []
+        for g in p.get("stats") or []:
+            if not isinstance(g, dict):
+                continue
+            crudo = g.get("stats")
+            filas = []
+            if isinstance(crudo, dict):
+                for etiqueta, v in crudo.items():
+                    st = (v or {}).get("stat") or {}
+                    if st.get("value") is None:
+                        continue
+                    filas.append({
+                        "etiqueta": _repara(etiqueta),
+                        "valor": st.get("value"),
+                        "total": st.get("total"),
+                    })
+            elif isinstance(crudo, list):
+                for v in crudo:
+                    if not isinstance(v, dict):
+                        continue
+                    st = v.get("stat") or {}
+                    if st.get("value") is None:
+                        continue
+                    filas.append({
+                        "etiqueta": _repara(v.get("title") or ""),
+                        "valor": st.get("value"),
+                        "total": st.get("total"),
+                    })
+            if filas:
+                grupos.append({"grupo": _repara(g.get("title") or ""), "filas": filas[:12]})
+        salida[str(pid)] = {
+            "nombre": _repara(p.get("name") or ""),
+            "dorsal": p.get("shirtNumber"),
+            "portero": bool(p.get("isGoalkeeper")),
+            "grupos": grupos[:4],
+        }
+    return salida
+
+
 def alineacion(match_id):
-    """Alineacion OFICIAL de un partido de FotMob (o None si aun no hay)."""
+    """Alineacion OFICIAL de un partido de FotMob (o None si aun no hay).
+
+    Incluye, del mismo matchDetails cacheado: goles/asistencias del partido
+    (`eventos`) y las stats de cada jugador (`stats_jugador`).
+    """
     datos = _get("matchDetails", {"matchId": match_id}, ttl=120)
     contenido = (datos or {}).get("content") or {}
     lin = contenido.get("lineup") or {}
@@ -315,7 +456,22 @@ def alineacion(match_id):
     visita = _lado(lin.get("awayTeam"), "away")
     if not local["titulares"] or not visita["titulares"]:
         return None
-    return {"tipo": "oficial", "local": local, "visita": visita}
+
+    ids = [
+        j.get("id")
+        for j in (local["titulares"] + visita["titulares"]
+                  + local["suplentes"] + visita["suplentes"])
+        if j.get("id")
+    ]
+    mf = contenido.get("matchFacts") or {}
+
+    return {
+        "tipo": "oficial",
+        "local": local,
+        "visita": visita,
+        "eventos": _eventos_partido(mf),
+        "stats_jugador": _stats_jugadores(contenido.get("playerStats") or {}, ids),
+    }
 
 
 def _ultimos_finalizados(tid, n=6):

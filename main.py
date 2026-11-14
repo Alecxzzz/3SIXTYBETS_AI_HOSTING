@@ -3347,9 +3347,23 @@ def stats_alineacion(
             oficial = None
             print(f"[stats/alineacion] alineacion {fm_id}: {exc!r}", flush=True)
         if oficial:
-            oficial["ok"] = True
-            oficial["fuente"] = "FotMob"
-            return oficial
+            # Red de seguridad (bug reportado): se sirvio el XI de "Red Bull New
+            # York vs Atlanta United" dentro del partido "Atlanta vs Estudiantes".
+            # Si el partido resuelto no es el mismo, NO se devuelve nada.
+            eq_local = (oficial.get("local") or {}).get("equipo")
+            eq_visita = (oficial.get("visita") or {}).get("equipo")
+            if fotmob.mismo_partido(
+                home.get("name"), away.get("name"), eq_local, eq_visita
+            ):
+                oficial["ok"] = True
+                oficial["fuente"] = "FotMob"
+                return oficial
+            print(
+                f"[stats/alineacion] DESCARTADA alineacion {fm_id}: "
+                f"'{eq_local} vs {eq_visita}' no es "
+                f"'{home.get('name')} vs {away.get('name')}'",
+                flush=True,
+            )
 
     # Sin alineacion oficial: se calcula el once probable de cada equipo
     local = visita = None
@@ -3364,6 +3378,25 @@ def stats_alineacion(
             "ok": False,
             "motivo": "sin_datos",
             "detalle": "Todavia no hay alineacion ni historial suficiente para calcularla.",
+        }
+
+    # El once probable pasa por la misma validacion: equipo_id() puede resolver
+    # un homonimo de otro pais (ej. "Atlanta" -> Atlanta United de la MLS).
+    if not fotmob.mismo_partido(
+        home.get("name"), away.get("name"),
+        local.get("equipo"), visita.get("equipo"),
+    ):
+        print(
+            f"[stats/alineacion] DESCARTADO once probable {event_id}: "
+            f"'{local.get('equipo')} vs {visita.get('equipo')}' no es "
+            f"'{home.get('name')} vs {away.get('name')}'",
+            flush=True,
+        )
+        return {
+            "ok": False,
+            "motivo": "equipo_no_coincide",
+            "detalle": "FotMob no tiene este partido identificado con exactitud. "
+                       "Preferimos no mostrar una alineacion de otro equipo.",
         }
 
     return {"ok": True, "tipo": "probable", "fuente": "FotMob", "local": local, "visita": visita}
