@@ -239,7 +239,8 @@ def prob_partido_ambos_marcan(equipo_id, n: int = 10):
     b = sum(1 for p in partidos if p["gf"] > 0 and p["ga"] > 0)
     return int(round(b * 100 / len(partidos)))
 
-
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +629,40 @@ def alineacion(match_id):
         "visita": visita,
         "eventos": _eventos_partido(mf),
         "stats_jugador": _stats_jugadores(contenido.get("playerStats") or {}, ids),
+    }
+
+
+def tracker(match_id):
+    """Tracker en vivo del partido: URL del widget `live_action` de Opta.
+
+    `matchDetails` trae, dentro de `content.superlive`:
+
+        {"showSuperLive": true,
+         "superLiveUrl": "https://pub.fotmob.com/prod/news/api/law?..."}
+
+    Esa URL no es una API JSON: es una pagina HTML de ~2 KB que monta el
+    widget de Opta (`secure.widget.cloud.opta.net`), el mismo tracker animado
+    con la pelota, la direccion de juego y las ultimas acciones que se ve en
+    la web de FotMob. Se comprobo que responde 200 sin `X-Frame-Options` ni
+    `Content-Security-Policy`, asi que se puede embeber en un <iframe>.
+
+    No hay token que caduque: los ids (`matchid`, `competition`, `season`,
+    `srmatchid`) viajan en la propia URL y se renuevan con cada matchDetails.
+
+    Devuelve None si el partido no tiene tracker (`showSuperLive` en false,
+    como pasa en los partidos ya terminados).
+    """
+    datos = _get("matchDetails", {"matchId": match_id}, ttl=120) or {}
+    contenido = datos.get("content") or {}
+    super_live = contenido.get("superlive") or {}
+    url = str(super_live.get("superLiveUrl") or "").strip()
+    if not url.startswith("https://") or super_live.get("showSuperLive") is False:
+        return None
+    estado = (datos.get("header") or {}).get("status") or {}
+    return {
+        "url": url,
+        "en_vivo": bool(estado.get("ongoing")),
+        "terminado": bool(estado.get("finished")),
     }
 
 

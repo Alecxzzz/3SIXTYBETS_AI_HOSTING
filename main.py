@@ -3395,11 +3395,70 @@ def stats_alineacion(
         return {
             "ok": False,
             "motivo": "equipo_no_coincide",
-            "detalle": "FotMob no tiene este partido identificado con exactitud. "
+            "detalle": "No hay datos fiables de este partido. "
                        "Preferimos no mostrar una alineacion de otro equipo.",
         }
 
     return {"ok": True, "tipo": "probable", "fuente": "FotMob", "local": local, "visita": visita}
+
+
+@app.get("/stats/tracker")
+def stats_tracker(
+    event_id: str,
+    sport: str = "soccer",
+    league: str = None,
+    user=Depends(get_current_user),
+):
+    """Tracker en vivo del partido: widget `live_action` de Opta via FotMob.
+
+    `matchDetails -> content.superlive.superLiveUrl` es una pagina publica
+    (responde 200, sin X-Frame-Options ni CSP) que monta el tracker animado
+    con la pelota y la direccion de juego. Se devuelve tal cual para pintarla
+    en un <iframe>: no hay que scrapear nada ni mantener un token.
+
+    `showSuperLive` en false (partidos terminados o sin cobertura) devuelve
+    `ok: False` con el motivo, para que la web no pinte un recuadro vacio.
+    """
+    if sport != "soccer":
+        raise HTTPException(400, "El tracker solo esta disponible para futbol.")
+
+    try:
+        detalle = sports.get_game_detail(sport, event_id, league_code=league)
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo leer el partido: {exc}")
+
+    equipos = detalle.get("teams") or []
+    home = next((t for t in equipos if t.get("homeAway") == "home"), None)
+    away = next((t for t in equipos if t.get("homeAway") != "home"), None)
+    if not home or not away:
+        return {"ok": False, "motivo": "sin_partido"}
+
+    fm_id = None
+    try:
+        fm_id = fotmob.buscar_partido(home.get("name"), away.get("name"), detalle.get("date"))
+    except Exception as exc:
+        print(f"[stats/tracker] resolver {event_id}: {exc!r}", flush=True)
+
+    if not fm_id:
+        return {"ok": False, "motivo": "sin_datos"}
+
+    try:
+        tracker = fotmob.tracker(fm_id)
+    except Exception as exc:
+        print(f"[stats/tracker] tracker {fm_id}: {exc!r}", flush=True)
+        tracker = None
+
+    if not tracker:
+        return {
+            "ok": False,
+            "motivo": "sin_tracker",
+            "detalle": "Este partido no tiene tracker en vivo.",
+        }
+
+    tracker["ok"] = True
+    tracker["fuente"] = "Opta"
+    return tracker
+
 
 
 @app.get("/estadisticas", response_class=HTMLResponse)
