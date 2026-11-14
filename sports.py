@@ -38,6 +38,24 @@ SOCCER_LEAGUES = {
     # Asia/Other
     "sau.1": "Saudi Pro League",
     "jpn.1": "J-League (Japon)",
+    # ---- SELECCIONES (fechas FIFA) -------------------------------------------
+    # Sin estas, en una fecha FIFA el calendario de futbol sale VACIO: los clubes
+    # paran y lo unico que se juega son eliminatorias, amistosos y Nations
+    # League. Los slugs estan verificados contra ESPN el 2026-11-13.
+    "fifa.worldq.uefa": "Eliminatorias Mundial - UEFA",
+    "fifa.worldq.conmebol": "Eliminatorias Mundial - CONMEBOL",
+    "fifa.worldq.concacaf": "Eliminatorias Mundial - Concacaf",
+    "fifa.worldq.afc": "Eliminatorias Mundial - AFC",
+    "fifa.worldq.caf": "Eliminatorias Mundial - CAF",
+    "fifa.worldq.ofc": "Eliminatorias Mundial - OFC",
+    "fifa.friendly": "Amistoso internacional",
+    "fifa.world": "Copa del Mundo",
+    "uefa.euroq": "Clasificacion Eurocopa",
+    "conmebol.america": "Copa America",
+    "concacaf.gold": "Copa Oro Concacaf",
+    "concacaf.nations.league": "Concacaf Nations League",
+    "caf.nations": "Copa Africa de Naciones",
+    "afc.asian.cup": "Copa Asiatica",
 }
 
 # Deportes soportados: clave -> (path ESPN, etiqueta)
@@ -950,13 +968,24 @@ def get_standings(league: str) -> dict:
                 if league and league in SOCCER_LEAGUES
                 else SOCCER_LEAGUES
             )
-            for league_code, league_name in leagues_to_fetch.items():
+            # En PARALELO. Con ~34 competiciones (clubes + selecciones) el bucle
+            # en serie tardaba decenas de segundos y el dashboard se quedaba
+            # esperando; cada liga es independiente, asi que no hay motivo para
+            # pedirlas de una en una.
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _una(par):
+                codigo, nombre = par
                 try:
-                    data = _fetch_scoreboard(path, league=league_code)
-                    for event in data.get("events", []):
-                        games.append(_parse_event(event, league_name, league_code))
+                    data = _fetch_scoreboard(path, league=codigo)
+                    return [_parse_event(event, nombre, codigo)
+                            for event in data.get("events", [])]
                 except Exception:
-                    continue  # una liga que falla no tira todo el deporte
+                    return []  # una liga que falla no tira todo el deporte
+
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for trozo in ex.map(_una, list(leagues_to_fetch.items())):
+                    games.extend(trozo)
         elif sport == "tennis":
             games = []
             # Traer circuitos ATP y WTA. El mismo torneo (ej. US Open) aparece

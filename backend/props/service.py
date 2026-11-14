@@ -25,10 +25,13 @@ import sports
 
 from . import mercados, proveedores
 
-# Solo se publican props que el jugador haya cumplido al menos este % de las
-# veces en la ventana. Por debajo es ruido: la muestra es de 5 partidos y un
-# 1/5 (20%) no dice nada util.
-PROPS_PCT_MINIMA = float(os.getenv("PROPS_PCT_MINIMA", "60"))
+# Filtro de calidad. Antes era 60 y se descartaba la mitad del mercado, asi que
+# de un partido con props de 20 jugadores solo aparecian las rachas "bonitas".
+# Ahora se guardan TODAS las props con historico suficiente y el panel ordena por
+# edge; la columna `pct_ajustado` (limite inferior de Wilson) es la que dice la
+# verdad con muestras de 5 partidos. Si se quiere volver al filtro duro:
+# PROPS_PCT_MINIMA=60.
+PROPS_PCT_MINIMA = float(os.getenv("PROPS_PCT_MINIMA", "0"))
 
 # Cache en memoria del resultado por (deporte, evento, n). La pagina y el
 # scheduler leen de aqui; el scheduler ademas lo persiste en la BD.
@@ -265,7 +268,7 @@ def props_deporte(sport: str, n: int = 5, limite_eventos: int = 15,
     # serie, 6 eventos por deporte tardaban medio minuto o mas por ciclo.
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         resultados = list(pool.map(
             lambda ev: props_evento(sport, ev, n, max_jugadores=max_jugadores),
             eventos,

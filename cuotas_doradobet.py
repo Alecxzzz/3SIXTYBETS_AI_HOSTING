@@ -58,18 +58,26 @@ _DORADO_BACKOFF = 300
 
 
 def _norm(s: str) -> str:
-    s = (s or "").lower().replace("b�lgica", "belgica").replace("b�lgium", "belgium")
+    s = (s or "").lower()
     # El bookmaker a veces devuelve los nombres con tabs y espacios de relleno
     # ('WAS Commanders\t\t'). Sin limpiarlos, ningun equipo de NFL emparejaba
     # con su evento.
-    s = " ".join(str(s or "").split())
-    s = s.encode("ascii", "ignore").decode("ascii")
-    reemplazos = {
-        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n",
-        "�": "", "b�lgica": "belgica", "b�lgium": "belgium", "italia": "italia",
-    }
-    for a, b in reemplazos.items():
+    s = " ".join(s.split())
+    # TRANSLITERAR, no borrar. El codigo anterior hacia
+    # `encode("ascii", "ignore")`, que ELIMINA la letra: "Türkiye" -> "trkiye",
+    # "España" -> "espaa", "Curaçao" -> "curaao". Como el book escribe en
+    # espanol y ESPN en ingles, la letra perdida solo aparecia en UNO de los dos
+    # lados y el nombre dejaba de coincidir ("España" vs "Spain" es otro caso:
+    # ese lo resuelve ALIAS_EQUIPOS).
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"),
+                 ("ü", "u"), ("à", "a"), ("è", "e"), ("ì", "i"), ("ò", "o"),
+                 ("ù", "u"), ("â", "a"), ("ê", "e"), ("î", "i"), ("ô", "o"),
+                 ("û", "u"), ("ã", "a"), ("õ", "o"), ("ñ", "n"), ("ç", "c"),
+                 ("ø", "o"), ("å", "a"), ("æ", "ae"), ("œ", "oe"), ("ß", "ss"),
+                 ("ð", "d"), ("þ", "th"), ("đ", "d"), ("ł", "l"), ("ş", "s"),
+                 ("ğ", "g"), ("ı", "i")):
         s = s.replace(a, b)
+    s = s.encode("ascii", "ignore").decode("ascii")
     return " ".join(s.replace("\t", " ").split())
 
 
@@ -142,6 +150,84 @@ def get_events_deporte(sport: str):
     return combinado
 
 
+# Alias de SELECCIONES: ESPN las escribe en INGLES ("United States",
+# "Curacao", "England") y el bookmaker en ESPANOL ("Estados Unidos",
+# "Curazao", "Inglaterra"). Sin esta tabla, en una fecha FIFA no emparejaba
+# casi ningun partido: ni props ni cuotas de las selecciones.
+# Todas las entradas (ingles y espanol) apuntan a la MISMA clave canonica, asi
+# que da igual de que lado venga el nombre. Verificado contra el book el
+# 2026-11-13 (su feed devuelve "Estados Unidos", "Curazao", "Haiti").
+ALIAS_EQUIPOS = {
+    # CONCACAF
+    "united states": "estados unidos", "usa": "estados unidos",
+    "eeuu": "estados unidos", "ee uu": "estados unidos",
+    "mexico": "mexico", "jamaica": "jamaica", "haiti": "haiti",
+    "panama": "panama", "curacao": "curazao", "curazao": "curazao",
+    "suriname": "surinam", "surinam": "surinam", "belize": "belice",
+    "guatemala": "guatemala", "honduras": "honduras", "costa rica": "costa rica",
+    "el salvador": "el salvador", "nicaragua": "nicaragua", "cuba": "cuba",
+    "trinidad and tobago": "trinidad y tobago",
+    "dominican republic": "republica dominicana",
+    "saint vincent and the grenadines": "san vicente",
+    "sint maarten": "san martin", "french guiana": "guayana francesa",
+    "puerto rico": "puerto rico", "canada": "canada",
+    # CONMEBOL
+    "argentina": "argentina", "brazil": "brasil", "brasil": "brasil",
+    "uruguay": "uruguay", "colombia": "colombia", "chile": "chile",
+    "peru": "peru", "ecuador": "ecuador", "bolivia": "bolivia",
+    "paraguay": "paraguay", "venezuela": "venezuela",
+    # UEFA
+    "england": "inglaterra", "inglaterra": "inglaterra",
+    "spain": "espana", "espana": "espana", "germany": "alemania",
+    "alemania": "alemania", "italy": "italia", "italia": "italia",
+    "france": "francia", "francia": "francia", "portugal": "portugal",
+    "netherlands": "paises bajos", "holland": "paises bajos",
+    "paises bajos": "paises bajos", "belgium": "belgica", "belgica": "belgica",
+    "croatia": "croacia", "croacia": "croacia", "serbia": "serbia",
+    "switzerland": "suiza", "suiza": "suiza", "denmark": "dinamarca",
+    "dinamarca": "dinamarca", "sweden": "suecia", "suecia": "suecia",
+    "norway": "noruega", "noruega": "noruega", "poland": "polonia",
+    "polonia": "polonia", "ukraine": "ucrania", "ucrania": "ucrania",
+    "turkiye": "turquia", "turkey": "turquia", "turquia": "turquia",
+    "greece": "grecia", "grecia": "grecia", "czechia": "republica checa",
+    "czech republic": "republica checa", "republica checa": "republica checa",
+    "ireland": "irlanda", "republic of ireland": "irlanda", "irlanda": "irlanda",
+    "northern ireland": "irlanda del norte", "scotland": "escocia",
+    "wales": "gales", "bosnia-herzegovina": "bosnia",
+    "bosnia and herzegovina": "bosnia", "bosnia": "bosnia",
+    "montenegro": "montenegro", "albania": "albania", "belarus": "bielorrusia",
+    "latvia": "letonia", "armenia": "armenia", "cyprus": "chipre",
+    "finland": "finlandia", "san marino": "san marino", "kosovo": "kosovo",
+    "israel": "israel", "romania": "rumania", "rumania": "rumania",
+    "austria": "austria", "hungary": "hungria", "slovakia": "eslovaquia",
+    "slovenia": "eslovenia", "bulgaria": "bulgaria", "georgia": "georgia",
+    "iceland": "islandia", "moldova": "moldavia", "lithuania": "lituania",
+    "estonia": "estonia", "luxembourg": "luxemburgo", "malta": "malta",
+    "andorra": "andorra", "gibraltar": "gibraltar", "faroe islands": "islas feroe",
+    "liechtenstein": "liechtenstein", "azerbaijan": "azerbaiyan",
+    "kazakhstan": "kazajistan", "north macedonia": "macedonia del norte",
+    # Resto del mundo
+    "japan": "japon", "south korea": "corea del sur", "australia": "australia",
+    "new zealand": "nueva zelanda", "nigeria": "nigeria", "morocco": "marruecos",
+    "senegal": "senegal", "egypt": "egipto", "cameroon": "camerun",
+    "ghana": "ghana", "ivory coast": "costa de marfil", "cote d ivoire": "costa de marfil",
+    "south africa": "sudafrica", "dr congo": "rd congo", "congo dr": "rd congo",
+    "saudi arabia": "arabia saudita", "qatar": "catar", "iraq": "irak",
+    "uae": "emiratos arabes unidos", "united arab emirates": "emiratos arabes unidos",
+    "iran": "iran", "uzbekistan": "uzbekistan", "india": "india",
+    "china": "china", "tahiti": "tahiti", "cook islands": "islas cook",
+    "new caledonia": "nueva caledonia", "fiji": "fiyi", "eswatini": "esuatini",
+    "namibia": "namibia", "kenya": "kenia", "uganda": "uganda",
+    "tunisia": "tunez", "algeria": "argelia", "angola": "angola",
+}
+
+
+def _canon_equipo(nombre: str) -> str:
+    """Nombre canonico de equipo: alias de selecciones, si no el normalizado."""
+    n = _norm(nombre)
+    return ALIAS_EQUIPOS.get(n, n)
+
+
 def _coincide_equipo(nombre_book: str, nombre_pick: str) -> bool:
     """True si dos nombres de equipo/tenista son el mismo.
 
@@ -149,8 +235,12 @@ def _coincide_equipo(nombre_book: str, nombre_pick: str) -> bool:
     nombre completo ('Atlanta Braves'), asi que comparar con '=' no basta.
     Se comparan los apellidos (ultima palabra con 3+ letras) y el prefijo de
     la sigla, que es lo unico estable entre ambas fuentes.
+
+    Antes de comparar, los dos nombres pasan por `_canon_equipo`: ESPN escribe
+    "England" y el book "Inglaterra", y sin traducir NINGUNA seleccion
+    emparejaba (ni sus props ni sus cuotas en fecha FIFA).
     """
-    a, b = _norm(nombre_book), _norm(nombre_pick)
+    a, b = _canon_equipo(nombre_book), _canon_equipo(nombre_pick)
     if not a or not b:
         return False
     if a in b or b in a:

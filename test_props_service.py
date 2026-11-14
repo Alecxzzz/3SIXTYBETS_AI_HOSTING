@@ -120,25 +120,64 @@ class TestEvento(unittest.TestCase):
         goles = [p for p in uno if p["prop"] == "goles"][0]
         self.assertEqual(goles["linea"], 0.5)
 
-    def test_filtro_60_por_ciento_descarta_lo_demas(self):
-        """1 de 3 (33%) no se publica: con 5 partidos es ruido."""
+    def test_filtro_por_racha_sigue_existiendo(self):
+        """1 de 3 (33%) se descarta SOLO si se activa el filtro.
+
+        Por defecto ahora se publican todas las props con historico (el panel
+        ordena por edge), asi que esta prueba activa el filtro a mano para
+        comprobar que el mecanismo sigue funcionando: si algun dia vuelve a
+        hacer falta (PROPS_PCT_MINIMA=60), tiene que seguir descartando.
+        """
         historial = _historial(
             {"shotsOnTarget": 2}, {"shotsOnTarget": 0}, {"shotsOnTarget": 1},
         )
         evento = {"id": "1", "name": "VIL vs ESP", "league": "LaLiga",
                   "date": "2026-10-30T20:00Z", "home": {"name": "VIL"},
                   "away": {"name": "ESP"}}
-        with mock.patch.object(service.book, "detalle_de_evento", return_value=self.DETALLE), \
+        with mock.patch.object(service, "PROPS_PCT_MINIMA", 60.0), \
+                mock.patch.object(service.book, "detalle_de_evento", return_value=self.DETALLE), \
                 mock.patch.object(service.proveedores, "historial_jugador", return_value=historial):
             r = service.props_evento("soccer", evento, 5)
 
         self.assertTrue(r["ok"])
+        # La invariante con el filtro activo: NINGUNA prop por debajo del minimo.
+        self.assertTrue(all(p["pct"] >= 60.0 for p in r["props"]))
+        # Y la del 33% quedo fuera, contada como descartada.
+        self.assertGreaterEqual(r["descartadas_por_pct"], 1)
+
+    def test_por_defecto_no_se_descarta_por_racha(self):
+        """Sin filtro, una prop de 33% SE PUBLICA (con su pct_ajustado honesto).
+
+        El usuario pide cobertura: esconder media jornada porque la racha no es
+        bonita no es prudencia, es dejar de informar. La columna que dice la
+        verdad con 3-5 partidos es `pct_ajustado` (Wilson).
+        """
+        historial = _historial(
+            {"shotsOnTarget": 2}, {"shotsOnTarget": 0}, {"shotsOnTarget": 1},
+        )
+        evento = {"id": "1", "name": "VIL vs ESP", "league": "LaLiga",
+                  "date": "2026-10-30T20:00Z", "home": {"name": "VIL"},
+                  "away": {"name": "ESP"}}
+        with mock.patch.object(service, "PROPS_PCT_MINIMA", 0.0), \
+                mock.patch.object(service.book, "detalle_de_evento", return_value=self.DETALLE), \
+                mock.patch.object(service.proveedores, "historial_jugador", return_value=historial):
+            r = service.props_evento("soccer", evento, 5)
+
+        self.assertTrue(r["ok"])
+        # Las dos props comparables se publican (antes se perdia la del 33%).
+        self.assertEqual(len(r["props"]), 2)
+        por_pct = sorted(p["pct"] for p in r["props"])
+        self.assertEqual(por_pct, [33.3, 66.7])
+        # La del 33% se muestra, pero no se vende como certeza: con 3 partidos y
+        # 1 acierto, el limite inferior de Wilson es bajisimo.
+        baja = [p for p in r["props"] if p["pct"] == 33.3][0]
+        self.assertLess(baja["pct_ajustado"], 20)
         # La invariante: NINGUNA prop publicada por debajo del minimo.
         self.assertTrue(all(p["pct"] >= service.PROPS_PCT_MINIMA for p in r["props"]))
-        self.assertGreater(r["descartadas_por_pct"], 0)
         self.assertEqual(r["pct_minima"], service.PROPS_PCT_MINIMA)
-        # La de 33% (remates a puerta linea 1.5 de Jugador Uno) NO sale.
-        self.assertFalse([
+        # Y la de 33% (remates a puerta linea 1.5 de Jugador Uno) SI sale ahora:
+        # es justo la que antes se escondia.
+        self.assertTrue([
             p for p in r["props"]
             if p["prop"] == "remates_puerta" and p["linea"] == 1.5
         ])

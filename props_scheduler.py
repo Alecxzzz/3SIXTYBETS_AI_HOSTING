@@ -18,6 +18,7 @@ snapshot bueno y se reintenta en el siguiente ciclo. Arranca como hilo daemon
 desde el startup de main.py, igual que event_scheduler y sports_warming.
 """
 
+import os
 import threading
 import time
 import traceback
@@ -29,13 +30,21 @@ from backend.props import service
 INTERVAL_S = 90 * 60          # cada hora y media
 PRIMER_DELAY_S = 45           # deja terminar el startup
 N_PARTIDOS = 5                # "ultimos 5 partidos"
-MAX_EVENTOS = 6               # partidos por deporte y ciclo (control de coste)
-MAX_JUGADORES = 10            # jugadores por partido
+# COBERTURA: antes eran 6 partidos por deporte y 10 jugadores (control de coste),
+# asi que de una jornada NBA de 12 partidos solo salian 6. Ahora se cubre la
+# jornada completa; el coste se paga una vez porque el historico de cada jugador
+# se cachea 6 h en `proveedores` y el snapshot se guarda en BD.
+# Ajustable sin desplegar: PROPS_MAX_EVENTOS / PROPS_MAX_JUGADORES.
+MAX_EVENTOS = int(os.getenv("PROPS_MAX_EVENTOS", "40"))     # partidos por deporte y ciclo
+MAX_JUGADORES = int(os.getenv("PROPS_MAX_JUGADORES", "16"))  # jugadores por partido
 RETENCION_DIAS = 90
 
 # MLB esta fuera de temporada (ultimo partido 2026-09-27). El codigo lo
 # soporta; se activa solo cuando ESPN vuelva a publicar partidos.
-DEPORTES = ("soccer", "nba", "nfl")
+DEPORTES = tuple(
+    d.strip() for d in os.getenv("PROPS_DEPORTES", "soccer,nba,nfl").split(",")
+    if d.strip()
+)
 
 _lock = threading.Lock()
 _arrancado = threading.Event()
