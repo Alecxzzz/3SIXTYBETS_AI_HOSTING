@@ -417,6 +417,7 @@ def _jugador(p):
         "nota": rend.get("rating"),
         "edad": p.get("age"),
         "pais": _repara(p.get("countryName") or ""),
+        "pais_codigo": p.get("countryCode") or "",
         "valor": p.get("marketValue"),
         "foto": foto_jugador(p.get("id")),
     }
@@ -477,6 +478,29 @@ def _eventos_partido(mf):
     return salida
 
 
+def _disparos(shotmap):
+    """Remates del jugador en el partido, normalizados (para el shot map)."""
+    salida = []
+    for s in shotmap or []:
+        og = s.get("onGoalShot") or {}
+        salida.append({
+            "min": s.get("min"),
+            "x": s.get("x"),
+            "y": s.get("y"),
+            "x_porteria": og.get("x"),
+            "y_porteria": og.get("y"),
+            "xg": _redondea(s.get("expectedGoals")),
+            "xgot": _redondea(s.get("expectedGoalsOnTarget")),
+            "tipo": s.get("shotType") or "",
+            "situacion": s.get("situation") or "",
+            "resultado": s.get("eventType") or "",
+            "a_puerta": bool(s.get("isOnTarget")),
+            "dentro_area": bool(s.get("isFromInsideBox")),
+            "propio": bool(s.get("isOwnGoal")),
+        })
+    return salida
+
+
 def _stats_jugadores(player_stats, ids):
     """Stats del partido por jugador.
 
@@ -525,6 +549,8 @@ def _stats_jugadores(player_stats, ids):
             "nombre": _repara(p.get("name") or ""),
             "dorsal": p.get("shirtNumber"),
             "portero": bool(p.get("isGoalkeeper")),
+            "equipo": _repara(p.get("teamName") or ""),
+            "disparos": _disparos(p.get("shotmap")),
             "grupos": grupos[:4],
         }
     return salida
