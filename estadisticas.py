@@ -70,6 +70,12 @@ h2 { font-size:13px; letter-spacing:.04em; text-transform:uppercase;
 .cuarto { background:#0f172a; border-radius:8px; padding:7px 10px; margin:8px 0;
           font-weight:700; font-size:12px; color:#9aa4b2; }
 .vacio { color:#9aa4b2; padding:14px 0; }
+/* Futbol: goles/tarjetas y alineaciones */
+.fila.gol .val { color:#4ade80; }
+.fila.tarjeta .val { color:#fbbf24; }
+.linea { display:flex; gap:8px; padding:2px 0; font-size:13px; }
+.linea .num { color:#9aa4b2; min-width:20px; text-align:right;
+              font-variant-numeric:tabular-nums; }
 @media (max-width:640px) {
   .equipo .nom { font-size:13px; } .equipo .pts { font-size:28px; }
   .wrap { padding:12px 10px 40px; }
@@ -192,11 +198,14 @@ def _record(t: dict) -> str:
     return " · ".join(partes)
 
 
-def _cuarto(n) -> str:
+def _cuarto(n, sport: str = "nba") -> str:
     """3 -> '3er cuarto'. Se escribe el cuarto, no 'Q3'.
 
     ESPN manda '3rd Quarter' en ingles: mostrarlo tal cual deja la ficha a
     medias, y poner 'Q3' no pega con el marcador (que usa 1 2 3 4 T).
+
+    En FUTBOL el periodo no es un cuarto: son dos partes y luego prorroga/penales.
+    Decir "1er cuarto" en un partido de LaLiga 2 es simplemente falso.
     """
     try:
         n = int(n)
@@ -204,6 +213,14 @@ def _cuarto(n) -> str:
         return ""
     if n <= 0:
         return ""
+    if (sport or "").lower().startswith("soccer"):
+        if n == 1:
+            return "1ª parte"
+        if n == 2:
+            return "2ª parte"
+        if n == 3:
+            return "Prórroga"
+        return "Penales"
     if n == 1:
         return "1er cuarto"
     if n == 2:
@@ -231,7 +248,13 @@ def _bloque_marcador(detalle: dict) -> str:
 
     cuartos = max(len(local.get("linescores") or []),
                   len(visita.get("linescores") or []))
-    cabecera = "".join(f"<th>{i + 1}</th>" for i in range(cuartos)) + "<th>T</th>"
+    sport = detalle.get("sport") or ""
+    futbol = str(sport).lower().startswith("soccer")
+    # En futbol las columnas son las partes (1ª, 2ª, prorroga...), no "1 2 3 4".
+    etiquetas = ["1ª", "2ª", "P", "P2"] if futbol else ["1", "2", "3", "4"]
+    cabecera = "".join(
+        f"<th>{etiquetas[i] if i < len(etiquetas) else i + 1}</th>"
+        for i in range(cuartos)) + "<th>T</th>"
 
     def _fila(t):
         lineas = list(t.get("linescores") or [])
@@ -243,7 +266,7 @@ def _bloque_marcador(detalle: dict) -> str:
     estado = _esc(detalle.get("status"))
     reloj = detalle.get("clock") or ""
     periodo = detalle.get("period")
-    medio = (f"{_esc(reloj)} · {_esc(_cuarto(periodo))}" if reloj and periodo
+    medio = (f"{_esc(reloj)} · {_esc(_cuarto(periodo, sport))}" if reloj and periodo
              else estado or "Programado")
 
     parciales = ""
@@ -254,6 +277,86 @@ def _bloque_marcador(detalle: dict) -> str:
     return (f'<div class="marcador">{_lado(visita, "visita")}'
             f'<div class="centro">{medio}<br>{estado}</div>'
             f'{_lado(local, "local")}</div>{parciales}')
+
+
+def _es_gol(texto: str) -> bool:
+    t = (texto or "").lower()
+    return any(k in t for k in ("gol", "goal", "penal", "penalty", "autogol", "own goal"))
+
+
+def _es_tarjeta(texto: str) -> bool:
+    t = (texto or "").lower()
+    return "tarjeta" in t or "yellow card" in t or "red card" in t or "amonestad" in t
+
+
+def _bloque_goles(detalle: dict) -> str:
+    """Goles y tarjetas del partido, en orden.
+
+    En futbol la "jugada a jugada" de ESPN puede traer 200 acciones (saques,
+    faltas, cambios). Lo que el usuario busca de un vistazo son los GOLES y las
+    TARJETAS, asi que se separan en su propia tarjeta y se dejan arriba.
+    Si el partido no ha empezado no hay nada: el bloque no se pinta.
+    """
+    jugadas = detalle.get("plays") or []
+    if not jugadas:
+        return ""
+    filas = []
+    for j in jugadas:
+        texto = j.get("texto") or ""
+        if _es_gol(texto):
+            clase, icono = "gol", "⚽"
+        elif _es_tarjeta(texto):
+            clase, icono = "tarjeta", "🟨" if "amarilla" in texto.lower() or "yellow" in texto.lower() else "🟥"
+        else:
+            continue
+        filas.append(
+            f'<div class="fila {clase}"><div class="ico">{icono}</div><div>'
+            f'<div class="val">{_esc(texto)}</div>'
+            f'<div class="sub">{_esc(j.get("reloj") or "")}'
+            f'{" · " + _esc(_cuarto(j.get("periodo"), detalle.get("sport"))) if j.get("periodo") else ""}'
+            f'</div></div></div>'
+        )
+    if not filas:
+        return ""
+    return (f'<div class="card"><h2>Goles y tarjetas '
+            f'<span class="muted" style="text-transform:none;font-weight:400">'
+            f'({len(filas)})</span></h2>{"".join(filas)}</div>')
+
+
+def _bloque_alineaciones(detalle: dict) -> str:
+    """Alineaciones (titulares y suplentes) si ESPN las publica.
+
+    De segunda division ESPN muchas veces NO trae alineaciones: en ese caso el
+    bloque no aparece, en vez de rellenar con una lista vacia que parece un error.
+    """
+    alineaciones = detalle.get("lineups") or []
+    partes = []
+    for equipo in alineaciones:
+        titulares = equipo.get("titulares") or []
+        suplentes = equipo.get("suplentes") or []
+        if not titulares and not suplentes:
+            continue
+
+        def _jugadores(lista):
+            return "".join(
+                f'<div class="linea"><span class="num">{_esc(p.get("numero") or p.get("number") or "")}</span>'
+                f'<span>{_esc(p.get("nombre") or p.get("name") or p.get("atleta") or "")}</span></div>'
+                for p in lista
+            )
+
+        formacion = equipo.get("formacion") or equipo.get("formation") or ""
+        partes.append(
+            f'<div style="margin-top:10px"><div class="val">'
+            f'{_esc(equipo.get("equipo") or "")}'
+            f'{" · " + _esc(formacion) if formacion else ""}</div>'
+            f'{_jugadores(titulares)}'
+            + (f'<div class="sub" style="margin-top:6px">Suplentes</div>'
+               f'{_jugadores(suplentes)}' if suplentes else "")
+            + "</div>"
+        )
+    if not partes:
+        return ""
+    return f'<div class="card"><h2>Alineaciones</h2>{"".join(partes)}</div>'
 
 
 def _bloque_ficha(detalle: dict) -> str:
@@ -314,7 +417,7 @@ def _bloque_jugadas(detalle: dict, limite: int = 40) -> str:
     for j in reversed(jugadas):
         periodo = j.get("periodo")
         if periodo and periodo != cuarto_previo:
-            partes.append(f'<div class="cuarto">{_esc(_cuarto(periodo))}</div>')
+            partes.append(f'<div class="cuarto">{_esc(_cuarto(periodo, detalle.get("sport")))}</div>')
             cuarto_previo = periodo
         clase = "jugada anota" if j.get("anota") else "jugada"
         marcador = f'{j.get("visita")}-{j.get("local")}'
@@ -341,8 +444,10 @@ _PLANTILLA = Template("""<!DOCTYPE html>
   </div>
   $ficha
   $arbitros
+  $goles
   $grafico
   $jugadas
+  $alineaciones
 </div>
 <div id="tip" style="position:fixed;display:none;background:#0b0f19;
      border:1px solid #374151;border-radius:8px;padding:7px 9px;font-size:12px;
@@ -382,7 +487,12 @@ def pagina(detalle: dict) -> str:
     liga = detalle.get("league") or detalle.get("label") or "NBA"
     subtitulo = f'{_esc(liga)} · {_esc(detalle.get("status") or "")}'
     if detalle.get("state") == "in":
-        subtitulo += f' · {_esc(_cuarto(detalle.get("period")))} {_esc(detalle.get("clock") or "")}'
+        subtitulo += f' · {_esc(_cuarto(detalle.get("period"), detalle.get("sport")))} {_esc(detalle.get("clock") or "")}'
+
+    # Bloques propios del futbol. En NBA quedan vacios y no se pintan: el
+    # Template los sustituye por cadena vacia.
+    goles = _bloque_goles(detalle)
+    alineaciones = _bloque_alineaciones(detalle)
 
     return _PLANTILLA.substitute(
         titulo=_esc(titulo),
@@ -391,8 +501,10 @@ def pagina(detalle: dict) -> str:
         marcador=_bloque_marcador(detalle),
         ficha=_bloque_ficha(detalle),
         arbitros=_bloque_arbitros(detalle),
+        goles=goles,
         grafico=grafico,
         jugadas=_bloque_jugadas(detalle),
+        alineaciones=alineaciones,
         serie_json=json.dumps(serie),
         nombres_json=json.dumps({"local": nombre_local, "visita": nombre_visita}),
         js=_JS_GRAFICO,
