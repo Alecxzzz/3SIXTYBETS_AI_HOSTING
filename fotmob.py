@@ -403,6 +403,38 @@ def buscar_partido(local, visita, fecha=None, ventana_h: int = 48):
     return candidatos[0][3]
 
 
+_ROLES_USUAL = {0: "Portero", 1: "Defensa", 2: "Medio", 3: "Delantero"}
+
+
+def _rol(position_id, usual_id):
+    """Portero/Defensa/Medio/Delantero a partir de lo que manda FotMob.
+
+    Los suplentes traen `usualPlayingPositionId` (0..3, verificado: Merino=2
+    medio, portero=0) y los titulares `positionId` (11 = portero, 32-38 defensa,
+    63-77 medio, 85+ delantero). Si no encaja, se deja vacio: mejor sin dato
+    que con uno inventado.
+    """
+    try:
+        usual = int(usual_id)
+    except (TypeError, ValueError):
+        usual = None
+    if usual in _ROLES_USUAL:
+        return _ROLES_USUAL[usual]
+    try:
+        pos = int(position_id)
+    except (TypeError, ValueError):
+        return ""
+    if pos == 11:
+        return "Portero"
+    if 30 <= pos <= 45:
+        return "Defensa"
+    if 60 <= pos <= 80:
+        return "Medio"
+    if 80 <= pos <= 120:
+        return "Delantero"
+    return ""
+
+
 def _jugador(p):
     """Normaliza un jugador de FotMob (titular o suplente)."""
     rend = p.get("performance") or {}
@@ -412,6 +444,7 @@ def _jugador(p):
         "nombre": _repara(p.get("name") or ""),
         "dorsal": p.get("shirtNumber") or "",
         "pos_id": p.get("positionId"),
+        "rol": _rol(p.get("positionId"), p.get("usualPlayingPositionId")),
         "x": round(float(h.get("x") or 0), 4),
         "y": round(float(h.get("y") or 0), 4),
         "nota": rend.get("rating"),
@@ -430,10 +463,18 @@ def _lado(equipo, lado):
     bajas = []
     for p in equipo.get("unavailable") or []:
         info = p.get("injuryInformation") or {}
+        # FotMob manda el detalle real en `unavailability`
+        # (type + expectedReturn + expectedReturnDate).
+        baja = p.get("unavailability") or {}
+        tipo = baja.get("type") or info.get("type") or ""
         bajas.append({
             "nombre": _repara(p.get("name") or ""),
             "foto": foto_jugador(p.get("id")),
-            "motivo": _repara(info.get("type") or ""),
+            "motivo": tipo,
+            "tipo": tipo,
+            "regreso": baja.get("expectedReturn") or info.get("expectedReturn") or "",
+            "regreso_fecha": baja.get("expectedReturnDate") or "",
+            "rol": _rol(p.get("positionId"), p.get("usualPlayingPositionId")),
         })
     return {
         "lado": lado,
