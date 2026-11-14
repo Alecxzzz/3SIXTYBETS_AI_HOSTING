@@ -787,6 +787,30 @@ def actualizar(sport: str, cuantas_temporadas: int = 3) -> Dict[str, Any]:
             "liga": datos.get("liga") or {}, "partidos": datos.get("partidos") or 0}
 
 
+def hay_calibracion(sport: str) -> bool:
+    """True si el deporte YA tiene calibracion guardada (consulta barata).
+
+    `estado()` recalcula desde ESPN cuando no hay nada guardado: son ~30
+    peticiones y ~40 segundos. Eso esta bien en un script de calibracion, pero es
+    inaceptable dentro de una peticion o de un bucle de 25 picks (se quedaria
+    minutos descargando ligas). Quien llama en caliente comprueba esto primero y,
+    si no hay, usa el modelo anterior.
+    """
+    memo = _memoria.get(sport)
+    if memo:
+        return bool(memo.get("calibracion"))
+    base = _db()
+    if not base:
+        return False
+    try:
+        fila = base.run_query(
+            "select id from elo_calibracion where sport = %s limit 1", (sport,),
+            fetchone=True)
+        return bool(fila)
+    except Exception:  # noqa: BLE001 - sin BD se prefiere el modelo anterior
+        return False
+
+
 def estado(sport: str, forzar: bool = False) -> Dict[str, Any]:
     """Ratings listos para usar: de cache/BD si son recientes, si no recalcula."""
     if not forzar:
@@ -807,7 +831,8 @@ def nombre_equipo(sport: str, team_id: str) -> str:
 
 __all__ = [
     "CONFIG", "INICIAL", "actualizar", "ajustar", "cargar", "construir",
-    "equipos", "estado", "guardar", "nombre_equipo", "partidos_equipo",
+    "equipos", "estado", "guardar", "hay_calibracion", "nombre_equipo",
+    "partidos_equipo",
 ]
 
 

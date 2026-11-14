@@ -676,9 +676,19 @@ def _salida_elo(pick: Dict[str, Any], home: str, away: str,
     try:
         from backend.apuestas import motor as motor_mc
         from backend.apuestas import simulacion
+        from backend.apuestas import elo as motor_elo
     except Exception as exc:  # noqa: BLE001 - sin motor se sigue como antes
         print(f"[analista] motor elo+mc no disponible: {exc}", flush=True)
         return None
+
+    # Sin calibracion guardada, `motor.predecir` descargaria la liga entera de
+    # ESPN (~40 s) DENTRO de la peticion. En un lote de 25 picks eso son minutos:
+    # se prefiere el modelo de forma antes que bloquear.
+    try:
+        if not motor_elo.hay_calibracion(clave):
+            return None
+    except Exception:  # noqa: BLE001 - si la comprobacion falla, se intenta igual
+        pass
 
     eq_l, eq_v = equipo_id(home), equipo_id(away)
     if not eq_l or not eq_v or not eq_l.get("id") or not eq_v.get("id"):

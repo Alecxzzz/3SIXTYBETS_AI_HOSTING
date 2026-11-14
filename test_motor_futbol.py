@@ -13,6 +13,7 @@ Lo que se fija aqui:
     "gana el local" da 0.25 (moneda) y hace creer que el modelo no sirve.
 """
 import unittest
+from unittest import mock
 
 from backend.apuestas import calibrar, elo, motor, simulacion
 
@@ -232,6 +233,52 @@ class TestClaveMotor(unittest.TestCase):
     def test_deporte_desconocido(self):
         from ai import analista_picks as A
         self.assertIsNone(A._clave_motor("tennis", "atp"))
+
+
+class TestCalibracionEnCaliente(unittest.TestCase):
+    """`hay_calibracion` evita que una liga sin preparar bloquee una peticion.
+
+    Sin esta comprobacion, `estado()` descarga la liga entera de ESPN (~30
+    peticiones, ~40 s) la primera vez que se pide un pick de esa liga: en un lote
+    de 25 picks serian minutos.
+    """
+
+    def tearDown(self):
+        elo._memoria.pop("soccer:zz.1", None)
+
+    def test_sin_bd_no_hay_calibracion(self):
+        with mock.patch.object(elo, "_db", return_value=None):
+            self.assertFalse(elo.hay_calibracion("soccer:zz.1"))
+
+    def test_sin_fila_devuelve_false(self):
+        class Base:
+            def run_query(self, sql, params=None, fetchone=False):
+                return None
+
+        with mock.patch.object(elo, "_db", return_value=Base()):
+            self.assertFalse(elo.hay_calibracion("soccer:zz.1"))
+
+    def test_con_fila_devuelve_true(self):
+        class Base:
+            def run_query(self, sql, params=None, fetchone=False):
+                return {"id": 1}
+
+        with mock.patch.object(elo, "_db", return_value=Base()):
+            self.assertTrue(elo.hay_calibracion("soccer:zz.1"))
+
+    def test_si_la_bd_revienta_no_propaga(self):
+        class Base:
+            def run_query(self, *a, **k):
+                raise RuntimeError("bd caida")
+
+        with mock.patch.object(elo, "_db", return_value=Base()):
+            self.assertFalse(elo.hay_calibracion("soccer:zz.1"))
+
+    def test_la_memoria_manda(self):
+        elo._memoria["soccer:zz.1"] = {"calibracion": {"a": 1.0}, "ratings": {},
+                                       "ts": 0.0}
+        with mock.patch.object(elo, "_db", return_value=None):
+            self.assertTrue(elo.hay_calibracion("soccer:zz.1"))
 
 
 if __name__ == "__main__":

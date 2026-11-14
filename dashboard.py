@@ -1902,9 +1902,21 @@ def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
         return None
     try:
         from backend.apuestas import motor as motor_mc
+        from backend.apuestas import elo as motor_elo
     except Exception as exc:  # noqa: BLE001 - sin motor se sigue con lo de antes
         print(f"[Dashboard] motor elo+mc no disponible: {exc}", flush=True)
         return None
+
+    # `decidir` recorre TODOS los partidos del ciclo. Si la liga no esta
+    # calibrada, `predecir` la descargaria de ESPN (~40 s) por cada partido: se
+    # comprueba antes (una consulta indexada) y se usa el criterio anterior.
+    try:
+        if not motor_elo.hay_calibracion(clave):
+            print(f"[Dashboard] motor elo+mc: {clave} sin calibrar, "
+                  f"se usa el criterio anterior", flush=True)
+            return None
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         elegido = motor_mc.decidir(
