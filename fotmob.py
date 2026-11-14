@@ -117,6 +117,35 @@ def mismo_partido(local_a, visita_a, local_b, visita_b):
     return (_empareja(a, c) and _empareja(b, d)) or (_empareja(a, d) and _empareja(b, c))
 
 
+_GENERICOS = {
+    "club", "atletico", "atletica", "deportivo", "deportiva", "fc", "cf", "sc",
+    "afc", "cd", "ac", "ca", "the", "team", "sporting", "racing",
+}
+
+
+def _palabras_distintivas(t):
+    """Palabras que identifican al club, sin genericos: 'Club Atlético
+    Estudiantes' -> {'estudiantes'}. Sirve para unir el nombre de ESPN
+    ('Estudiantes (Buenos Aires)') con el de FotMob ('Club Atlético Estudiantes')."""
+    t = _repara(t or "").lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(c if (c.isalnum() or c.isspace()) else " " for c in t)
+    fuera = set(_PALABRAS_VACIAS) | _GENERICOS
+    return {p for p in t.split() if p not in fuera and len(p) >= 4}
+
+
+def _mismo_equipo(a, b):
+    """Como _empareja pero tolera que cada fuente nombre al club distinto.
+
+    Solo se usa cuando ADEMAS el otro equipo del partido coincide y la fecha
+    esta dentro de la ventana: dos 'Estudiantes' distintos jugando contra el
+    mismo rival el mismo dia es practicamente imposible.
+    """
+    if _empareja(_clave_equipo(a), _clave_equipo(b)):
+        return True
+    return bool(_palabras_distintivas(a) & _palabras_distintivas(b))
+
+
 
 def buscar_equipo(nombre):
     """'Arsenal' -> {'id': 9825, ...}. Devuelve None si no lo encuentra."""
@@ -259,6 +288,32 @@ def _partidos_equipo(tid, ttl=900):
 
 
 
+def _partidos_del_dia(dia):
+    """TODOS los partidos de FotMob de un dia, en cualquier estado.
+
+    `_partidos_de_fecha` solo devuelve terminados (5/6/7). Un partido en juego
+    (statusId 3) no existia para el resolver, y por eso la alineacion de un
+    partido EN VIVO no se encontraba nunca.
+    """
+    datos = _get("matches", {"date": dia.strftime("%Y%m%d")}, ttl=60)
+    salida = []
+    for liga in (datos or {}).get("leagues") or []:
+        for p in liga.get("matches") or []:
+            h = p.get("home") or {}
+            a = p.get("away") or {}
+            if not p.get("id") or not h.get("name") or not a.get("name"):
+                continue
+            salida.append({
+                "id": p.get("id"),
+                "home": h.get("name"),
+                "away": a.get("name"),
+                "utc": (p.get("status") or {}).get("utcTime"),
+                "estado": p.get("statusId"),
+                "liga": liga.get("name"),
+            })
+    return salida
+
+
 def buscar_partido(local, visita, fecha=None, ventana_h: int = 48):
     """matchId de FotMob para local vs visita (nombre normalizado + fecha).
 
@@ -275,6 +330,10 @@ def buscar_partido(local, visita, fecha=None, ventana_h: int = 48):
       - la tolerancia de nombre es minima (ver _empareja);
       - si hay fecha, el partido debe caer dentro de `ventana_h` horas.
     Si no se cumple, None: mejor sin alineacion que con la de otro partido.
+
+    Estrategia: PRIMERO la lista diaria completa de FotMob (incluye partidos EN
+    VIVO, que _partidos_de_fecha descarta) emparejando los dos equipos; si eso
+    no da nada, se cae al escaneo de calendarios por equipo.
     """
     if not local or not visita:
         return None
@@ -286,31 +345,62 @@ def buscar_partido(local, visita, fecha=None, ventana_h: int = 48):
     cuando = _ts(fecha)
     candidatos = []
 
-    for nombre in (local, visita):
-        tid = equipo_id(nombre)
-        if not tid:
-            continue
-        for f in _partidos_equipo(tid):
-            h = _clave_equipo(((f.get("home") or {}).get("name")) or "")
-            a = _clave_equipo(((f.get("away") or {}).get("name")) or "")
-            if not h or not a or not f.get("id"):
-                continue
+    # ---- 1) POR FECHA (via fiable) --------------------------------------
+    # La lista diaria trae TODOS los estados, incluido el partido EN VIVO
+    # (statusId 3) que _partidos_de_fecha descarta. Sin esto, un partido en
+    # juego nunca se encontraba y la alineacion oficial no aparecia.
+    # Ademas no depende de que search/suggest devuelva el club correcto
+    # (habia dos "Atlanta": el argentino y Atlanta United de la MLS).
+    if cuando:
+        base = datetime.fromtimestamp(cuando)
+        dias = [(base.date(), 0), (base.date() - timedelta(days=1), 1),
+                (base.date() + timedelta(days=1), 1)]
+        for dia, penal_dia in dias:
+            for f in _partidos_del_dia(dia):
+                directo = _mismo_equipo(local, f["home"]) and _mismo_equipo(visita, f["away"])
+                cruzado = _mismo_equipo(local, f["away"]) and _mismo_equipo(visita, f["home"])
+                if not (directo or cruzado):
+                    continue
+                ts = _ts(f.get("utc"))
+                if ts and abs(ts - cuando) > ventana_h * 3600:
+                    continue
+                exacto = (
+                    _empareja(ol, _clave_equipo(f["home"]))
+                    and _empareja(ov, _clave_equipo(f["away"]))
+                ) or (
+                    _empareja(ol, _clave_equipo(f["away"]))
+                    and _empareja(ov, _clave_equipo(f["home"]))
+                )
+                dif = abs(ts - cuando) if ts else 0
+                candidatos.append((0 if exacto else 1, penal_dia, dif, f["id"]))
 
-            directo = _empareja(ol, h) and _empareja(ov, a)
-            cruzado = _empareja(ol, a) and _empareja(ov, h)
-            if not (directo or cruzado):
+    # ---- 2) POR EQUIPO (respaldo, sin fecha o si no aparecio) -----------
+    if not candidatos:
+        for nombre in (local, visita):
+            tid = equipo_id(nombre)
+            if not tid:
                 continue
+            for f in _partidos_equipo(tid):
+                h = _clave_equipo(((f.get("home") or {}).get("name")) or "")
+                a = _clave_equipo(((f.get("away") or {}).get("name")) or "")
+                if not h or not a or not f.get("id"):
+                    continue
 
-            ts = _ts((f.get("status") or {}).get("utcTime"))
-            if cuando and ts and abs(ts - cuando) > ventana_h * 3600:
-                continue
-            dif = abs(ts - cuando) if (ts and cuando) else 0
-            candidatos.append((0 if directo else 1, dif, f.get("id")))
+                directo = _empareja(ol, h) and _empareja(ov, a)
+                cruzado = _empareja(ol, a) and _empareja(ov, h)
+                if not (directo or cruzado):
+                    continue
+
+                ts = _ts((f.get("status") or {}).get("utcTime"))
+                if cuando and ts and abs(ts - cuando) > ventana_h * 3600:
+                    continue
+                dif = abs(ts - cuando) if (ts and cuando) else 0
+                candidatos.append((0 if directo else 1, 1, dif, f.get("id")))
 
     if not candidatos:
         return None
-    candidatos.sort(key=lambda c: (c[0], c[1]))
-    return candidatos[0][2]
+    candidatos.sort(key=lambda c: (c[0], c[1], c[2]))
+    return candidatos[0][3]
 
 
 def _jugador(p):
