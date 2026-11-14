@@ -5,8 +5,12 @@ Sustituye, **en NBA**, el criterio anterior de elección de picks
 **probabilidad calculada** del partido. La IA deja de decidir: solo puede
 redactar.
 
-Estado: **NBA activo**. El resto de deportes sigue con su criterio anterior
-hasta que cada uno tenga su calibración (ver *Añadir un deporte*).
+Estado: **NBA y fútbol activos**. En fútbol se calibra **por liga**
+(`soccer:eng.1`, `soccer:esp.1`, `soccer:ita.1`, `soccer:ger.1`,
+`soccer:fra.1`, `soccer:mex.1`, `soccer:usa.1`) porque ESPN da los equipos por
+liga y un rating de la Eredivisie no es comparable con uno de LaLiga. El resto
+de deportes sigue con su criterio anterior hasta que cada uno tenga su
+calibración (ver *Añadir un deporte*).
 
 ---
 
@@ -59,7 +63,62 @@ python generar_picks_nba.py --forzar          # publica los picks de NBA
 python -m backend.apuestas.backtest           # calidad de lo ya resuelto
 ```
 
+## Fútbol: por qué NO es el mismo simulador
+
+En NBA los puntos son ~110 y la normal funciona. En fútbol los goles son 0, 1, 2,
+3 y hay **tres resultados**. Eso obliga a tres cambios:
+
+| Pieza | NBA | Fútbol |
+|---|---|---|
+| Simulador | `simular_nba` (normal correlacionada) | `simular_futbol` (Poisson con factor común) |
+| Resultados | 2 (gana local / gana visita) | **3** (`resultado` = 1X2, con empate) |
+| Mercados | ganador, handicap, total, total de equipo | + doble oportunidad, ambos marcan |
+| Prórroga | 6.5% | 0 (el mercado es de 90 minutos) |
+
+Con una normal, `P(empate)` es **cero** (el margen es una variable continua) y el
+27% de empates del fútbol se reparte entre los dos equipos. Poisson modela el
+empate solo: `goles_local == goles_visita`.
+
+La correlación se mete como un **factor común** que multiplica las dos medias
+(`factor = exp(σz − σ²/2)`, media 1): un partido abierto sube los dos, uno
+cerrado los baja, y cada equipo sigue siendo Poisson con su lambda.
+
+### Resultado medido (3 temporadas, Brier multiclase de 1X2)
+
+El baseline honesto en fútbol no es el 50/50: es **predecir las tasas base de la
+liga** (local ~45%, empate ~25%, visita ~30%).
+
+| Liga | Partidos | Modelo | Tasas base | Mejora |
+|---|---|---|---|---|
+| eng.1 | 842 | 0.61296 | 0.65509 | **+6.4%** |
+| esp.1 | 853 | 0.58938 | 0.64129 | **+8.1%** |
+| ita.1 | 862 | 0.59423 | 0.65594 | **+9.4%** |
+| ger.1 | 667 | 0.59878 | 0.64938 | **+7.8%** |
+| fra.1 | 687 | 0.59491 | 0.63524 | **+6.4%** |
+| mex.1 | 820 | 0.60900 | 0.64137 | **+5.1%** |
+| usa.1 | 1572 | 0.63056 | 0.64495 | **+2.2%** |
+
+`calibrar` **falla** (`BAD 1X2`) si el modelo no baja de las tasas base, así que
+una liga nueva no se activa por haber corrido el script: tiene que ganar.
+
+### Mercados que se rechazan a propósito
+
+- Líneas de **cuartos** (`-0.25`, `+0.75`): son media victoria / media derrota y
+  simularlas como si fueran `-0.5` daría una probabilidad falsa.
+- Mercados **por tiempo o mitad** ("primera parte", "descanso"): el motor simula
+  el partido completo.
+- Props de jugador, corners, tarjetas: no hay modelo.
+
+### Cómo añadir una liga
+
+```bash
+python -m backend.apuestas.calibrar soccer:ned.1   # y mirar si sale OK 1X2
+```
+Si pasa el criterio, se guarda sola y el analista la usa en el siguiente pick.
+Si no pasa, no hay nada que activar: el analista cae al Poisson de forma.
+
 ## El analista (panel de picks) también usa este motor
+
 
 Desde este cambio, `ai/analista_picks.py` **precia los picks NBA con Elo + Monte
 Carlo**, no con el modelo de forma de 10 partidos que tenía antes:
@@ -148,7 +207,7 @@ Sin las redes, la primera corrida publicó `Más de 218.5 @ 1.909` con edge
 porque el modelo arrastraba la media de 3 temporadas. Se corrigió anclando el
 nivel a la ventana de 21 días **y** se añadieron las redes.
 
-## Tres bugs reales que encontraron los tests
+## Cinco bugs reales que encontraron los tests y la medición
 
 - **Sistema singular**: si la columna de descanso es constante (partidos sin
   fecha), `X'X` no se puede invertir y el ajuste devolvía ceros → el modelo
@@ -164,6 +223,16 @@ nivel a la ventana de 21 días **y** se añadieron las redes.
   pero cualquier consulta sin `ORDER BY` veía otra calibración y parecía roto.
   Ahora `guardar()` borra antes de insertar y la tabla tiene clave única por
   deporte (`elo_calibracion_sport_unico`).
+- **Temporadas de fútbol duplicadas**: ESPN etiqueta el fútbol por el año en que
+  **empieza** la temporada y la NBA por el año en que **termina**. Con la regla
+  de la NBA se pedía `[actual, 2026, 2025]`, donde 2026 *es* la temporada en
+  curso: se descargaba dos veces y se perdía una entera (474 partidos en vez de
+  ~1.100). Ahora `_temporadas` recibe el deporte.
+- **Medir fútbol con la métrica de la NBA**: el Brier de "gana el local" usa
+  `P(margen > 0)` con una normal, que asigna **probabilidad cero al empate**. El
+  modelo salía con 0.25028 contra 0.25000 del 50/50 y parecía que Elo no servía
+  para fútbol. Con la métrica correcta (Brier multiclase de 1X2 con Poisson) el
+  mismo modelo mejora las tasas base entre un 2% y un 9%.
 
 ## Añadir un deporte
 

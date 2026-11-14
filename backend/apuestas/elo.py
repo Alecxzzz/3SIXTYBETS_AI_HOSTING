@@ -39,8 +39,10 @@ import requests
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-# Ruta de ESPN por deporte. El futbol entra por el Dixon-Coles que ya existe,
-# no por aqui (su Elo necesita otra escala: goles, no puntos).
+# Ruta de ESPN por deporte. El futbol NO se puede listar aqui: ESPN da una ruta
+# por LIGA (`soccer/eng.1`), y mezclar equipos de ligas distintas en un mismo
+# pool de Elo no tiene sentido (un 1.8 de la Eredivisie no es un 1.8 de LaLiga).
+# Por eso el futbol usa claves `soccer:<liga>` y se resuelven en `_ruta`.
 RUTAS = {
     "nba": "basketball/nba",
     "nfl": "football/nfl",
@@ -55,12 +57,20 @@ CONFIG = {
     "nfl": {"k": 20.0, "hfa": 55.0, "mov": True, "rango_total": (3, 130)},
     "mlb": {"k": 10.0, "hfa": 25.0, "mov": False, "rango_total": (1, 60)},
     "wnba": {"k": 20.0, "hfa": 90.0, "mov": True, "rango_total": (90, 300)},
+    # Futbol: `mov` apagado a proposito. La formula de margen de victoria esta
+    # pensada para deportes de anotacion alta (30 puntos de paliza); en futbol
+    # casi todos los partidos son 0-3 goles de diferencia y aplicarla infla el
+    # rating del que gana 4-0 contra un rival ya hundido.
+    # `rango_total` admite 0-0: en futbol el 0-0 es un resultado, no un dato roto.
+    "soccer": {"k": 20.0, "hfa": 65.0, "mov": False, "rango_total": (0, 14)},
 }
 
 INICIAL = 1500.0
 # Frecuencia de prorroga de referencia, por si el endpoint de schedule no trae
 # `linescores` y no se puede medir. En NBA ronda el 6.5%; en NFL es ~0.5%.
-P_OT_REFERENCIA = {"nba": 0.065, "wnba": 0.06, "nfl": 0.005, "mlb": 0.09}
+# En futbol no hay prorroga en el mercado de 90 minutos: 0.
+P_OT_REFERENCIA = {"nba": 0.065, "wnba": 0.06, "nfl": 0.005, "mlb": 0.09,
+                   "soccer": 0.0}
 # Regresion entre temporadas: la plantilla cambia y el rating del año pasado no
 # vale entero. 0.75 conserva la señal sin congelar el rating.
 PESO_TEMPORADA = 0.75
@@ -95,7 +105,34 @@ def _get(url: str, params: Optional[dict] = None, ttl: int = TTL_SEGUNDOS):
 
 
 def _ruta(sport: str) -> Optional[str]:
-    return RUTAS.get((sport or "").strip().lower())
+    """Ruta de ESPN. Acepta `nba` y `soccer:eng.1` (deporte:liga)."""
+    s = (sport or "").strip().lower()
+    if s in RUTAS:
+        return RUTAS[s]
+    if s.startswith("soccer:"):
+        liga = s.split(":", 1)[1].strip()
+        # ESPN exige la liga: sin ella no hay equipos ni calendario que pedir.
+        return f"soccer/{liga}" if liga else None
+    if s in ("soccer", "futbol", "football_soccer"):
+        return "soccer/esp.1"
+    return None
+
+
+def _cfg(sport: str) -> Dict[str, Any]:
+    """Configuracion del deporte. `soccer:eng.1` hereda la de `soccer`.
+
+    Sin esta herencia, cada liga de futbol exigiria su propia entrada en CONFIG
+    y una liga nueva (la que interese mañana) se quedaria sin parametros y sin
+    poder calibrarse.
+    """
+    s = (sport or "").strip().lower()
+    return CONFIG.get(s) or CONFIG.get(s.split(":", 1)[0]) or {}
+
+
+def es_futbol(sport: str) -> bool:
+    """True si el deporte se modela con goles (Poisson)."""
+    s = (sport or "").strip().lower()
+    return s == "soccer" or s.startswith("soccer:") or s in ("futbol", "football_soccer")
 
 
 def equipos(sport: str) -> List[Dict[str, Any]]:
@@ -175,7 +212,7 @@ def partidos_equipo(sport: str, team_id: str,
         # envenena la desviacion tipica: con 2641 partidos, una docena de filas
         # corruptas suben sigma_total de 18 a 23 y el motor empieza a ver
         # "edges" en todos los totales. Se descartan antes de calibrar.
-        rango = (CONFIG.get(sport) or {}).get("rango_total")
+        rango = _cfg(sport).get("rango_total")
         if rango:
             total_partido = fila["home"]["score"] + fila["away"]["score"]
             if not (rango[0] <= total_partido <= rango[1]):
@@ -185,18 +222,25 @@ def partidos_equipo(sport: str, team_id: str,
     return salida
 
 
-def _temporadas(cuantas: int = 3) -> List[Optional[int]]:
+def _temporadas(cuantas: int = 3, sport: str = "nba") -> List[Optional[int]]:
     """Temporadas a descargar. `None` = la actual (sin parametro).
 
-    ESPN etiqueta la temporada por el año en que TERMINA: en noviembre de 2026
-    la temporada en curso es la 2027 y `season=2026` es la anterior. Por eso se
-    pide `None` (actual) + años hacia atras, en vez de asumir que el año actual
-    es el de la temporada.
+    OJO: las dos convenciones de ESPN no coinciden.
+      * NBA/NFL: la temporada se etiqueta por el año en que TERMINA (en
+        noviembre de 2026 la temporada en curso es la 2027). `season=2026` es la
+        anterior.
+      * FUTBOL: se etiqueta por el año en que EMPIEZA (en noviembre de 2026 la
+        temporada en curso es la 2026-27, o sea `season=2026`). Si se usara la
+        regla de la NBA se pedia [actual, 2026, 2025], donde 2026 ES la actual:
+        se descargaba la misma temporada dos veces y se perdia una entera.
     """
     anio = datetime.now(timezone.utc).year
     lista: List[Optional[int]] = [None]
+    # En futbol el año del parametro es el de INICIO: la temporada anterior es
+    # anio-1, no anio.
+    base = anio - 1 if es_futbol(sport) else anio
     for i in range(max(0, cuantas - 1)):
-        lista.append(anio - i)
+        lista.append(base - i)
     return lista
 
 
@@ -229,7 +273,7 @@ def construir(sport: str, cuantas_temporadas: int = 3) -> Dict[str, Any]:
     Se procesa en orden cronologico porque Elo es secuencial: el rating de un
     partido depende solo de los anteriores.
     """
-    cfg = CONFIG.get(sport)
+    cfg = _cfg(sport)
     vacio = {"ratings": {}, "muestras": [], "liga": {}, "partidos": 0, "forma": {}}
     if not cfg:
         return vacio
@@ -240,7 +284,7 @@ def construir(sport: str, cuantas_temporadas: int = 3) -> Dict[str, Any]:
 
     # Una peticion por equipo y temporada, deduplicando por event_id.
     unicos: Dict[str, Dict[str, Any]] = {}
-    for season in _temporadas(cuantas_temporadas):
+    for season in _temporadas(cuantas_temporadas, sport):
         for tid in ids:
             for p in partidos_equipo(sport, tid, season):
                 if p["event_id"] and p["event_id"] not in unicos:
@@ -449,7 +493,7 @@ def ajustar(muestras: List[Dict[str, Any]], liga: Dict[str, Any],
     anterior tenia SD_MARGEN=13.5 y SD_EQUIPO=12.5 escritos a mano: si la liga
     cambia de ritmo, esos numeros mienten y nadie se entera.
     """
-    cfg = CONFIG.get(sport) or {}
+    cfg = _cfg(sport) or {}
     hfa = cfg.get("hfa", 0.0)
     valida = [m for m in muestras if m.get("elo_h") is not None]
 

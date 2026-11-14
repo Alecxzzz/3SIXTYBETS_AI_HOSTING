@@ -1331,7 +1331,7 @@ MOTOR_PRIMERO_DEPORTES = {
 # Se deja encendido SOLO NBA hasta que los numeros de cada deporte esten
 # calibrados (ver backend/apuestas/calibrar.py).
 MOTOR_MC_DEPORTES = {
-    s.strip() for s in os.getenv("DASHBOARD_MOTOR_MC", "nba").split(",")
+    s.strip() for s in os.getenv("DASHBOARD_MOTOR_MC", "nba,soccer").split(",")
     if s.strip()
 }
 # Umbral de edge del motor. 0 = aceptar cualquier edge positivo (solo para
@@ -1862,6 +1862,23 @@ def _pick_deterministico(partido: dict, mercados_reales: list, label: str,
     }
 
 
+def _clave_motor(partido: dict) -> str:
+    """Clave del motor Elo+MC para este partido ('nba' o 'soccer:eng.1').
+
+    El futbol se calibra POR LIGA porque ESPN da los equipos por liga: buscar un
+    equipo de la Premier en el pool de LaLiga devuelve "equipo sin rating" y el
+    motor se quedaria mudo en todos los partidos de futbol. Devuelve "" cuando no
+    se puede saber la liga, y entonces se usa el criterio de siempre.
+    """
+    sport = (partido.get("sport") or "nba").strip().lower()
+    if sport.startswith("soccer") or sport in ("futbol", "football_soccer"):
+        liga = (partido.get("league") or "").strip().lower()
+        if liga.startswith("soccer/"):
+            liga = liga.split("/", 1)[1]
+        return f"soccer:{liga}" if liga else ""
+    return sport
+
+
 def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
                    extra_stats: list | None = None):
     """Elige el pick con Elo + Monte Carlo (backend/apuestas/motor.py).
@@ -1878,6 +1895,11 @@ def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
     """
     if not mercados_reales:
         return None
+    clave = _clave_motor(partido)
+    if not clave:
+        print(f"[Dashboard] motor elo+mc: {label} sin liga, se usa el criterio anterior",
+              flush=True)
+        return None
     try:
         from backend.apuestas import motor as motor_mc
     except Exception as exc:  # noqa: BLE001 - sin motor se sigue con lo de antes
@@ -1886,7 +1908,7 @@ def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
 
     try:
         elegido = motor_mc.decidir(
-            partido, mercados_reales, partido.get("sport") or "nba",
+            partido, mercados_reales, clave,
             min_edge=MOTOR_MC_MIN_EDGE,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1898,9 +1920,9 @@ def _pick_motor_mc(partido: dict, mercados_reales: list, label: str,
         # solo las apuestas publicadas sesga la calibracion (es la politica de
         # seleccion la que queda medida, no el modelo).
         try:
-            pred = motor_mc.predecir(partido, partido.get("sport") or "nba")
+            pred = motor_mc.predecir(partido, clave)
             motor_mc.registrar(partido, None, evaluacion={"pre": pred},
-                               descartado=True, motivo="sin_edge")
+                               descartado=True, motivo="sin_edge", sport=clave)
         except Exception:  # noqa: BLE001 - medir no es critico
             pass
         return None
@@ -2802,7 +2824,8 @@ def generar_picks_dia(max_partidos: int = 120, forzar: bool = False) -> dict:
                     from backend.apuestas import motor as motor_mc
 
                     motor_mc.registrar(p, pick, descartado=False,
-                                       pick_id=str((creado or {}).get("id") or ""))
+                                       pick_id=str((creado or {}).get("id") or ""),
+                                       sport=_clave_motor(p) or "nba")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[Dashboard] no se pudo registrar la prob: {exc}",
                           flush=True)

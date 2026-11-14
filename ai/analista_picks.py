@@ -139,6 +139,23 @@ def _es_soccer(sport: str, league: Optional[str]) -> bool:
     return p.startswith("soccer/")
 
 
+def _clave_motor(sport: str, league: Optional[str]) -> Optional[str]:
+    """Clave del motor Elo+MC: 'nba' o 'soccer:<liga>'.
+
+    El futbol se calibra y se guarda POR LIGA (`soccer:eng.1`), porque ESPN da
+    los equipos por liga y un rating de la Eredivisie no es comparable con uno
+    de LaLiga. Se deriva de la misma ruta de ESPN que ya usa el modelo de forma,
+    asi que no hay dos listas de ligas que se puedan desincronizar.
+    """
+    ruta = _espn_path(sport, league)
+    if ruta.startswith("soccer/"):
+        liga = ruta.split("/", 1)[1].strip()
+        return f"soccer:{liga}" if liga else None
+    if ruta == "basketball/nba":
+        return "nba"
+    return None
+
+
 _EQUIPO_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
 
 
@@ -639,15 +656,19 @@ def _promedios_equipo(nombre: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _salida_elo(pick: Dict[str, Any], home: str,
-                away: str) -> Optional[Dict[str, Any]]:
+def _salida_elo(pick: Dict[str, Any], home: str, away: str,
+                clave: str = "nba") -> Optional[Dict[str, Any]]:
     """Precio del pick con ELO + MONTE CARLO (backend/apuestas).
 
-    Por que se usa esto y no solo la forma de 10 partidos: el modelo de forma
-    no ajusta por rival (un 3-0 contra el colista pesa igual que contra el
+    `clave` es la clave del motor: "nba" o "soccer:<liga>" (el futbol se calibra
+    por liga porque ESPN da los equipos por liga y un rating de la Eredivisie no
+    es comparable con uno de LaLiga).
+
+    Por que se usa esto y no solo la forma de los ultimos partidos: el modelo de
+    forma no ajusta por rival (un 3-0 contra el colista pesa igual que contra el
     lider) y nunca se valido contra resultados. El motor Elo esta calibrado con
-    2.632 partidos: Brier 0.210 contra 0.250 del azar, y el MAE del margen baja
-    de 13.0 a 11.3 puntos.
+    miles de partidos y medido (NBA: Brier 0.210 contra 0.249 del azar; futbol:
+    1X2 Brier 0.613 contra 0.655 de las tasas base de la liga).
 
     Devuelve None si no hay ratings o el mercado no se puede modelar; entonces
     el llamador cae al modelo anterior.
@@ -675,19 +696,19 @@ def _salida_elo(pick: Dict[str, Any], home: str,
         "selection": pick.get("selection") or "",
         "odds": pick.get("odds"),
     }
-    clas = motor_mc.clasificar(entrada, home, away)
+    clas = motor_mc.clasificar(entrada, home, away, clave)
     if clas.get("tipo") == "no_soportado":
-        return {"ok": True, "soportado": False, "deporte": "nba",
+        return {"ok": True, "soportado": False, "deporte": _deporte_de(clave),
                 "partido": f"{home} vs {away}",
                 "mercado_detectado": clas.get("tipo"),
                 "motivo": clas.get("motivo") or "mercado no modelable"}
 
-    pre = motor_mc.predecir(partido, "nba")
+    pre = motor_mc.predecir(partido, clave)
     if not pre.get("ok"):
         return None  # sin ratings: que decida el modelo de forma
 
-    sim = simulacion.simular_nba(
-        pre["mu_local"], pre["mu_visita"], pre["sigma_equipo"],
+    sim = simulacion.simular(
+        clave, pre["mu_local"], pre["mu_visita"], pre["sigma_equipo"],
         pre["rho_equipos"], n=10000, p_ot=pre["p_ot"],
         semilla=motor_mc._semilla(partido),
     )
@@ -696,9 +717,10 @@ def _salida_elo(pick: Dict[str, Any], home: str,
     if prob is None:
         return None
 
+    futbol = _deporte_de(clave) == "soccer"
     return {
         "ok": True,
-        "deporte": "nba",
+        "deporte": _deporte_de(clave),
         "motor": "elo+mc",
         "partido": f"{home} vs {away}",
         "soportado": True,
@@ -716,9 +738,15 @@ def _salida_elo(pick: Dict[str, Any], home: str,
             "descanso_visita": pre.get("descanso_visita"),
         },
         "info": (f"Elo {pre['elo_local']:.0f} vs {pre['elo_visita']:.0f} · "
-                 f"marcador esperado {pre['mu_local']:.1f}-{pre['mu_visita']:.1f} · "
-                 f"{sim.get('n')} simulaciones"),
+                 f"marcador esperado {pre['mu_local']:.2f}-{pre['mu_visita']:.2f} · "
+                 f"{sim.get('n')} simulaciones"
+                 + ("" if futbol else f" · prorroga {pre['p_ot'] * 100:.1f}%")),
     }
+
+
+def _deporte_de(clave: str) -> str:
+    """'nba' -> 'nba'; 'soccer:eng.1' -> 'soccer'."""
+    return "soccer" if (clave or "").startswith("soccer") else (clave or "nba")
 
 
 def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
@@ -758,6 +786,16 @@ def _analizar_nba(pick: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
     elif not salida.get("ok") or not salida.get("soportado"):
         return salida
 
+    return _cerrar_analisis(pick, salida)
+
+
+def _cerrar_analisis(pick: Dict[str, Any],
+                     salida: Dict[str, Any]) -> Dict[str, Any]:
+    """Convierte una probabilidad del modelo en veredicto frente a la cuota.
+
+    Un solo sitio para NBA y futbol: si esto se duplicara, un deporte podria
+    quedarse sin el guardia del DUDOSO y empezar a publicar edges falsos.
+    """
     prob = float(salida["distribucion"]["prob"])
     try:
         cuota = float(pick.get("odds") or 0)
@@ -812,6 +850,16 @@ def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]
                        f"es de {sport or 'otro deporte'}"),
         }
 
+    # FUTBOL: primero el motor Elo + Monte Carlo, si esa liga esta calibrada.
+    # El modelo Poisson de forma queda como respaldo para las ligas que aun no
+    # tienen ratings (o cuando ESPN no da los ids).
+    clave = _clave_motor(sport, league)
+    salida_elo = _salida_elo(pick, home, away, clave) if clave else None
+    if salida_elo is not None:
+        if not salida_elo.get("ok") or not salida_elo.get("soportado"):
+            return salida_elo
+        return _cerrar_analisis(pick, salida_elo)
+
     f_local = forma_equipo(sport, league, home, n=6)
     f_visita = forma_equipo(sport, league, away, n=6)
     if not f_local and not f_visita:
@@ -857,31 +905,9 @@ def analizar_pick(pick: Dict[str, Any], con_llm: bool = False) -> Dict[str, Any]
         salida["motivo"] = pp.get("motivo")
         return salida
 
-    try:
-        cuota = float(pick.get("odds") or 0)
-    except (TypeError, ValueError):
-        cuota = 0.0
-
-    prob = float(pp["prob"])
-    salida["prob_justa"] = round(prob, 4)
-    salida["cuota"] = cuota
-
-    if cuota > 1.0:
-        implicita = 1.0 / cuota
-        ev = prob * cuota - 1.0
-        salida["prob_implicita"] = round(implicita, 4)
-        salida["edge_pct"] = round((prob - implicita) * 100, 2)
-        salida["ev_pct"] = round(ev * 100, 2)
-        veredicto, motivo = _veredicto_mercado(prob, cuota, ev)
-        salida["veredicto"] = veredicto
-        if motivo:
-            salida["nota"] = motivo
-        salida["confianza"] = _confianza(
-            fuerzas["n_local"], fuerzas["n_visita"], ev, veredicto)
-    else:
-        salida["veredicto"] = "SIN_CUOTA"
-        salida["confianza"] = "BAJA"
-        salida["nota"] = "el pick no trae cuota: no se puede calcular el valor"
+    salida["distribucion"]["prob"] = float(pp["prob"])
+    salida["motor"] = "poisson-forma"
+    salida = _cerrar_analisis(pick, salida)
 
     if con_llm:
         texto, modelo = _informe_llm(salida, pick)
@@ -972,8 +998,10 @@ def _prompt_analisis(a: Dict[str, Any], pick: Dict[str, Any]) -> str:
     d = a.get("distribucion") or {}
     ge = a.get("goles_esperados") or {}
     nba = a.get("deporte") == "nba"
-    if nba and a.get("motor") == "elo+mc":
-        motor_txt = "ELO + MONTE CARLO (calibrado con 2.632 partidos NBA)"
+    motor = a.get("motor") or ""
+    if motor == "elo+mc":
+        motor_txt = ("ELO + MONTE CARLO (calibrado con partidos reales y medido "
+                     "contra las tasas base de la liga)")
     elif nba:
         motor_txt = "FORMA de los ultimos 10 partidos (ESPN)"
     else:
@@ -985,10 +1013,11 @@ def _prompt_analisis(a: Dict[str, Any], pick: Dict[str, Any]) -> str:
         "",
         f"MODELO CUANTITATIVO ({motor_txt}):",
     ]
-    if nba:
+    if motor == "elo+mc":
         lineas += [
             f"  Rating Elo: {f.get('elo_local')} y {f.get('elo_visita')}",
-            f"  Puntos esperados: {ge.get('local')} - {ge.get('visita')}",
+            f"  {'Puntos' if nba else 'Goles'} esperados: "
+            f"{ge.get('local')} - {ge.get('visita')}",
             f"  Partidos en el rating: {f.get('n_local')} y {f.get('n_visita')}",
         ]
     else:

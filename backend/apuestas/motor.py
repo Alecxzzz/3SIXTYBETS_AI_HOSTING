@@ -26,6 +26,7 @@ import math
 import os
 import re
 import secrets
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from backend.apuestas import elo as motor_elo
@@ -110,15 +111,133 @@ def _num(valor) -> Optional[float]:
         return None
 
 
-def clasificar(entrada: Dict[str, Any], home: str, away: str) -> Dict[str, Any]:
+def _sin_acentos(texto: str) -> str:
+    """'Hándicap Asiático' -> 'handicap asiatico' (para comparar sin depender de tildes)."""
+    base = unicodedata.normalize("NFKD", texto or "")
+    return "".join(c for c in base if not unicodedata.combining(c)).lower().strip()
+
+
+def _lado_por_equipo(seleccion: str, home: str, away: str) -> Optional[str]:
+    """Deduce local/visita comparando el nombre. None si no lo reconoce.
+
+    El bookmaker no siempre escribe el nombre igual que ESPN ("Real Madrid" vs
+    "Real Madrid CF"), asi que ademas del nombre completo se compara por palabras
+    significativas: si TODAS las palabras del nombre de ESPN estan en la
+    seleccion (o al reves), es ese equipo.
+    """
+    s = _sin_acentos(seleccion)
+    for nombre, lado in ((home, "local"), (away, "visita")):
+        n = _sin_acentos(nombre)
+        if not n:
+            continue
+        if n in s:
+            return lado
+        palabras = [p for p in n.split() if len(p) > 3 and
+                    p not in ("sporting", "atletico", "real", "club", "city", "united")]
+        if palabras and all(p in s for p in palabras):
+            return lado
+        # Ultima bala: la primera palabra larga ("Barcelona" de "FC Barcelona").
+        if palabras and len(palabras) == 1 and palabras[0] in s:
+            return lado
+    return None
+
+
+def _clasificar_futbol(entrada: Dict[str, Any], home: str,
+                       away: str) -> Dict[str, Any]:
+    """Mercados de futbol -> tipos simulables.
+
+    El futbol tiene tres resultados (no dos) y mercados que la NBA no tiene:
+    1X2, doble oportunidad y "ambos marcan". Por eso no vale el parser de la NBA.
+    """
+    mercado = _sin_acentos(f"{entrada.get('market') or ''} "
+                           f"{entrada.get('titulo') or ''}")
+    seleccion = entrada.get("selection") or ""
+    sel = _sin_acentos(seleccion)
+
+    # Mercados por tiempo o por mitad: el motor simula el partido COMPLETO. Si se
+    # dejaran pasar, "Ganador primera parte" se preciaria como si fuera el final.
+    if any(t in mercado for t in ("primera parte", "segunda parte", "primer tiempo",
+                                  "segundo tiempo", "1er tiempo", "2do tiempo",
+                                  "mitad", "descanso", "prorroga", "penaltis")):
+        return {"tipo": "no_soportado",
+                "motivo": "mercado por tiempo/periodo: el motor simula el partido completo"}
+
+    # --- Doble oportunidad (1X, 12, X2) ---
+    if "doble oportunidad" in mercado or "doble posibilidad" in mercado:
+        if "1x" in sel or ("local" in sel and "empate" in sel):
+            return {"tipo": "doble_oportunidad", "lado": "local_o_empate"}
+        if "x2" in sel or ("visita" in sel and "empate" in sel):
+            return {"tipo": "doble_oportunidad", "lado": "visita_o_empate"}
+        if "12" in sel or ("local" in sel and "visita" in sel):
+            return {"tipo": "doble_oportunidad", "lado": "local_o_visita"}
+        return {"tipo": "no_soportado", "motivo": "doble oportunidad sin lado claro"}
+
+    # --- Ambos equipos marcan ---
+    if ("ambos" in mercado and "marcan" in mercado) or "ambas marcan" in mercado \
+            or "btts" in mercado:
+        if "no" in sel.split() or "no marcan" in sel:
+            return {"tipo": "ambos_marcan", "direccion": "no"}
+        return {"tipo": "ambos_marcan", "direccion": "si"}
+
+    # --- Total de goles ---
+    if ("total" in mercado or "goles" in mercado) and not _sin_acentos(home) in mercado:
+        linea = linea_de_entrada(seleccion, entrada.get("market") or "",
+                                 entrada.get("titulo") or "")
+        if linea is None:
+            return {"tipo": "no_soportado", "motivo": "total sin linea legible"}
+        if not (0.0 <= linea <= 12.0):
+            return {"tipo": "no_soportado",
+                    "motivo": f"linea de goles {linea} fuera de rango"}
+        direccion = "over"
+        if re.search(r"(menos\s+de|under)", f"{sel} {_sin_acentos(entrada.get('market') or '')}"):
+            direccion = "under"
+        return {"tipo": "total", "direccion": direccion, "linea": linea}
+
+    # --- Handicap asiatico ---
+    if "handicap" in mercado or "hcp" in mercado:
+        lado = _lado_por_equipo(seleccion, home, away)
+        if not lado:
+            return {"tipo": "no_soportado", "motivo": "handicap sin equipo"}
+        linea = linea_de_entrada(seleccion, entrada.get("market") or "",
+                                 entrada.get("titulo") or "")
+        if linea is None:
+            return {"tipo": "no_soportado", "motivo": "handicap sin linea legible"}
+        # Linea de cuartos (.25/.75) = media victoria / media derrota. Simularla
+        # como si fuera entera daria una probabilidad falsa: se rechaza.
+        if abs((abs(linea) * 100) % 50) > 1e-6:
+            return {"tipo": "no_soportado",
+                    "motivo": f"linea de cuartos ({linea}) no modelada"}
+        if not (-6.0 <= linea <= 6.0):
+            return {"tipo": "no_soportado", "motivo": f"handicap {linea} fuera de rango"}
+        return {"tipo": "handicap", "lado": lado, "linea": linea}
+
+    # --- 1X2 / resultado final ---
+    if ("ganador" in mercado or "resultado" in mercado or "1x2" in mercado
+            or "ganador del partido" in mercado):
+        if "empate" in sel or sel in ("x", "draw", "empate"):
+            return {"tipo": "resultado", "lado": "empate"}
+        lado = _lado_por_equipo(seleccion, home, away)
+        if lado:
+            return {"tipo": "resultado", "lado": lado}
+        return {"tipo": "no_soportado", "motivo": "1X2 sin equipo reconocible"}
+
+    return {"tipo": "no_soportado", "motivo": "mercado de futbol no modelado"}
+
+
+def clasificar(entrada: Dict[str, Any], home: str, away: str,
+               sport: str = "nba") -> Dict[str, Any]:
     """Traduce una entrada de `mercados_reales` a un mercado simulable.
 
     Devuelve {tipo, lado, linea, direccion} o {"tipo": "no_soportado"}.
 
     Se apoya en `ai/analista_nba.clasificar_mercado_nba` para lo que ya estaba
     resuelto (rechazar props de jugador y mercados por cuarto/mitad) y solo
-    sustituye la linea, que es donde ese parser falla.
+    sustituye la linea, que es donde ese parser falla. En futbol se usa un
+    clasificador propio: hay empate y mercados que la NBA no tiene.
     """
+    if motor_elo.es_futbol(sport):
+        return _clasificar_futbol(entrada, home, away)
+
     try:
         from ai import analista_nba as parser
 
@@ -207,7 +326,7 @@ def predecir(partido: Dict[str, Any], sport: str = "nba") -> Dict[str, Any]:
         return {"ok": False,
                 "motivo": f"equipo sin rating Elo ({home_id if not r_h else away_id})"}
 
-    hfa = (motor_elo.CONFIG.get(sport) or {}).get("hfa", 0.0)
+    hfa = motor_elo._cfg(sport).get("hfa", 0.0)
     elo_h = float(r_h.get("rating") or motor_elo.INICIAL)
     elo_a = float(r_a.get("rating") or motor_elo.INICIAL)
     d = (elo_h + hfa - elo_a) / 100.0
@@ -248,9 +367,13 @@ def predecir(partido: Dict[str, Any], sport: str = "nba") -> Dict[str, Any]:
         "total_esperado": round(total_esp, 2),
         "mu_local": round(mu_local, 2),
         "mu_visita": round(mu_visita, 2),
-        "sigma_equipo": float(calib.get("sigma_equipo") or 12.0),
+        "sigma_equipo": float(calib.get("sigma_equipo") or
+                              (1.5 if motor_elo.es_futbol(sport) else 12.0)),
         "rho_equipos": float(calib.get("rho_equipos") or 0.0),
-        "p_ot": float(calib.get("p_ot") or simulacion.P_OT_DEFECTO),
+        # En futbol no hay prorroga en el mercado de 90 minutos: 0.0 es un valor
+        # VALIDO, no un dato que falte, asi que no se sustituye por el defecto.
+        "p_ot": (0.0 if motor_elo.es_futbol(sport)
+                 else float(calib.get("p_ot") or simulacion.P_OT_DEFECTO)),
         "partidos_local": int(r_h.get("partidos") or 0),
         "partidos_visita": int(r_a.get("partidos") or 0),
         "origen_ratings": estado.get("origen"),
@@ -317,7 +440,8 @@ def evaluar(partido: Dict[str, Any], mercados: List[Dict[str, Any]],
     if not pre.get("ok"):
         return {"ok": False, "motivo": pre.get("motivo") or "sin prediccion"}
 
-    sim = simulacion.simular_nba(
+    sim = simulacion.simular(
+        sport,
         pre["mu_local"], pre["mu_visita"],
         pre["sigma_equipo"], pre["rho_equipos"],
         n=int(n_sims or N_SIMS), p_ot=pre["p_ot"],
@@ -337,7 +461,7 @@ def evaluar(partido: Dict[str, Any], mercados: List[Dict[str, Any]],
         if not (MIN_CUOTA <= cuota <= MAX_CUOTA):
             continue
 
-        clas = clasificar(entrada, home, away)
+        clas = clasificar(entrada, home, away, sport)
         if clas.get("tipo") == "no_soportado":
             continue
 

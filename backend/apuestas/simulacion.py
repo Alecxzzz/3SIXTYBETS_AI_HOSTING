@@ -23,6 +23,7 @@ Monte Carlo NO añade informacion: si mu y sigma estan mal, devuelve un numero
 preciso y equivocado. La informacion la pone Elo (backend/apuestas/elo.py).
 """
 
+import math
 import random
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +41,21 @@ SD_MU = 1.5
 P_OT_DEFECTO = 0.065
 OT_PUNTOS = 13.0
 OT_SD = 5.0
+
+# --- Futbol -----------------------------------------------------------------
+# Misma idea que en NBA pero por OTRA via: aqui los goles son 0, 1, 2, 3... y una
+# normal metería probabilidad de -0.4 goles y de 2.7 goles, que no existen. Peor
+# aun, el EMPATE es el resultado mas frecuente del futbol (~26%) y la normal lo
+# trata como "margen exactamente 0", un suceso de probabilidad cero. Poisson
+# modela el empate solo: goles_h == goles_a.
+#
+# La incertidumbre del parametro es mucho menor porque la escala es otra: 0.08
+# goles de desviacion en la media (con la media en ~1.4) es ya un 6%.
+SD_LAMBDA = 0.08
+# Correlacion entre los goles de los dos equipos: un partido abierto sube los
+# dos. Se implementa con un factor comun multiplicativo, que mantiene la
+# marginal de cada equipo en Poisson.
+RHO_FUTBOL = 0.25
 
 
 def _percentil(valores: List[float], q: float) -> float:
@@ -101,6 +117,86 @@ def simular_nba(mu_local: float, mu_visita: float, sigma_equipo: float,
             "p_ot": p_ot}
 
 
+def _poisson(lam: float, rng: random.Random) -> int:
+    """Muestra Poisson por el algoritmo de Knuth.
+
+    Vale para lambdas pequenas (0-6 goles), que es el rango del futbol. Para
+    lambdas grandes el bucle se alarga y habria que usar otra via, pero aqui no
+    se llega ni a 10.
+    """
+    if lam <= 0:
+        return 0
+    limite = math.exp(-lam)
+    k, p = 0, 1.0
+    while True:
+        p *= rng.random()
+        if p <= limite:
+            return k
+        k += 1
+        if k > 60:  # imposible en futbol; evita un bucle infinito si lam es basura
+            return k
+
+
+def simular_futbol(mu_local: float, mu_visita: float,
+                   rho_equipos: float = RHO_FUTBOL, n: int = SIMULACIONES,
+                   sd_mu: float = SD_LAMBDA,
+                   semilla: Optional[int] = None) -> Dict[str, Any]:
+    """Simula `n` partidos de futbol: goles de cada equipo, en lotes.
+
+    Devuelve el mismo contrato que `simular_nba` ({"lotes", "n", ...}) para que
+    `precio()` y `_cumple()` sirvan sin cambios.
+
+    La correlacion se mete como un FACTOR COMUN que multiplica las dos medias:
+    `factor = exp(sigma*z - sigma^2/2)` tiene media 1, asi que cada equipo sigue
+    siendo Poisson con su lambda y los dos suben o bajan juntos (partido abierto
+    o cerrado). Es mas honesto que forzar una correlacion en el marcador, que en
+    goles enteros no tiene sentido.
+    """
+    rng = random.Random(semilla)
+    lotes = max(1, min(LOTES, n))
+    por_lote = max(1, n // lotes)
+    rho = max(0.0, min(0.9, float(rho_equipos or 0.0)))
+    # sigma del factor comun: 0 sin correlacion, ~0.3 con rho 0.25 (medido en
+    # la calibracion de NBA; en goles el efecto es el mismo concepto).
+    sigma_comun = math.sqrt(rho) * 0.6 if rho > 0 else 0.0
+    ajuste = math.exp(-(sigma_comun ** 2) / 2.0)
+
+    salida = []
+    for _ in range(lotes):
+        mh = max(0.01, mu_local + (rng.gauss(0.0, sd_mu) if sd_mu > 0 else 0.0))
+        ma = max(0.01, mu_visita + (rng.gauss(0.0, sd_mu) if sd_mu > 0 else 0.0))
+        lote = []
+        for _ in range(por_lote):
+            if sigma_comun > 0:
+                factor = math.exp(sigma_comun * rng.gauss(0.0, 1.0)) * ajuste
+            else:
+                factor = 1.0
+            lote.append((float(_poisson(mh * factor, rng)),
+                         float(_poisson(ma * factor, rng))))
+        salida.append(lote)
+
+    return {"lotes": salida, "n": por_lote * lotes, "mu_local": mu_local,
+            "mu_visita": mu_visita, "sigma_equipo": 0.0, "rho_equipos": rho,
+            "p_ot": 0.0, "deporte": "soccer"}
+
+
+def simular(sport: str, mu_local: float, mu_visita: float,
+            sigma_equipo: float = 0.0, rho_equipos: float = 0.0,
+            n: int = SIMULACIONES, p_ot: float = P_OT_DEFECTO,
+            semilla: Optional[int] = None) -> Dict[str, Any]:
+    """Elige el simulador segun el deporte. Un solo punto de entrada.
+
+    Sin esto, `motor.evaluar` tendria que saber de goles y de puntos a la vez y
+    cada deporte nuevo obligaria a tocar el motor.
+    """
+    deporte = (sport or "").strip().lower()
+    if deporte == "soccer" or deporte.startswith("soccer:"):
+        return simular_futbol(mu_local, mu_visita, rho_equipos=rho_equipos,
+                              n=n, semilla=semilla)
+    return simular_nba(mu_local, mu_visita, sigma_equipo, rho_equipos, n=n,
+                       p_ot=p_ot, semilla=semilla)
+
+
 def _cumple(pts_h: float, pts_a: float, clas: Dict[str, Any]) -> bool:
     """True si la simulacion cubre el mercado. Un solo sitio para la logica."""
     tipo = clas.get("tipo")
@@ -108,6 +204,26 @@ def _cumple(pts_h: float, pts_a: float, clas: Dict[str, Any]) -> bool:
     total = pts_h + pts_a
     if tipo == "ganador":
         return margen_h > 0 if clas.get("lado") == "local" else margen_h < 0
+    if tipo == "resultado":
+        # 1X2 del futbol: el empate es un resultado, no un margen de 0 puntos.
+        lado = clas.get("lado")
+        if lado == "local":
+            return margen_h > 0
+        if lado == "visita":
+            return margen_h < 0
+        return margen_h == 0
+    if tipo == "doble_oportunidad":
+        lado = clas.get("lado")
+        if lado == "local_o_empate":
+            return margen_h >= 0
+        if lado == "visita_o_empate":
+            return margen_h <= 0
+        if lado == "local_o_visita":
+            return margen_h != 0
+        return False
+    if tipo == "ambos_marcan":
+        ambos = pts_h > 0 and pts_a > 0
+        return ambos if clas.get("direccion") == "si" else (not ambos)
     if tipo == "handicap":
         # La linea se aplica SOBRE el equipo elegido: +16 significa que le
         # valen perder por menos de 16.
@@ -171,5 +287,6 @@ def valor_esperado(prob: float, cuota: float) -> Optional[float]:
     return round(p * o - 1.0, 5)
 
 
-__all__ = ["precio", "simular_nba", "valor_esperado", "SIMULACIONES"]
+__all__ = ["precio", "simular", "simular_nba", "simular_futbol",
+           "valor_esperado", "SIMULACIONES"]
 
