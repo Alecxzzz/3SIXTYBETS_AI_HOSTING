@@ -5274,6 +5274,12 @@ FREE_ESPN_EVENTOS = [
                 "url": "https://chatgpt.hereisman.net/playlist/59721/load-playlist",
                 "embed": False,
             },
+            {
+                # Stream suministrado por el usuario para Lakers (NBA).
+                "label": "STREAM USUARIO",
+                "url": "https://red.mashrezali.space/playlist/60209/a.newvegan1.space/caxi",
+                "embed": False,
+            },
         ],
     },
     {
