@@ -649,14 +649,16 @@ def tracker(match_id):
     No hay token que caduque: los ids (`matchid`, `competition`, `season`,
     `srmatchid`) viajan en la propia URL y se renuevan con cada matchDetails.
 
-    Devuelve None si el partido no tiene tracker (`showSuperLive` en false,
-    como pasa en los partidos ya terminados).
+    Devuelve None si el partido no trae `superLiveUrl` (FotMob no publica el
+    widget en todas las competiciones). Ojo: el campo `showSuperLive` NO sirve
+    como filtro -- en partidos ya terminados no viene y `superLiveUrl` sigue
+    siendo valido (el widget muestra el resumen).
     """
     datos = _get("matchDetails", {"matchId": match_id}, ttl=120) or {}
     contenido = datos.get("content") or {}
     super_live = contenido.get("superlive") or {}
     url = str(super_live.get("superLiveUrl") or "").strip()
-    if not url.startswith("https://") or super_live.get("showSuperLive") is False:
+    if not url.startswith("https://"):
         return None
     estado = (datos.get("header") or {}).get("status") or {}
     return {

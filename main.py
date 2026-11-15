@@ -3357,6 +3357,12 @@ def stats_alineacion(
             ):
                 oficial["ok"] = True
                 oficial["fuente"] = "FotMob"
+                # ¿Hay tracker de Opta para este partido? Se calcula aqui para
+                # que la web solo pinte la pestaña cuando de verdad funciona.
+                try:
+                    oficial["tracker"] = bool(fotmob.tracker(fm_id))
+                except Exception:
+                    oficial["tracker"] = False
                 return oficial
             print(
                 f"[stats/alineacion] DESCARTADA alineacion {fm_id}: "
@@ -3399,7 +3405,23 @@ def stats_alineacion(
                        "Preferimos no mostrar una alineacion de otro equipo.",
         }
 
-    return {"ok": True, "tipo": "probable", "fuente": "FotMob", "local": local, "visita": visita}
+    # Mismo criterio que en la via oficial: la pestaña Tracker solo aparece si
+    # el partido resuelto publica el widget.
+    hay_tracker = False
+    if fm_id:
+        try:
+            hay_tracker = bool(fotmob.tracker(fm_id))
+        except Exception:
+            hay_tracker = False
+
+    return {
+        "ok": True,
+        "tipo": "probable",
+        "fuente": "FotMob",
+        "tracker": hay_tracker,
+        "local": local,
+        "visita": visita,
+    }
 
 
 @app.get("/stats/tracker")
@@ -3416,8 +3438,9 @@ def stats_tracker(
     con la pelota y la direccion de juego. Se devuelve tal cual para pintarla
     en un <iframe>: no hay que scrapear nada ni mantener un token.
 
-    `showSuperLive` en false (partidos terminados o sin cobertura) devuelve
-    `ok: False` con el motivo, para que la web no pinte un recuadro vacio.
+    Si el partido no trae `superLiveUrl` (no todas las competiciones lo
+    publican) devuelve `ok: False` con el motivo, para que la web no pinte un
+    recuadro vacio.
     """
     if sport != "soccer":
         raise HTTPException(400, "El tracker solo esta disponible para futbol.")
@@ -3440,7 +3463,11 @@ def stats_tracker(
         print(f"[stats/tracker] resolver {event_id}: {exc!r}", flush=True)
 
     if not fm_id:
-        return {"ok": False, "motivo": "sin_datos"}
+        return {
+            "ok": False,
+            "motivo": "sin_datos",
+            "detalle": "No encontramos este partido en la fuente de datos.",
+        }
 
     try:
         tracker = fotmob.tracker(fm_id)
@@ -3449,10 +3476,12 @@ def stats_tracker(
         tracker = None
 
     if not tracker:
+        # El partido existe, pero FotMob no publica el widget de Opta para esta
+        # competicion (Segunda, copas menores...). No es un fallo: se avisa.
         return {
             "ok": False,
-            "motivo": "sin_tracker",
-            "detalle": "Este partido no tiene tracker en vivo.",
+            "motivo": "sin_cobertura",
+            "detalle": "La fuente no publica el tracker de este partido.",
         }
 
     tracker["ok"] = True
