@@ -3490,6 +3490,65 @@ def stats_tracker(
 
 
 
+@app.get("/stats/estadisticas")
+def stats_estadisticas(
+    event_id: str,
+    sport: str = "soccer",
+    league: str = None,
+    user=Depends(get_current_user),
+):
+    """Estadisticas del partido: momentum, comparativa y timeline de acciones.
+
+    Todo sale de `matchDetails` de FotMob (ver `fotmob.estadisticas`), la misma
+    llamada que ya usa la alineacion. Sustituye a la tabla plana de ESPN: los
+    colores son los del equipo, el momentum va por minuto y cada accion lleva
+    minuto, tarjeta y marcador.
+    """
+    if sport != "soccer":
+        raise HTTPException(400, "Las estadisticas detalladas solo estan disponibles para futbol.")
+
+    try:
+        detalle = sports.get_game_detail(sport, event_id, league_code=league)
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo leer el partido: {exc}")
+
+    equipos = detalle.get("teams") or []
+    home = next((t for t in equipos if t.get("homeAway") == "home"), None)
+    away = next((t for t in equipos if t.get("homeAway") != "home"), None)
+    if not home or not away:
+        return {"ok": False, "motivo": "sin_partido"}
+
+    fm_id = None
+    try:
+        fm_id = fotmob.buscar_partido(home.get("name"), away.get("name"), detalle.get("date"))
+    except Exception as exc:
+        print(f"[stats/estadisticas] resolver {event_id}: {exc!r}", flush=True)
+
+    if not fm_id:
+        return {
+            "ok": False,
+            "motivo": "sin_datos",
+            "detalle": "No encontramos este partido en la fuente de datos.",
+        }
+
+    try:
+        datos = fotmob.estadisticas(fm_id)
+    except Exception as exc:
+        print(f"[stats/estadisticas] {fm_id}: {exc!r}", flush=True)
+        datos = None
+
+    if not datos or not (datos.get("top") or datos.get("grupos")):
+        return {
+            "ok": False,
+            "motivo": "sin_cobertura",
+            "detalle": "La fuente no publica estadisticas de este partido.",
+        }
+
+    datos["ok"] = True
+    datos["fuente"] = "FotMob"
+    return datos
+
+
 @app.get("/estadisticas", response_class=HTMLResponse)
 def pagina_estadisticas(sport: str = "nba", event_id: str = "",
                         user=Depends(get_current_user)):

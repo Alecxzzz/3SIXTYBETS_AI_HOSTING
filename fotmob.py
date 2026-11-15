@@ -513,9 +513,14 @@ def _eventos_partido(mf):
             "jugador_id": jug.get("id"),
             "jugador": _repara(jug.get("name") or ""),
             "asistente_id": e.get("assistPlayerId"),
-            "asistente": _repara(e.get("assistStr") or ""),
+            # `assistInput` trae solo el nombre ("Sebastian Berhalter");
+            # `assistStr` antepone "assist by" en inglés.
+            "asistente": _repara(e.get("assistInput") or e.get("assistStr") or ""),
             "es_local": bool(e.get("isHome")),
             "propio": bool(e.get("ownGoal")),
+            # Extras para la pestaña Estadísticas (timeline).
+            "tarjeta": e.get("card") or "",                 # Yellow / Red
+            "marcador": e.get("newScore") or None,          # [local, visita]
         })
     return salida
 
@@ -665,6 +670,115 @@ def tracker(match_id):
         "url": url,
         "en_vivo": bool(estado.get("ongoing")),
         "terminado": bool(estado.get("finished")),
+    }
+
+
+def _filas_stats(grupo):
+    """Filas comparadas [local, visita] de un grupo de `Periods.All`."""
+    salida = []
+    for s in (grupo or {}).get("stats") or []:
+        if (s.get("type") or "") == "title":
+            continue
+        valores = s.get("stats") or []
+        if len(valores) < 2 or (valores[0] is None and valores[1] is None):
+            continue
+        salida.append({
+            "titulo": s.get("title") or "",
+            "local": valores[0],
+            "visita": valores[1],
+            "grafico": (s.get("type") == "graph"),
+            "destaca": s.get("highlighted") or "equal",
+        })
+    return salida
+
+
+def _minuto_valor(minuto):
+    """'45+2' / "45'" / 45 -> 45 (para ordenar y separar mitades)."""
+    texto = str(minuto or "").replace("'", "").split("+")[0].strip()
+    try:
+        return int(texto)
+    except ValueError:
+        return None
+
+
+def estadisticas(match_id):
+    """Estadisticas completas del partido para su pestaña.
+
+    Todo sale de `matchDetails`, que ya se pide para la alineacion:
+
+      content.stats.Periods.All   -> grupos comparados (Top stats, Shots, Passes,
+                                     Defence...) + `teamColors` con el color REAL
+                                     de cada equipo
+      content.momentum.main.data  -> dominio por minuto (-100 local .. +100 visita)
+      content.matchFacts.events   -> goles, tarjetas y cambios
+      header.teams / status       -> escudos, marcador y estado
+
+    `momentum` viene vacio en bastantes partidos (sobre todo sin empezar): se
+    devuelve [] y la web simplemente no pinta esa tarjeta, sin inventar nada.
+    """
+    datos = _get("matchDetails", {"matchId": match_id}, ttl=60) or {}
+    contenido = datos.get("content") or {}
+    cab = datos.get("header") or {}
+
+    periodos = (contenido.get("stats") or {}).get("Periods") or {}
+    todos = periodos.get("All") or {}
+    colores = (todos.get("teamColors") or {}).get("darkMode") or {}
+
+    equipos = []
+    for i, t in enumerate((cab.get("teams") or [])[:2]):
+        equipos.append({
+            "nombre": _repara(t.get("name") or ""),
+            "escudo": t.get("imageUrl") or "",
+            "marcador": t.get("score"),
+            "color": colores.get("home" if i == 0 else "away") or "",
+        })
+
+    top, resto = [], []
+    for g in todos.get("stats") or []:
+        filas = _filas_stats(g)
+        if not filas:
+            continue
+        titulo = (g.get("title") or "").strip()
+        if titulo.lower() == "top stats" and not top:
+            top = filas
+        else:
+            resto.append({"titulo": titulo, "filas": filas})
+
+    momento = []
+    for punto in (((contenido.get("momentum") or {}).get("main") or {}).get("data") or []):
+        valor = punto.get("value")
+        if valor is None:
+            continue
+        momento.append({"minuto": punto.get("minute"), "valor": valor})
+
+    eventos = _eventos_partido(contenido.get("matchFacts") or {})
+
+    # Marcador al descanso y final: el ultimo gol de cada tramo.
+    def _ultimo(limite=None):
+        vistos = []
+        for e in eventos:
+            m = _minuto_valor(e.get("minuto"))
+            if m is None or not e.get("marcador"):
+                continue
+            if limite is not None and m > limite:
+                continue
+            vistos.append((m, e["marcador"]))
+        return max(vistos, key=lambda x: x[0])[1] if vistos else None
+
+    estado = cab.get("status") or {}
+    vivo = estado.get("liveTime") or {}
+
+    return {
+        "equipos": equipos,
+        "top": top,
+        "grupos": resto,
+        "momento": momento,
+        "eventos": eventos,
+        "descanso": _ultimo(45),
+        "marcador_final": _ultimo(),
+        "en_vivo": bool(estado.get("ongoing")),
+        "terminado": bool(estado.get("finished")),
+        "minuto": (vivo.get("short") if isinstance(vivo, dict) else "") or "",
     }
 
 
