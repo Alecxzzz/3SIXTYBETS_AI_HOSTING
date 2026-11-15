@@ -5549,8 +5549,12 @@ def free_espn_match(request: Request):
     try:
         import sports
         detail = sports.get_game_detail(game.get("_sport") or FREE_ESPN_SPORT, str(game.get("id"))) or {}
-    except Exception:
-        detail = {}
+    except Exception as exc:
+        # ESPN temporalmente no disponible: devolver mensaje claro en lugar de
+        # lista de equipos vacia (que hace que el reproductor quede en
+        # "estadisticas cargando" sin nunca pintar nada).
+        print(f"[match] ESPN stats no disponibles: {exc!r}", flush=True)
+        detail = {"error": "ESPN temporalmente no disponible", "teams": []}
 
     teams = []
     base_equipos = detail.get("teams") or []
