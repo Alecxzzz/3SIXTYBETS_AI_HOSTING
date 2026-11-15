@@ -5258,24 +5258,14 @@ FREE_ESPN_EVENTOS = [
         ],
     },
     {
-        # NBA: Los Angeles Lakers vs Atlanta Hawks (2026-11-10 00:00Z = 19:00 ET).
-        # OJO: ESPN lo publica como "Los Angeles Lakers at Atlanta Hawks"
-        # (Hawks local).
-        # Señal de gooz (https://gooz.aapmains.net/new-stream-embed/59721):
-        # su pagina embed NO se puede iframear (CSP frame-ancestors), pero su
-        # propio endpoint devuelve el HLS maestro: se reproduce nativo. El
-        # Referer que exige el host (https://gooz.aapmains.net/) lo pone
-        # FREE_ESPN_REFERERS automaticamente.
+        # NBA: Los Angeles Lakers vs Phoenix Suns (2026-11-15 21:00Z = 16:00 ET).
+        # OJO: ESPN lo publica como "Los Angeles Lakers at Phoenix Suns"
+        # (Suns local).
+        # Señal del usuario (verificada: devuelve un M3U8 funcional).
         "sport": "nba",
-        "match": ("lakers", "hawks"),
+        "match": ("lakers", "suns"),
         "opciones": [
             {
-                "label": "STREAM 1",
-                "url": "https://chatgpt.hereisman.net/playlist/59721/load-playlist",
-                "embed": False,
-            },
-            {
-                # Stream suministrado por el usuario para Lakers (NBA).
                 "label": "STREAM USUARIO",
                 "url": "https://red.mashrezali.space/playlist/60209/a.newvegan1.space/caxi",
                 "embed": False,
