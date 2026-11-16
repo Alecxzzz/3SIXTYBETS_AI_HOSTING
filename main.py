@@ -4087,8 +4087,8 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     with _segment_cache_lock:
         cached = _segment_cache.get(target)
     if cached:
-        return PlainTextResponse(
-            cached["buffer"],
+        return Response(
+            content=cached["buffer"],
             media_type=cached.get("contentType", "video/mp2t"),
             headers={"Cache-Control": "no-store"},
         )
