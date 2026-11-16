@@ -4047,13 +4047,23 @@ def hls_proxy(request: Request, url: str, referer: str = None):
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
 
-    try:
-        resp = http_requests.get(
-            target, headers=headers, stream=True, timeout=(5, 30)
-        )
-    except http_requests.RequestException as exc:
+    resp = None
+    ultimo_exc = None
+    for _intento_hls in range(2):
+        try:
+            resp = http_requests.get(
+                target, headers=headers, stream=True, timeout=(8, 30)
+            )
+            ultimo_exc = None
+            break
+        except http_requests.RequestException as exc:
+            ultimo_exc = exc
+            if _intento_hls == 0:
+                time.sleep(0.6)
+                continue
+    if ultimo_exc is not None or resp is None:
         # No exponer detalles internos (URLs/hosts de origen) al cliente.
-        print(f"[hls-proxy] upstream fallo: {exc}", flush=True)
+        print(f"[hls-proxy] upstream fallo: {ultimo_exc}", flush=True)
         raise HTTPException(502, "La fuente de video no responde.")
 
     content_type = resp.headers.get("content-type", "")

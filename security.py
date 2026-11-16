@@ -351,7 +351,11 @@ def borrar_cookie_sesion(respuesta) -> None:
 
 
 def token_de_request(request: Request) -> str:
-    """Token de sesion: primero la cookie HttpOnly, luego el header Bearer."""
+    """Token de sesion: cookie HttpOnly, header Bearer o query param `token`.
+
+    El parámetro `token` existe para recursos HLS (m3u8/ts) que el reproductor
+    pide sin poder adjuntar cabeceras/cookies cross-origin en todos los casos.
+    """
     cookie = ""
     try:
         cookie = request.cookies.get(COOKIE_NOMBRE) or ""
@@ -362,6 +366,12 @@ def token_de_request(request: Request) -> str:
     auth = request.headers.get("authorization") or ""
     if auth.startswith("Bearer "):
         return auth[7:].strip()
+    try:
+        q = request.query_params.get("token") or ""
+        if q.strip():
+            return q.strip()
+    except Exception:  # noqa: BLE001
+        pass
     return ""
 
 
