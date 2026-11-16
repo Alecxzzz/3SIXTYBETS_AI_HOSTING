@@ -172,6 +172,10 @@ RUTAS_PUBLICAS = {
     #    cookie no viaja, el pago NO se acredita. No expone datos: valida el ERN
     #    contra Pagadito y acredita por la orden ya registrada.
     "/pagadito/return",
+    # 5) STREAMING HLS: manifiestos/segmentos los pide hls.js. La puerta de acceso
+    #    al stream (sesión/token cuando TV_EXIGIR_STREAM lo exige, hosts públicos del
+    #    escaparate, rate limit y anti-SSRF) se aplica dentro de /hls-proxy y /live/*.
+    "/hls-proxy",
 }
 
 # Recuperacion de contrasena. APAGADA por defecto: sus 4 rutas
@@ -195,7 +199,15 @@ TV_ESCAPARATE_PUBLICO = os.getenv(
     "TV_ESCAPARATE_PUBLICO", "0"
 ).strip().lower() in ("1", "true", "yes")
 
-RUTAS_PUBLICAS_PREFIJOS = ("/tv-live",) if TV_ESCAPARATE_PUBLICO else ()
+# /hls-proxy y /live/* son recursos HLS (manifiestos/segmentos) consumidos por
+# hls.js: no pueden depender solo de la puerta global porque (1) las peticiones de
+# video no siempre llevan cabeceras/cookies como el resto de la API y (2) su
+# protección real la aplica el propio endpoint via TV_EXIGIR_STREAM / _exigir_acceso_tv
+# (y hosts públicos del escaparate). Se dejan pasar aquí y el handler decide.
+RUTAS_PUBLICAS_PREFIJOS = ["/live"]
+if TV_ESCAPARATE_PUBLICO:
+    RUTAS_PUBLICAS_PREFIJOS.append("/tv-live")
+RUTAS_PUBLICAS_PREFIJOS = tuple(RUTAS_PUBLICAS_PREFIJOS)
 
 
 def _ruta_publica(path: str) -> bool:
