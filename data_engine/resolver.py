@@ -196,6 +196,16 @@ def _resolver_mitades(texto: str, sel: str, home: dict, away: dict):
     if not (es_ambas or es_cualquier or es_primera or es_segunda):
         return None
 
+    # Solo se resuelven los mercados de mitad de GANADOR (1x2 / gana la mitad).
+    # Un hándicap, doble oportunidad, multigoles o BTTS "de la 2ª mitad" exige
+    # aplicar la linea al periodo, y sin eso el veredicto saldria inventado.
+    # Mejor PENDIENTE que un ACIERTO/FALLO falso (es justo el bug que se esta
+    # corrigiendo en todo el resolver).
+    if any(k in texto for k in ("handicap", "hándicap", "doble oportunidad",
+                                "doble oport", "multigoles", "ambos marcan",
+                                "btts", "total")):
+        return None
+
     ph, pa = _periodos(home), _periodos(away)
     if not ph or not pa:
         return None
@@ -264,6 +274,12 @@ def resolver_mercado(pick: dict, detalle: dict):
     r = _resolver_mitades(texto, sel, home, away)
     if r is not None:
         return r
+
+    # Si menciona una MITAD y `_resolver_mitades` no supo decidirlo, el marcador
+    # final NO sirve para juzgarlo: un "hándicap de la 2ª mitad" aplicado al
+    # partido completo daria un veredicto falso. Mejor PENDIENTE.
+    if "mitad" in texto or "tiempo" in texto:
+        return None
 
     # 3) Ganador / moneyline. "1x2" tambien es ganador: el mercado se llama asi
     #    en la lista del book ("Islandia (1x2)") y antes no se reconocia, asi que

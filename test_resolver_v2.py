@@ -160,6 +160,16 @@ class TestGanadorYMitades(unittest.TestCase):
         self.assertEqual(
             resolver.resolver_mercado(pick("2ª Mitad - 1x2", "Visitante"), d), "FALLO")
 
+    def test_mitad_con_handicap_no_se_inventa(self):
+        """Hándicap/doble oportunidad de mitad: PENDIENTE, nunca un veredicto falso."""
+        d = detalle(gl=2, gv=1, periodo_local=[0, 2], periodo_visitante=[1, 0])
+        self.assertIsNone(
+            resolver.resolver_mercado(pick("2ª Mitad - hándicap 1X2", "Local"), d))
+        self.assertIsNone(
+            resolver.resolver_mercado(pick("2ª Mitad - doble oportunidad", "Local"), d))
+        self.assertIsNone(
+            resolver.resolver_mercado(pick("2ª Mitad - multigoles", "1-5"), d))
+
     def test_primera_mitad_respeta_el_lado(self):
         # El VISITANTE gano la primera mitad: antes se asumia local y salia FALLO.
         d = detalle(gl=2, gv=1, periodo_local=[0, 2], periodo_visitante=[1, 0])
