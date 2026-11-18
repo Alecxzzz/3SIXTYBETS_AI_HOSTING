@@ -3394,6 +3394,62 @@ def _resolver_por_mitades(pick: dict, detail: dict):
         return None
 
 
+# Nombres legibles -> slug de ESPN. Solo los que aparecen de verdad; si no
+# esta aqui, se intenta como slug y si falla se cae al scoreboard del dia.
+_LIGAS_ESPN = {
+    "coupe de france": "fra.coupe_de_france",
+    "copa del rey": "esp.copa_del_rey",
+    "copa de francia": "fra.coupe_de_france",
+    "nations league": "uefa.nations",
+    "liga de naciones": "uefa.nations",
+    "champions league": "uefa.champions",
+    "europa league": "uefa.europa",
+    "premier league": "eng.1",
+    "la liga": "esp.1",
+    "serie a": "ita.1",
+    "bundesliga": "ger.1",
+    "ligue 1": "fra.1",
+    "liga mx": "mex.1",
+    "mls": "usa.1",
+}
+
+
+def _liga_espn(league, sport: str):
+    """Slug de liga que ESPN entiende, a partir de lo guardado en el pick.
+
+    Los picks llegan con tres formatos distintos y dos rompen la URL:
+        'basketball/nba'  -> /basketball/basketball/nba/summary   (HTTP 400)
+        'Coupe de France' -> /soccer/Coupe%20de%20France/summary  (HTTP 400)
+        'uefa.nations'    -> correcto
+
+    Se normaliza aqui (no en la BD) para que cubra tambien los picks viejos.
+    Devuelve None si no hay forma de saberlo: el llamador cae al scoreboard.
+    """
+    if not league:
+        return None
+    liga = str(league).strip()
+    bajo = liga.lower()
+
+    # 1) Quitar el deporte que ya viene delante ("basketball/nba", "tennis/atp").
+    for prefijo in (f"{sport}/", "basketball/", "tennis/", "soccer/",
+                    "football/", "baseball/", "hockey/"):
+        if bajo.startswith(prefijo):
+            liga = liga[len(prefijo):]
+            bajo = liga.lower()
+            break
+    if not liga:
+        return None
+
+    # 2) Nombre legible -> slug.
+    if bajo in _LIGAS_ESPN:
+        return _LIGAS_ESPN[bajo]
+
+    # 3) Un slug de ESPN nunca lleva espacios.
+    if " " in liga:
+        return None
+    return liga
+
+
 def _detalle_resolucion(pick: dict):
     """Obtiene el detalle del partido para resolver el pick.
 
@@ -3412,7 +3468,10 @@ def _detalle_resolucion(pick: dict):
 
     sport = pick["sport"]
     eid = pick["eventId"]
-    league = pick.get("league")
+    # La liga guardada puede venir como 'basketball/nba', 'Coupe de France'...
+    # Cualquiera de esas formas construia una URL que ESPN rechaza con 400 y el
+    # pick quedaba "sin datos". Se normaliza aqui.
+    league = _liga_espn(pick.get("league"), sport)
 
     # summary por evento: funciona si hay liga guardada y para cualquier
     # deporte de ESPN.
