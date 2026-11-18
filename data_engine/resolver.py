@@ -68,6 +68,60 @@ def _tokens(texto: str) -> set:
 
 _STOP = {"fc", "cf", "cd", "sc", "ac", "afc", "nfc", "club", "de", "del", "the"}
 
+# El pick llega en ESPANOL ("Hungria", "Rumania") y ESPN devuelve INGLES
+# ("Hungary", "Romania"). Sin traducir, `lado_en_texto` no encontraba el equipo
+# y el pick quedaba PENDIENTE para siempre (afectaba a TODOS los mercados: 1x2,
+# totales, handicap y estadisticas). Se traduce el TEXTO del pick, no el de
+# ESPN: asi el lado se resuelve contra los nombres reales del partido.
+ALIAS_EQUIPOS = {
+    "alemania": "germany", "argentina": "argentina", "australia": "australia",
+    "austria": "austria", "belgica": "belgium", "bosnia": "bosnia-herzegovina",
+    "bosnia y herzegovina": "bosnia-herzegovina", "brasil": "brazil",
+    "bulgaria": "bulgaria", "canada": "canada", "chile": "chile",
+    "china": "china", "chipre": "cyprus", "colombia": "colombia",
+    "corea del sur": "south korea", "costa rica": "costa rica",
+    "croacia": "croatia", "dinamarca": "denmark", "ecuador": "ecuador",
+    "escocia": "scotland", "eslovaquia": "slovakia", "eslovenia": "slovenia",
+    "espana": "spain", "estados unidos": "united states", "usa": "united states",
+    "estonia": "estonia", "finlandia": "finland", "francia": "france",
+    "gales": "wales", "georgia": "georgia", "grecia": "greece",
+    "holanda": "netherlands", "hungria": "hungary", "inglaterra": "england",
+    "irak": "iraq", "iran": "iran", "irlanda": "ireland",
+    "irlanda del norte": "northern ireland", "islandia": "iceland",
+    "israel": "israel", "italia": "italy", "japon": "japan",
+    "letonia": "latvia", "lituania": "lithuania", "luxemburgo": "luxembourg",
+    "macedonia": "north macedonia", "malta": "malta", "marruecos": "morocco",
+    "mexico": "mexico", "moldavia": "moldova", "montenegro": "montenegro",
+    "nicaragua": "nicaragua", "noruega": "norway", "paises bajos": "netherlands",
+    "polonia": "poland", "portugal": "portugal", "republica checa": "czechia",
+    "chequia": "czechia", "rumania": "romania", "rusia": "russia",
+    "santa lucia": "st. lucia", "san vicente": "st. vincent and the grenadines",
+    "serbia": "serbia", "suecia": "sweden", "suiza": "switzerland",
+    "turquia": "turkiye", "ucrania": "ukraine", "uruguay": "uruguay",
+    "venezuela": "venezuela", "peru": "peru", "paraguay": "paraguay",
+    "bolivia": "bolivia", "panama": "panama", "honduras": "honduras",
+    "guatemala": "guatemala", "el salvador": "el salvador",
+    "republica dominicana": "dominican republic", "jamaica": "jamaica",
+    "haiti": "haiti", "cuba": "cuba", "trinidad y tobago": "trinidad and tobago",
+    "south africa": "south africa", "sudafrica": "south africa",
+    "nigeria": "nigeria", "egipto": "egypt", "argelia": "algeria",
+    "tunez": "tunisia", "senegal": "senegal", "camerun": "cameroon",
+    "ghana": "ghana", "australia": "australia", "nueva zelanda": "new zealand",
+}
+
+
+def _traducir(texto: str) -> str:
+    """Pasa a ingles los nombres de equipo en espanol del texto del pick.
+
+    Se aplica del alias MAS LARGO al mas corto para que 'irlanda del norte' no
+    se quede en 'ireland del norte'.
+    """
+    t = norm(texto)
+    for es, en in sorted(ALIAS_EQUIPOS.items(), key=lambda kv: -len(kv[0])):
+        if es in t:
+            t = re.sub(rf"\b{re.escape(es)}\b", en, t)
+    return t
+
 
 def _clave_equipo(nombre: str) -> set:
     return {t for t in _tokens(nombre) if t not in _STOP}
@@ -95,7 +149,9 @@ def _lado_en_texto(texto: str, home: dict, away: dict):
     """
     ch = _clave_equipo(home.get("nombre") or "")
     ca = _clave_equipo(away.get("nombre") or "")
-    th = _tokens(texto)
+    # El pick viene en ESPANOL y ESPN en INGLES: se traduce el texto del pick
+    # antes de comparar (hungria -> hungary, rumania -> romania...).
+    th = _tokens(_traducir(texto))
     mh = bool(ch) and ch.issubset(th)
     ma = bool(ca) and ca.issubset(th)
     if mh and ma:

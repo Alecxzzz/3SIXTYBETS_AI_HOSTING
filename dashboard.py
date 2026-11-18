@@ -828,14 +828,12 @@ def _mercado_prohibido(*textos: str) -> bool:
 
 
 # Mercados que el book publica pero que NO se pueden verificar con las fuentes
-# disponibles. Faltas, remates, corners y tarjetas dependen de ESTADISTICAS del
-# partido: Sofascore responde 403 y FotMob no cubre todos los torneos, asi que
-# el pick se queda PENDIENTE para siempre y acaba ANULADO (y en el panel sale
-# como "sin datos"). Se rechazan al generar para no publicar humo.
+# disponibles. OJO: faltas, remates, corners y tarjetas YA se verifican con las
+# estadisticas del summary de ESPN (28 claves por equipo), asi que NO estan
+# aqui. Solo queda fuera lo que depende de datos de saque/punto a punto, que
+# ESPN no publica (props de tenis).
 MERCADOS_NO_VERIFICABLES = (
-    "falta", "faltas", "remate", "remates", "tiro", "tiros",
-    "esquina", "esquinas", "corner", "corners",
-    "tarjeta", "tarjetas", "amarilla", "roja",
+    "aces", "dobles faltas", "double fault", "primer juego", "primer punto",
 )
 
 
@@ -3176,6 +3174,109 @@ def _resolver_prop_mlb(pick: dict):
            ("ACIERTO" if valor < linea else "FALLO")
 
 
+# Estadistica del summary de ESPN -> nombre del mercado. Los mercados de
+# estadistica se resuelven con el MISMO summary que ya se pide para el marcador
+# (28 claves por equipo), asi que no hace falta Sofascore (403) ni una peticion
+# extra. El orden importa: lo mas especifico primero.
+_ESPN_STATS = (
+    ("tiro a puerta", "shotsOnTarget"),
+    ("tiros a puerta", "shotsOnTarget"),
+    ("remate a puerta", "shotsOnTarget"),
+    ("remates a puerta", "shotsOnTarget"),
+    ("remates a porteria", "shotsOnTarget"),
+    ("fuera de juego", "offsides"),
+    ("offsides", "offsides"),
+    ("amarilla", "yellowCards"),
+    ("amarillas", "yellowCards"),
+    ("roja", "redCards"),
+    ("rojas", "redCards"),
+    ("falta", "foulsCommitted"),
+    ("faltas", "foulsCommitted"),
+    ("corner", "wonCorners"),
+    ("corners", "wonCorners"),
+    ("esquina", "wonCorners"),
+    ("esquinas", "wonCorners"),
+    ("remate", "totalShots"),
+    ("remates", "totalShots"),
+    ("tiro", "totalShots"),
+    ("tiros", "totalShots"),
+)
+
+
+def _clave_stat_espn(texto: str):
+    t = (texto or "").lower()
+    for frase, clave in _ESPN_STATS:
+        if frase in t:
+            return clave
+    return None
+
+
+def _resolver_stats_espn(pick: dict, detail: dict):
+    """Faltas, corners, remates y tarjetas con las estadisticas de ESPN.
+
+    Resuelve dos tipos de mercado:
+      * Over/Under (del partido o de un equipo) -> resolver_total (push=ANULADO)
+      * 1x2 de la estadistica (quien tiene mas) -> compara los dos valores
+
+    Los mercados de MITAD se dejan pasar: ESPN no publica stats por periodo y de
+    esos se encarga el camino de FotMob.
+    """
+    if (pick.get("sport") or "").lower() != "soccer":
+        return None
+    stats = (detail or {}).get("stats") or {}
+    casa = stats.get("home") or {}
+    fuera = stats.get("away") or {}
+    if not casa or not fuera:
+        return None
+
+    texto = " ".join(str(pick.get(k) or "")
+                     for k in ("market", "titulo", "selection")).lower()
+    if "mitad" in texto or "tiempo" in texto:
+        return None
+    clave = _clave_stat_espn(texto)
+    if not clave:
+        return None
+    try:
+        vh = float(casa.get(clave))
+        va = float(fuera.get(clave))
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        from data_engine import resolver as _rv
+    except Exception:
+        return None
+
+    equipos = (detail or {}).get("teams") or []
+    home_name = next((t.get("name") or "" for t in equipos
+                      if str(t.get("homeAway")).lower() == "home"), "")
+    away_name = next((t.get("name") or "" for t in equipos
+                      if str(t.get("homeAway")).lower() == "away"), "")
+    lado = _rv.lado_en_texto(
+        f"{pick.get('selection') or ''} {pick.get('titulo') or ''}",
+        home_name, away_name)
+
+    # 1x2 de estadistica: gana el que MAS tiene. Empate -> ANULADO (devolucion).
+    if "1x2" in texto and not re.search(r"over|under|mas de|menos de", texto):
+        if lado is None:
+            return None
+        propio, rival = (vh, va) if lado == "home" else (va, vh)
+        if propio == rival:
+            return "ANULADO"
+        return "ACIERTO" if propio > rival else "FALLO"
+
+    dir_ = _rv.direccion(pick.get("selection") or "") or _rv.direccion(texto)
+    m = re.search(r"(?:over|under|mas de|menos de)\s*\+?\s*(\d+(?:[.,]\d+)?)", texto)
+    if not dir_ or not m:
+        return None
+    try:
+        linea = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    valor = (vh + va) if lado is None else (vh if lado == "home" else va)
+    return _rv.resolver_total(valor, linea, dir_)
+
+
 def _resolver_stats_sofascore(pick: dict):
     """Resuelve over/under de TARJETAS y CORNERS de futbol.
 
@@ -3524,6 +3625,23 @@ def _detalle_resolucion(pick: dict):
                     "homeAway": c.get("homeAway"),
                     "linescores": linescores,
                 })
+            # Estadisticas por equipo del mismo summary (28 claves en las
+            # ligas cubiertas): foulsCommitted, wonCorners, totalShots,
+            # shotsOnTarget, yellowCards, redCards, offsides... Con esto se
+            # resuelven sin Sofascore (que responde 403) los mercados de
+            # faltas/corners/remates/tarjetas. Si la liga no las publica, el
+            # dict queda vacio y el pick sigue su curso normal.
+            stats = {}
+            for tb in (data.get("boxscore") or {}).get("teams") or []:
+                lado_b = (tb.get("homeAway") or "").lower()
+                if lado_b in ("home", "away"):
+                    stats[lado_b] = {
+                        s.get("name"): (s.get("value")
+                                        if s.get("value") is not None
+                                        else s.get("displayValue"))
+                        for s in (tb.get("statistics") or [])
+                        if s.get("name")
+                    }
             # Si ESPN responde pero sin equipos, el evento no existe para esa
             # liga: se cae al scoreboard del dia en vez de devolver vacio.
             if state and len(teams) >= 2:
@@ -3531,7 +3649,7 @@ def _detalle_resolucion(pick: dict):
                     # scoreboard del dia: puede traer linescores, se acepta igual
                     for t in teams:
                         t["linescores"] = []
-                return {"state": state, "teams": teams}
+                return {"state": state, "teams": teams, "stats": stats}
         except Exception:
             pass
 
@@ -3996,6 +4114,7 @@ def resolver_picks_finalizados() -> dict:
         try:
             resultado = (_resolver_prop_mlb(pick) or _resolver_prop_nfl(pick)
                         or _resolver_prop_nba(pick)
+                        or _resolver_stats_espn(pick, detail)
                         or _resolver_stats_sofascore(pick))
         except Exception:
             resultado = None
