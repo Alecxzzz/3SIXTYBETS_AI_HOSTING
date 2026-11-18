@@ -73,6 +73,20 @@ RANGOS_LINEA = {
     "total_equipo": (60.0, 190.0),
 }
 
+# Los rangos de arriba son de NBA (totales ~220). NFL juega totales ~45 y
+# spreads de +-3.5: con los rangos de NBA TODA linea de NFL se rechazaba como
+# "fuera de rango" y el motor se quedaba mudo. Igual con MLB.
+RANGOS_LINEA_POR_DEPORTE = {
+    "nba": RANGOS_LINEA,
+    "wnba": RANGOS_LINEA,
+    "nfl": {"handicap": (-24.0, 24.0), "total": (25.0, 80.0),
+            "total_equipo": (7.0, 45.0)},
+    "mlb": {"handicap": (-4.0, 4.0), "total": (5.0, 16.0),
+            "total_equipo": (1.0, 9.0)},
+    "soccer": {"handicap": (-6.0, 6.0), "total": (0.5, 10.0),
+               "total_equipo": (0.5, 7.0)},
+}
+
 
 # --------------------------------------------------------------------------
 # LECTURA DEL MERCADO
@@ -264,7 +278,9 @@ def clasificar(entrada: Dict[str, Any], home: str, away: str,
             linea = _num(entrada.get("linea"))
         if linea is None:
             return {"tipo": "no_soportado", "motivo": "sin linea legible"}
-        minimo, maximo = RANGOS_LINEA.get(tipo, (-1e9, 1e9))
+        rangos = RANGOS_LINEA_POR_DEPORTE.get((sport or "nba").strip().lower(),
+                                              RANGOS_LINEA)
+        minimo, maximo = rangos.get(tipo, (-1e9, 1e9))
         if not (minimo <= linea <= maximo):
             return {"tipo": "no_soportado",
                     "motivo": f"linea {linea} fuera de rango para {tipo}"}

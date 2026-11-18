@@ -9,3 +9,5 @@ cryptography
 requests
 curl_cffi>=0.7
 sentry-sdk
+nflreadpy==0.1.5
+polars>=1.0.0

@@ -39,3 +39,10 @@ sec_verify.py
 _tmp_*
 backups/
 *.backup.*
+
+# Datos historicos de tenis (Sackmann): se regeneran descargando (145 MB)
+backend/fuentes/tennis/cache/
+
+# El modulo de auditoria del resolver NO es un log de diagnostico: la regla
+# 'audit*.py' de arriba lo estaba ignorando y el dashboard lo importa.
+!backend/fuentes/audit.py

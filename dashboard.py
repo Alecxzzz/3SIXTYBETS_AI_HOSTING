@@ -1331,7 +1331,10 @@ MOTOR_PRIMERO_DEPORTES = {
 # Se deja encendido SOLO NBA hasta que los numeros de cada deporte esten
 # calibrados (ver backend/apuestas/calibrar.py).
 MOTOR_MC_DEPORTES = {
-    s.strip() for s in os.getenv("DASHBOARD_MOTOR_MC", "nba,soccer").split(",")
+    # nfl se activo el 2026-11 tras pasar el criterio del repo:
+    # Brier 0.2214 (50/50 0.2500; siempre local 0.2541) y MAE de margen
+    # 10.04 vs 11.03. Si algun dia deja de pasar, se quita de aqui.
+    s.strip() for s in os.getenv("DASHBOARD_MOTOR_MC", "nba,soccer,nfl").split(",")
     if s.strip()
 }
 # Umbral de edge del motor. 0 = aceptar cualquier edge positivo (solo para
@@ -3020,9 +3023,26 @@ def _resolver_prop_nfl(pick: dict):
                 valor = float(str(encontrado[clave]).split("/")[0])
             except (TypeError, ValueError):
                 continue
+            if abs(valor - linea) < 1e-9:
+                return "ANULADO"  # push: la casa devuelve el stake
             return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
                    ("ACIERTO" if valor < linea else "FALLO")
     return None
+
+
+def _resolver_prop_nba(pick: dict):
+    """Props NBA (puntos/rebotes/asistencias) con el box score de ESPN.
+
+    ESPN da PTS/REB/AST por jugador sin API key. Un jugador que no jugo
+    (MIN vacio) ANULA el prop, nunca lo marca como fallo.
+    """
+    if (pick.get("sport") or "").lower() != "nba":
+        return None
+    try:
+        from backend.fuentes.nba import espn as nba_espn
+        return nba_espn.resolver_prop(pick)
+    except Exception:  # noqa: BLE001 - red externa: se degrada, no rompe
+        return None
 
 
 def _resolver_prop_mlb(pick: dict):
@@ -3124,6 +3144,8 @@ def _resolver_prop_mlb(pick: dict):
     except (TypeError, ValueError):
         return None
 
+    if abs(valor - linea) < 1e-9:
+        return "ANULADO"  # push: la casa devuelve el stake
     return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
            ("ACIERTO" if valor < linea else "FALLO")
 
@@ -3143,15 +3165,16 @@ def _resolver_stats_sofascore(pick: dict):
     """
     if pick.get("sport") != "soccer":
         return None
+    try:
+        from data_engine import resolver as _rv
+    except Exception:
+        return None
     market = (pick.get("market") or "").lower()
     titulo = (pick.get("titulo") or "").lower()
     texto = f"{market} {titulo} {(pick.get('selection') or '').lower()}"
 
-    if "tarjeta" in texto or "card" in texto:
-        metricas = ("yellow_cards", "red_cards")
-    elif "corner" in texto or "esquina" in texto:
-        metricas = ("corners",)
-    else:
+    metricas = _rv.metricas_stats(texto)
+    if not metricas:
         return None
 
     match = re.search(
@@ -3159,7 +3182,13 @@ def _resolver_stats_sofascore(pick: dict):
     )
     if not match:
         return None
-    es_over = match.group(1).startswith(("over", "m"))
+    # Direccion con la regla del v2 (UNDERS PRIMERO). Antes era
+    # `match.group(1).startswith(("over", "m"))`, y como "menos de" empieza
+    # por "m", TODO under de tarjetas/corners se resolvia como OVER.
+    _dir = _rv.direccion(pick.get("selection") or "") or _rv.direccion(texto)
+    if not _dir:
+        return None
+    es_over = _dir == "over"
     try:
         linea = float(match.group(2).replace(",", "."))
     except ValueError:
@@ -3183,13 +3212,14 @@ def _resolver_stats_sofascore(pick: dict):
         pick.get("home_name"), pick.get("away_name"), pick.get("eventDate")
     )
     if info and info.get("id") and info.get("finished"):
-        hn = _norm_texto(pick.get("home_name") or "")
-        an = _norm_texto(pick.get("away_name") or "")
-        nombre = _norm_texto(f"{titulo} {pick.get('selection') or ''}")
-        es_local = bool(hn) and hn in nombre
-        es_visitante = bool(an) and an in nombre
-        if es_local != es_visitante:
-            lado = 0 if es_local else 1
+        # Por palabras completas, no por substring: 'Real Madrid' caia dentro
+        # de 'Real Madrid Castilla' y se leian los corners del equipo erroneo.
+        _lado_txt = _rv.lado_en_texto(
+            f"{titulo} {pick.get('selection') or ''}",
+            pick.get("home_name"), pick.get("away_name"),
+        )
+        if _lado_txt:
+            lado = 0 if _lado_txt == "home" else 1
 
     total = 0
     encontrado = False
@@ -3207,8 +3237,8 @@ def _resolver_stats_sofascore(pick: dict):
     if not encontrado:
         return None
 
-    return ("ACIERTO" if total > linea else "FALLO") if es_over else \
-           ("ACIERTO" if total < linea else "FALLO")
+    # Push (linea exacta) -> ANULADO. Antes devolvia FALLO en ambos sentidos.
+    return _rv.resolver_total(total, linea, _dir)
 
 
 MESES_ES = {
@@ -3299,254 +3329,69 @@ def backfill_picks_metadata_historico() -> int:
 
 
 def _resolver_deterministico(pick: dict, detail: dict):
-    """Resuelve el pick con reglas directas sobre el marcador final (sin IA).
+    """Resuelve el pick con el resolutor v2 (data_engine/resolver.py).
 
-    Cubre los mercados determinables: ganador, BTTS, over/under totales,
-    doble oportunidad, sin empate, equipo total de goles. Devuelve
-    ACIERTO/FALLO o None si el mercado no es determinable con el marcador.
+    El codigo anterior queda abajo como `_resolver_deterministico_legacy` solo
+    como referencia: invertia los unders, no tenia handicap ni push, leia las
+    mitades por indice y borraba picks. Este devuelve
+    ACIERTO / FALLO / ANULADO / None.
     """
-    teams = detail.get("teams") or []
-    if len(teams) < 2:
+    from data_engine import resolver as resolver_v2
+
+    # Solo partidos TERMINADOS. Sin esta guardia, `revisar_picks_hoy` podria
+    # resolver un pick con el marcador de un partido en juego.
+    estado = str((detail or {}).get("state") or "").lower()
+    if estado and estado != "post":
         return None
 
-    home = next((t for t in teams if t.get("homeAway") == "home"), teams[0])
-    away = next((t for t in teams if t.get("homeAway") == "away"), teams[1])
     try:
-        hs = float(home.get("score"))
-        as_ = float(away.get("score"))
-    except (TypeError, ValueError):
+        res = resolver_v2.resolver_mercado(pick, dict(detail or {}))
+    except Exception:
+        print("[Dashboard] resolver v2 fallo:\\n" + traceback.format_exc(), flush=True)
         return None
+    # Auditoria: deja registrado con que marcador y por que se decidio.
+    try:
+        from backend.fuentes import audit
+        audit.registrar(pick, res, motivo="resolver_v2", detalle=detail)
+    except Exception:
+        pass
+    return res
 
-    total = hs + as_
-    market = (pick.get("market") or "").lower()
-    sel = (pick.get("selection") or "").lower()
-    titulo = (pick.get("titulo") or "").lower()
-    texto = f"{market} {titulo} {sel}"
 
-    home_name, away_name = (home.get("name") or "").lower(), (away.get("name") or "").lower()
+def _resolver_deterministico_legacy(pick: dict, detail: dict):
+    """Resolutor DETERMINISTA v2 (data_engine/resolver.py).
 
-    # ---- Mercados que NO son de goles: el marcador NO los determina ----
-    # Tarjetas, corners, faltas, tiros, fuera de juego... dependen de las stats
-    # del partido, no del marcador. Sin esta guardia, la rama over/under de
-    # abajo comparaba las TARJETAS contra el total de GOLES (bug real:
-    # 'Tarjetas totales Over 2.5' con solo 2 tarjetas salio ACIERTO porque el
-    # partido tuvo 3+ goles). Los resuelve _resolver_stats_sofascore con los
-    # datos reales de FotMob/ESPN.
-    if any(k in texto for k in (
-        "tarjeta", "card", "corner", "esquina", "falta", "foul",
-        "offside", "fuera de juego", "remate", "tiro", "shot",
-    )):
+    Toda la logica vive en un modulo puro y testeado. Esta funcion solo
+    delega, para que el motor de picks no arrastre los cuatro bugs del
+    resolutor anterior:
+
+      * UNDERS invertidos ("menos de".startswith("m") era True);
+      * sin rama de handicap/spread (nunca se resolvian);
+      * sin push (una linea exacta devolvia FALLO en vez de devolucion);
+      * mitades leidas por indice en vez de por `homeAway`.
+
+    Devuelve ACIERTO/FALLO/ANULADO o None (no decidible -> PENDIENTE).
+    """
+    try:
+        from data_engine import resolver as _resolver_v2
+        return _resolver_v2.resolver_mercado(pick, detail)
+    except Exception:  # noqa: BLE001 - un fallo aqui no puede tumbar el ciclo
         return None
-
-    def _equipo_de(sel_txt: str):
-        if home_name and home_name in sel_txt:
-            return home
-        if away_name and away_name in sel_txt:
-            return away
-        return None
-
-    # ---- Ganador / ML / "X gana" ----
-    if any(k in texto for k in ("ganador", " gana", "moneyline", " ml", "winner")) and \
-       "primera mitad" not in texto and "prorroga" not in texto and "1er" not in texto:
-        if hs == as_:
-            return "FALLO"  # empate: solo gana quien apostó empate, que no damos
-        ganador = home if hs > as_ else away
-        elegido = _equipo_de(sel + " " + titulo)
-        if elegido is None:
-            return None
-        return "ACIERTO" if elegido.get("name") == ganador.get("name") else "FALLO"
-
-    # ---- Ambos equipos marcan / BTTS ----
-    if "ambos" in texto and ("marcan" in texto or "anotan" in texto) or "btts" in texto:
-        si = (hs > 0) and (as_ > 0)
-        eligio_si = not sel.strip().startswith("no")
-        return "ACIERTO" if si == eligio_si else "FALLO"
-
-    # ---- Apuesta sin empate (Draw No Bet) ----
-    if "sin empate" in texto:
-        if hs == as_:
-            return "FALLO"
-        elegido = _equipo_de(sel + " " + titulo)
-        if elegido is None:
-            return None
-        ganador = home if hs > as_ else away
-        return "ACIERTO" if elegido.get("name") == ganador.get("name") else "FALLO"
-
-    # ---- Doble oportunidad ----
-    # La seleccion llega en lenguaje natural ("Mainz 05 o Bayer Leverkusen",
-    # "Empate o Atlético de Madrid"), NO como el código 1x/x2/12. Se deduce el
-    # código mirando QUÉ se menciona en la seleccion (cada equipo y/o empate):
-    #   12 = los dos equipos (NO cubre empate)
-    #   1X = local o empate
-    #   X2 = empate o visitante
-    # Antes esto solo entendia el código literal: los picks reales caian a la
-    # IA y acababan PENDIENTE para siempre (y los empates se marcaban FALLO).
-    if "doble oportunidad" in texto or "doble oport" in texto:
-        # Un pick de PRIMERA MITAD no se decide con el marcador final: lo
-        # resuelve _resolver_por_mitades con el marcador por periodo.
-        if "primera mitad" in texto or "1a mitad" in texto or "1er tiempo" in texto:
-            return None
-        sel_norm = _norm_texto(f"{sel} {titulo}")
-        home_norm = _norm_texto(home.get("name"))
-        away_norm = _norm_texto(away.get("name"))
-        menciona_local = bool(home_norm) and home_norm in sel_norm
-        menciona_visitante = bool(away_norm) and away_norm in sel_norm
-        menciona_empate = "empate" in sel_norm
-        # Codigo explicito (compatibilidad con picks viejos 1x/x2/12).
-        codigo = sel.replace(" ", "").lower()
-        if codigo in ("1x", "x2", "12"):
-            if hs == as_:
-                return "ACIERTO" if codigo in ("1x", "x2") else "FALLO"
-            if codigo == "1x":
-                return "ACIERTO" if hs > as_ else "FALLO"
-            if codigo == "x2":
-                return "ACIERTO" if hs < as_ else "FALLO"
-            return "ACIERTO"  # 12 sin empate: gano uno de los dos
-        # Lenguaje natural: se deduce por equipos/empate mencionados.
-        if not (menciona_local or menciona_visitante or menciona_empate):
-            return None
-        if hs == as_:
-            return "ACIERTO" if menciona_empate else "FALLO"
-        cubre = menciona_local if hs > as_ else menciona_visitante
-        return "ACIERTO" if cubre else "FALLO"
-
-    # ---- Over/Under de goles/puntos/corners (total o de un equipo) ----
-    match = re.search(
-        r"(over|m[áa]s de|under|menos de)\s*\+?\s*([0-9]+(?:[.,][0-9]+)?)", texto
-    )
-    if match:
-        tipo = match.group(1).lower()
-        try:
-            linea = float(match.group(2).replace(",", "."))
-        except ValueError:
-            return None
-        es_over = tipo.startswith(("over", "m"))
-        # Si es un total de un equipo concreto, usar su marcador
-        if ("equipo" in texto or "total de goles" in texto or "totales" in texto) and \
-           "prorroga" not in texto:
-            equipo = _equipo_de(sel + " " + titulo)
-            if equipo is not None:
-                try:
-                    valor = float(equipo.get("score"))
-                except (TypeError, ValueError):
-                    return None
-                return ("ACIERTO" if valor > linea else "FALLO") if es_over else \
-                       ("ACIERTO" if valor < linea else "FALLO")
-        return ("ACIERTO" if total > linea else "FALLO") if es_over else \
-               ("ACIERTO" if total < linea else "FALLO")
-
-    return None
 
 
 def _resolver_por_mitades(pick: dict, detail: dict):
-    """Resuelve mercados de MITAD con el marcador por periodos de ESPN.
+    """Mercados de mitad -> resolutor v2.
 
-    Cubre 'Gana cualquier mitad' / 'Gana ambas mitades' / '1x2 1a mitad'. Son
-    mercados que el bookmaker publica y con cuotas muy bajas (1.27 el de
-    Nacional), pero el marcador FINAL no los determina: hacen falta los
-    marcadores de cada periodo, que ESPN expone en 'linescores'
-    (competitor.linescores[i] = goles de la mitad i).
-
-    Sin esto, todos esos picks acababan ANULADOS (medido: 6 de 15 en produccion).
-    Si ESPN no trae linescores se devuelve None y el pick queda como estaba.
+    El resolutor antiguo leia `teams[0]` como local y `teams[1]` como
+    visitante. ESPN no garantiza ese orden (y en tenis lo invierte), asi que
+    cuando venia cambiado el veredicto se daba la vuelta. El v2 usa
+    `homeAway` y los `linescores` alineados al pick.
     """
-    texto = " ".join([
-        str(pick.get("market") or ""),
-        str(pick.get("titulo") or ""),
-        str(pick.get("selection") or ""),
-    ]).lower()
-    # 'Gana cualquier mitad' y 'Gana ambas mitades' son mercados DISTINTOS y el
-    # titulo de cualquiera de los dos contiene la palabra 'mitad'. Se decide
-    # primero por 'ambas' (exige ganar las dos) y solo si no aparece se trata
-    # como 'cualquier' (basta con ganar una).
-    es_ambas = "ambas" in texto
-    es_cualquier = (not es_ambas) and ("cualquier" in texto or "alguna" in texto)
-    # Solo se mira la 1a mitad si el mercado lo dice de forma explicita
-    # ('1a mitad - 1x2', '1x2 1a mitad'). Antes se detectaba con un '1' suelto,
-    # que tambien aparece en cualquier otra parte del texto.
-    es_primera = bool(
-        re.search(r"\b1\s*(?:a|ª|er)?\s*(?:mitad|half)\b", texto)
-        or "1x2 1" in texto
-    )
-
-    if not (es_ambas or es_cualquier or es_primera):
+    try:
+        from data_engine import resolver as _resolver_v2
+        return _resolver_v2.resolver_mercado(pick, detail)
+    except Exception:  # noqa: BLE001
         return None
-
-    teams = detail.get("teams") or []
-    if len(teams) < 2:
-        return None
-
-    # MarCADOR POR PERIODO: cada competidor trae linescores con un valor por
-    # periodo. Se normalizan a enteros.
-    periodos = []
-    for t in teams:
-        ls = t.get("linescores") or []
-        vals = []
-        for p in ls:
-            if isinstance(p, dict):
-                v = p.get("displayValue", p.get("value"))
-            else:
-                v = p
-            try:
-                vals.append(float(v))
-            except (TypeError, ValueError):
-                vals.append(0.0)
-        periodos.append(vals)
-
-    if not periodos[0] or not periodos[1]:
-        return None
-    n = min(len(periodos[0]), len(periodos[1]))
-    if n == 0:
-        return None
-
-    def _lado():
-        """Indice del equipo (0 local / 1 visitante) al que se apostó.
-
-        No basta con 'el nombre del equipo esta en el titulo': el pick suele
-        llevar el nombre CORTO ('Nacional gana cualquier mitad') y el equipo se
-        llama 'Atlético Nacional'. Se comparan palabras sueltas para que el
-        apellido ('nacional') baste, con cuidado de no emparejar por palabras
-        vacías.
-        """
-        h = (teams[0].get("name") or "").lower()
-        a = (teams[1].get("name") or "").lower()
-        cand = f"{pick.get('titulo') or ''} {pick.get('selection') or ''}".lower()
-        for nombre, i in ((h, 0), (a, 1)):
-            if not nombre:
-                continue
-            if nombre in cand:
-                return i
-            #.Any() sobre palabras con 4+ letras: 'nacional' identifica a
-            # 'atlético nacional' sin que el titulo repita el nombre entero.
-            palabras = [w for w in _norm_texto(nombre).split() if len(w) >= 4]
-            if palabras and any(w in _norm_texto(cand) for w in palabras):
-                return i
-        return None
-
-    lado = _lado()
-    if lado is None:
-        return None
-
-    # Solo la 1a mitad: compara el primer periodo.
-    if es_primera and not (es_ambas or es_cualquier):
-        return "ACIERTO" if periodos[lado][0] > periodos[1 - lado][0] else "FALLO"
-
-    mitades = [(periodos[0][i], periodos[1][i]) for i in range(n)]
-    gana_mitades = mitades if lado == 0 else [(b, a) for a, b in mitades]
-    propias = [g for g, _ in gana_mitades]
-    rivales = [r for _, r in gana_mitades]
-
-    if es_ambas:
-        # Gana las DOS mitades.
-        return "ACIERTO" if all(p > r for p, r in zip(propias, rivales)) else "FALLO"
-    if es_cualquier:
-        # Gana AL MENOS UNA mitad. Los empates a mitad no cuentan como ganar.
-        gana_alguna = any(p > r for p, r in zip(propias, rivales))
-        sel = (str(pick.get("selection") or "")).strip().lower()
-        quiere_si = not sel.startswith(("no", "nunca", "-"))
-        return "ACIERTO" if gana_alguna == quiere_si else "FALLO"
-
-    return None
 
 
 def _detalle_resolucion(pick: dict):
@@ -3967,6 +3812,37 @@ def resolver_picks_finalizados() -> dict:
         if horas_evento < 0:
             continue
 
+        # ---- TENIS -------------------------------------------------------
+        # Va por su propio camino: ESPN no tiene /summary de tenis (el
+        # partido vive en el scoreboard), deja score=null y manda homeAway
+        # al reves. `data_engine.tennis` lo normaliza y resuelve sets y
+        # juegos (con push y retiradas en ANULADO).
+        if (pick.get("sport") or "").lower() == "tennis":
+            try:
+                from data_engine import tennis as _tennis
+                det_t = _tennis.detalle(pick)
+            except Exception:
+                det_t = None
+            if det_t and det_t.get("estado") == "post":
+                try:
+                    res_t = _tennis.resolver(pick, det_t)
+                except Exception:
+                    res_t = None
+                if res_t:
+                    db.update_pick_result(pick["id"], res_t)
+                    resueltos += 1
+                    print(
+                        f"[Dashboard] Tenis {pick.get('id')} -> {res_t} "
+                        f"({det_t.get('estado_detallado')})",
+                        flush=True,
+                    )
+                    continue
+            # Sin detalle: se queda PENDIENTE (nunca se borra ni se inventa).
+            if horas > 72 and not det_t:
+                if db.update_pick_result(pick["id"], "ANULADO"):
+                    _salud["resolver_anulados"] = _salud.get("resolver_anulados", 0) + 1
+            continue
+
         # Antiguedad: el pick se anula SOLO si ya no hay nada que hacer. Se
         # consulta primero el marcador (abajo) y solo se anula si, habiendo
         # datos, el mercado no se puede decidir. Antes se anulaba por edad
@@ -4034,6 +3910,7 @@ def resolver_picks_finalizados() -> dict:
         # El marcador global NO determina estos mercados (la IA adivinaba).
         try:
             resultado = (_resolver_prop_mlb(pick) or _resolver_prop_nfl(pick)
+                        or _resolver_prop_nba(pick)
                         or _resolver_stats_sofascore(pick))
         except Exception:
             resultado = None
@@ -4055,11 +3932,15 @@ def resolver_picks_finalizados() -> dict:
         #    (Sofascore/boxscore) este temporalmente caida (403) y el pick SI se
         #    resuelva en un ciclo posterior. Pasado ese plazo ya no va a mejorar.
         if horas > 72:
-            if db.delete_ai_pick(pick["id"]):
-                _salud["resolver_borrados"] = _salud.get("resolver_borrados", 0) + 1
+            # NUNCA se borra: se ANULA con motivo. Borrar un pick ya jugado
+            # hacia desaparecer apuestas reales del historial sin rastro (el
+            # usuario no podia auditar por que faltaba). ANULADO no cuenta
+            # como acierto ni como fallo, y ahora queda registrado.
+            if db.update_pick_result(pick["id"], "ANULADO"):
+                _salud["resolver_anulados"] = _salud.get("resolver_anulados", 0) + 1
                 print(
                     f"[Dashboard] Pick {pick.get('id')} ({pick.get('market')}) "
-                    f"BORRADO: mercado no verificable con datos reales tras 72h",
+                    f"ANULADO: mercado no verificable con datos reales tras 72h",
                     flush=True,
                 )
     return {"pendientes": len(pendientes), "resueltos": resueltos}
@@ -4592,12 +4473,16 @@ def revisar_picks_generados() -> dict:
         #    textos con frases de 'sin datos', equipos genericos...
         if not _pick_calidad_ok(pick):
             try:
-                if db.delete_ai_pick(pid):
+                # NUNCA se borra: se ANULA. Antes se borraba el pick antes de
+                # jugarse y desaparecia del historial sin rastro (y el partido
+                # no podia regenerarse con un mercado valido si no habia fila).
+                # `eventos_con_pick` ya excluye ANULADO, asi que se regenera.
+                if db.update_pick_result(pid, "ANULADO"):
                     anulados += 1
                     _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
                     print(
                         f"[Dashboard-Revision] Pick {pid} ({pick.get('market')}) "
-                        f"BORRADO por calidad (no pasaba el filtro)",
+                        f"ANULADO por calidad (no pasaba el filtro)",
                         flush=True,
                     )
             except Exception:
@@ -4630,11 +4515,11 @@ def revisar_picks_generados() -> dict:
                     _salud.get("revision_ia_confirmados", 0) + 1
                 )
                 db.marcar_pick_verificado(pid)
-            elif db.delete_ai_pick(pid):
+            elif db.update_pick_result(pid, "ANULADO"):
                 anulados += 1
                 _salud["revision_anulados"] = _salud.get("revision_anulados", 0) + 1
                 print(
-                    f"[Dashboard-Revision] Pick {pid} BORRADO: la IA lo contradice "
+                    f"[Dashboard-Revision] Pick {pid} ANULADO: la IA lo contradice "
                     f"con datos actuales",
                     flush=True,
                 )

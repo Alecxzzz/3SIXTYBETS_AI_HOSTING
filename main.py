@@ -2575,9 +2575,23 @@ def dashboard_revisar(user=Depends(get_admin), corregir: bool = False):
 
 @app.post("/dashboard/reset")
 def dashboard_reset(user=Depends(get_admin)):
-    """Borra TODOS los picks para regenerarlos con equipos/logos (admin)."""
-    db.run_query("delete from ai_picks")
-    return {"ok": True, "message": "Picks borrados. Se regeneraran en el proximo ciclo."}
+    """Borra TODOS los picks para empezar de cero (admin).
+
+    Antes solo borraba `ai_picks`. El contador historico suma tambien
+    `ai_picks_archive`, asi que el panel seguia mostrando "727 de 1314"
+    despues de pulsar Reset. Ahora se limpian las cuatro tablas del historial.
+    """
+    borrado = {}
+    for tabla in ("ai_picks", "ai_picks_archive", "ai_picks_prob",
+                  "ai_picks_descartados"):
+        try:
+            db.run_query(f"delete from {tabla}")
+            borrado[tabla] = True
+        except Exception as exc:  # noqa: BLE001 - una tabla puede no existir
+            borrado[tabla] = False
+            print(f"[reset] no se pudo limpiar {tabla}: {exc}", flush=True)
+    return {"ok": True, "borrado": borrado,
+            "message": "Historial borrado por completo. Se regenerara en el proximo ciclo."}
 
 
 # ==============================

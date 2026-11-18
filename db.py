@@ -2082,18 +2082,27 @@ def purgar_picks_pendientes_mercado(mercado: str) -> int:
 
 
 def borrar_anulados_legacy() -> int:
-    """Borra los picks ANULADO guardados antes del cambio de politica.
+    """Borra SOLO los ANULADO antiguos (mas de 30 dias).
 
-    El usuario pidio que lo anulable se BORRE del historial en vez de
-    acumularse como fantasma que no cuenta ni como acierto ni como fallo.
-    Los nuevos ya no se marcan ANULADO; esta funcion limpia los viejos.
+    Antes borraba todos los ANULADO. Eso ya no sirve: ahora el resolver
+    ANULA (en vez de borrar) los picks cuyo mercado no se puede decidir con
+    datos reales, justo para que el usuario pueda auditar que paso. Si se
+    borraran al arrancar, el pick desapareceria igual que antes.
     """
     try:
-        rows = run_query("select count(*) as n from ai_picks where result = 'ANULADO'")
+        corte = (now_utc() - timedelta(days=30)).date()
+        rows = run_query(
+            "select count(*) as n from ai_picks "
+            "where result = 'ANULADO' and pick_date < %s",
+            (corte,),
+        )
         n = int(rows[0].get("n") or 0) if rows else 0
         if not n:
             return 0
-        run_query("delete from ai_picks where result = 'ANULADO'")
+        run_query(
+            "delete from ai_picks where result = 'ANULADO' and pick_date < %s",
+            (corte,),
+        )
         return n
     except Exception:
         return 0
@@ -2475,7 +2484,13 @@ def purgar_picks_prohibidos() -> int:
         )
         total = int((filas or {}).get("cnt") or 0)
         if total:
-            run_query("delete from ai_picks " + where, tuple(params))
+            # Se ANULA en vez de borrar: el pick queda auditable, y
+            # `eventos_con_pick` excluye ANULADO, asi que el partido se puede
+            # regenerar con un mercado valido exactamente igual que antes.
+            run_query(
+                "update ai_picks set result = 'ANULADO', updated_at = %s " + where,
+                (now_utc(),) + tuple(params),
+            )
         return total
     except Exception as exc:
         print(f"[db] purgar_picks_prohibidos fallo: {exc}", flush=True)

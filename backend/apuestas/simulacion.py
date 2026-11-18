@@ -42,6 +42,17 @@ P_OT_DEFECTO = 0.065
 OT_PUNTOS = 13.0
 OT_SD = 5.0
 
+# Perfil de simulacion por deporte. NBA y NFL comparten la normal correlacionada
+# pero NO la prorroga: en NBA una prorroga suma ~13 puntos; en NFL ~7. Sin este
+# perfil, un partido NFL con prorroga sumaba 13 y el modelo "veia" totales de 52
+# donde el mercado ponia 45.5.
+PERFILES = {
+    "nba": {"ot_puntos": 13.0, "ot_sd": 5.0, "sd_mu": 1.5},
+    "nfl": {"ot_puntos": 7.0, "ot_sd": 3.5, "sd_mu": 1.0},
+    "wnba": {"ot_puntos": 12.0, "ot_sd": 4.5, "sd_mu": 1.5},
+    "mlb": {"ot_puntos": 0.0, "ot_sd": 1.0, "sd_mu": 1.0},
+}
+
 # --- Futbol -----------------------------------------------------------------
 # Misma idea que en NBA pero por OTRA via: aqui los goles son 0, 1, 2, 3... y una
 # normal metería probabilidad de -0.4 goles y de 2.7 goles, que no existen. Peor
@@ -75,6 +86,7 @@ def _percentil(valores: List[float], q: float) -> float:
 def simular_nba(mu_local: float, mu_visita: float, sigma_equipo: float,
                 rho_equipos: float = 0.0, n: int = SIMULACIONES,
                 p_ot: float = P_OT_DEFECTO, sd_mu: float = SD_MU,
+                ot_puntos: float = OT_PUNTOS, ot_sd: float = OT_SD,
                 semilla: Optional[int] = None) -> Dict[str, Any]:
     """Simula `n` partidos y devuelve los marcadores agrupados en lotes.
 
@@ -104,7 +116,7 @@ def simular_nba(mu_local: float, mu_visita: float, sigma_equipo: float,
                 # La prorroga suma puntos al total. Se reparte al azar entre los
                 # dos, que es lo que pasa en la realidad (el margen casi no se
                 # mueve, el total sube).
-                extra = rng.gauss(OT_PUNTOS, OT_SD)
+                extra = rng.gauss(ot_puntos, ot_sd)
                 if rng.random() < 0.5:
                     pts_h += extra
                 else:
@@ -193,8 +205,13 @@ def simular(sport: str, mu_local: float, mu_visita: float,
     if deporte == "soccer" or deporte.startswith("soccer:"):
         return simular_futbol(mu_local, mu_visita, rho_equipos=rho_equipos,
                               n=n, semilla=semilla)
+    perfil = PERFILES.get(deporte) or {}
     return simular_nba(mu_local, mu_visita, sigma_equipo, rho_equipos, n=n,
-                       p_ot=p_ot, semilla=semilla)
+                       p_ot=p_ot,
+                       sd_mu=perfil.get("sd_mu", SD_MU),
+                       ot_puntos=perfil.get("ot_puntos", OT_PUNTOS),
+                       ot_sd=perfil.get("ot_sd", OT_SD),
+                       semilla=semilla)
 
 
 def _cumple(pts_h: float, pts_a: float, clas: Dict[str, Any]) -> bool:
