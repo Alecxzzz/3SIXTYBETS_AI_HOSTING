@@ -3256,13 +3256,12 @@ def _resolver_stats_espn(pick: dict, detail: dict):
         f"{pick.get('selection') or ''} {pick.get('titulo') or ''}",
         home_name, away_name)
 
-    # 1x2 de estadistica: gana el que MAS tiene. Empate -> ANULADO (devolucion).
+    # 1x2 de estadistica: gana el que MAS tiene. Un EMPATE no anula el mercado
+    # (existe la X): el pick a un equipo pierde. Antes devolvia ANULADO.
     if "1x2" in texto and not re.search(r"over|under|mas de|menos de", texto):
         if lado is None:
             return None
         propio, rival = (vh, va) if lado == "home" else (va, vh)
-        if propio == rival:
-            return "ANULADO"
         return "ACIERTO" if propio > rival else "FALLO"
 
     dir_ = _rv.direccion(pick.get("selection") or "") or _rv.direccion(texto)

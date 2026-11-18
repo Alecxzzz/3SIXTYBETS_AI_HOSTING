@@ -64,6 +64,12 @@ class TestStatsEspn(unittest.TestCase):
             dashboard._resolver_stats_espn(
                 pick("Remates a puerta", "Irlanda del Norte Over 5.5"), d), "ACIERTO")
 
+    def test_1x2_empatado_es_fallo(self):
+        """En un 1x2, el empate lo gana la X: un pick a un equipo pierde."""
+        d = detalle({"foulsCommitted": "10"}, {"foulsCommitted": "10"})
+        self.assertEqual(
+            dashboard._resolver_stats_espn(pick("1x2 Faltas", "Hungría"), d), "FALLO")
+
     def test_primera_mitad_no_se_toca(self):
         """ESPN no da stats por periodo: eso lo resuelve FotMob, no esto."""
         d = detalle({"wonCorners": "5"}, {"wonCorners": "4"})
