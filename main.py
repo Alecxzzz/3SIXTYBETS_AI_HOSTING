@@ -176,6 +176,11 @@ RUTAS_PUBLICAS = {
     #    al stream (sesión/token cuando TV_EXIGIR_STREAM lo exige, hosts públicos del
     #    escaparate, rate limit y anti-SSRF) se aplica dentro de /hls-proxy y /live/*.
     "/hls-proxy",
+    # 6) CANARIO DE DESPLIEGUE. Devuelve el commit que esta corriendo y que
+    #    piezas estan activas, para poder comprobar desde el navegador si el
+    #    deploy subio. No expone nada de usuario ni del negocio: solo un hash de
+    #    commit y un mapa de features (true/false).
+    "/version",
 }
 
 # Recuperacion de contrasena. APAGADA por defecto: sus 4 rutas
