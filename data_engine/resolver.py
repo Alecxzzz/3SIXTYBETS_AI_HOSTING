@@ -186,9 +186,14 @@ def _resolver_mitades(texto: str, sel: str, home: dict, away: dict):
     es_cualquier = (not es_ambas) and (
         "cualquier mitad" in texto or "alguna mitad" in texto
     )
-    es_primera = bool(re.search(r"\b1\s*(?:a|er)?\s*(?:mitad|tiempo|half)\b", texto)) \
+    es_primera = bool(re.search(r"\b1\s*(?:a|er|ra)?\s*(?:mitad|tiempo|half)\b", texto)) \
         or "primera mitad" in texto or "primer tiempo" in texto
-    if not (es_ambas or es_cualquier or es_primera):
+    # "2ª Mitad - 1x2" es un mercado que el book publica y que si se puede
+    # resolver: ESPN manda un linescore por periodo. Antes no se contemplaba y
+    # el pick quedaba PENDIENTE para siempre.
+    es_segunda = bool(re.search(r"\b2\s*(?:a|da|ª)?\s*(?:mitad|tiempo|half)\b", texto)) \
+        or "segunda mitad" in texto or "segundo tiempo" in texto
+    if not (es_ambas or es_cualquier or es_primera or es_segunda):
         return None
 
     ph, pa = _periodos(home), _periodos(away)
@@ -198,12 +203,23 @@ def _resolver_mitades(texto: str, sel: str, home: dict, away: dict):
     if n == 0:
         return None
 
-    if es_primera and not (es_ambas or es_cualquier):
-        if ph[0] == pa[0]:
-            return ANULADO
-        return ACIERTO if ph[0] > pa[0] else FALLO
-
     lado = _lado_en_texto(f"{texto} {sel}", home, away)
+
+    def _periodo(i: int):
+        """Veredicto de UN periodo, con el lado del pick (no asume local)."""
+        if lado is None or i >= n:
+            return None
+        propio = ph[i] if lado == "home" else pa[i]
+        rival = pa[i] if lado == "home" else ph[i]
+        if propio == rival:
+            return ANULADO
+        return ACIERTO if propio > rival else FALLO
+
+    if es_primera and not (es_ambas or es_cualquier):
+        return _periodo(0)
+    if es_segunda and not (es_ambas or es_cualquier):
+        return _periodo(1)
+
     if lado is None:
         return None
     propias = ph[:n] if lado == "home" else pa[:n]
@@ -249,8 +265,10 @@ def resolver_mercado(pick: dict, detalle: dict):
     if r is not None:
         return r
 
-    # 3) Ganador / moneyline.
-    es_ganador = any(k in texto for k in ("ganador", "moneyline", "winner", " ml")) \
+    # 3) Ganador / moneyline. "1x2" tambien es ganador: el mercado se llama asi
+    #    en la lista del book ("Islandia (1x2)") y antes no se reconocia, asi que
+    #    el pick quedaba PENDIENTE aunque el partido estuviera terminado.
+    es_ganador = any(k in texto for k in ("ganador", "moneyline", "winner", " ml", "1x2")) \
         or bool(re.search(r"\bgana\b", texto))
     if es_ganador and "prorroga" not in texto and "mitad" not in texto:
         if hs is None or as_ is None:

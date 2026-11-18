@@ -144,6 +144,29 @@ class TestOtrosMercados(unittest.TestCase):
         self.assertEqual(r, "FALLO")
 
 
+class TestGanadorYMitades(unittest.TestCase):
+    """Mercados que el book publica y el resolver no reconocia."""
+
+    def test_1x2_es_ganador(self):
+        self.assertEqual(
+            resolver.resolver_mercado(pick("1x2", "Local"), detalle(gl=2, gv=1)), "ACIERTO")
+        self.assertEqual(
+            resolver.resolver_mercado(pick("1x2", "Visitante"), detalle(gl=2, gv=1)), "FALLO")
+
+    def test_segunda_mitad(self):
+        d = detalle(gl=2, gv=1, periodo_local=[0, 2], periodo_visitante=[1, 0])
+        self.assertEqual(
+            resolver.resolver_mercado(pick("2ª Mitad - 1x2", "Local"), d), "ACIERTO")
+        self.assertEqual(
+            resolver.resolver_mercado(pick("2ª Mitad - 1x2", "Visitante"), d), "FALLO")
+
+    def test_primera_mitad_respeta_el_lado(self):
+        # El VISITANTE gano la primera mitad: antes se asumia local y salia FALLO.
+        d = detalle(gl=2, gv=1, periodo_local=[0, 2], periodo_visitante=[1, 0])
+        self.assertEqual(
+            resolver.resolver_mercado(pick("1ª mitad - 1x2", "Visitante"), d), "ACIERTO")
+
+
 class TestTenis(unittest.TestCase):
     """Tenis: el 'marcador' son sets y juegos (linescores), no goles."""
 

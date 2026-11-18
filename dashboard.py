@@ -827,6 +827,27 @@ def _mercado_prohibido(*textos: str) -> bool:
     return False
 
 
+# Mercados que el book publica pero que NO se pueden verificar con las fuentes
+# disponibles. Faltas, remates, corners y tarjetas dependen de ESTADISTICAS del
+# partido: Sofascore responde 403 y FotMob no cubre todos los torneos, asi que
+# el pick se queda PENDIENTE para siempre y acaba ANULADO (y en el panel sale
+# como "sin datos"). Se rechazan al generar para no publicar humo.
+MERCADOS_NO_VERIFICABLES = (
+    "falta", "faltas", "remate", "remates", "tiro", "tiros",
+    "esquina", "esquinas", "corner", "corners",
+    "tarjeta", "tarjetas", "amarilla", "roja",
+)
+
+
+def _mercado_no_verificable(*textos: str) -> bool:
+    """True si el mercado vive de estadisticas que hoy no podemos comprobar."""
+    for t in textos:
+        bajo = (t or "").lower()
+        if any(frase in bajo for frase in MERCADOS_NO_VERIFICABLES):
+            return True
+    return False
+
+
 MERCADOS_FUTBOL = [
     "1X2 (equipo A o B)",
     "Over de goles (minimo 1.25 segun la cuota)",
@@ -1520,6 +1541,11 @@ def _motivo_rechazo_pick(pick: dict, partido: dict, disponibles: list, market: s
 
     if _mercado_prohibido(market, titulo, selection):
         return "prohibido"
+
+    # Mercado sin fuente verificable (faltas/remates/corners/tarjetas): se
+    # publicaria y jamas se resolveria. Se reanaliza con otro mercado.
+    if _mercado_no_verificable(market, titulo, selection):
+        return "no_resoluble"
 
     # El mercado no puede pertenecer a otro deporte: un 'Aces' en un partido
     # de fútbol o un 'rebotes' en MLB es un pick absurdo (la IA se cruzó de
