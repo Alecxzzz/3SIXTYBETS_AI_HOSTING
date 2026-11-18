@@ -1926,6 +1926,32 @@ def health():
     return db.health_status()
 
 
+@app.get("/version")
+def version():
+    """Que codigo esta corriendo DE VERDAD (para no adivinar si subio el deploy).
+
+    Railway inyecta `RAILWAY_GIT_COMMIT_SHA`. Si `resolver` no dice "v2" o
+    `nfl_mc` sale False, el servidor que estas mirando NO tiene este commit y
+    hay que redesplegar (o reiniciar el proceso si corre en local).
+    """
+    import os as _os
+
+    return {
+        "commit": (_os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                   or _os.getenv("GIT_COMMIT")
+                   or "desconocido"),
+        "resolver": "v2",
+        "features": {
+            "resolver_v2": True,
+            "resolver_tenis": True,
+            "auditoria": "ai_picks_audit",
+            "tennis_elo": "elo_ratings(tennis:atp)",
+            "nfl_mc": "nfl" in getattr(dashboard, "MOTOR_MC_DEPORTES", set()),
+            "props_nba": True,
+        },
+    }
+
+
 @app.post("/analytics/pv")
 def analytics_pv(data: PageViewIn, request: Request):
     """Contador de visitas por pagina (analitica PROPIA, sin terceros).
