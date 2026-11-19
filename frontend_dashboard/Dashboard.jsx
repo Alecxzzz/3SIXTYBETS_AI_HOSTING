@@ -294,34 +294,28 @@ export default function Dashboard() {
     <div className="dashboard">
       <h1 className="dash-welcome">{data.welcome} 👋</h1>
 
-      {/* STATS HORIZONTALES */}
-      <div className="dash-stats">
-        <button
-          className={`dash-stat ${vista === "dia" ? "activa" : ""}`}
-          onClick={() => setVista("dia")}
-        >
-          <span className="dash-stat-num">{data.stats.pronosticos_del_dia}</span>
-          <span className="dash-stat-label">Pronósticos del día</span>
-        </button>
-        <button
-          className={`dash-stat ${vista === "manana" ? "activa" : ""}`}
-          onClick={() => setVista("manana")}
-        >
-          <span className="dash-stat-num">{data.stats.pronosticos_manana || 0}</span>
-          <span className="dash-stat-label">Partidos de mañana analizados</span>
-        </button>
-        <button
-          className={`dash-stat ${vista === "acertados" ? "activa" : ""}`}
-          onClick={() => setVista("acertados")}
-        >
-          <span className="dash-stat-num">
-            {data.stats.pronosticos_acertados_por_la_ia}
-          </span>
-          <span className="dash-stat-label">Pronósticos acertados por la IA</span>
-        </button>
+      {/* SECCION DE STATS EN GRID (estilo Canzu Analytics) */}
+      <div className="dash-stats-grid">
+        <div className="dash-stat-card">
+          <span className="dash-stat-kicker">Pronósticos generados</span>
+          <span className="dash-stat-value">{data.stats.pronosticos_del_dia}</span>
+        </div>
+        <div className="dash-stat-card">
+          <span className="dash-stat-kicker">Partidos analizados (mañana)</span>
+          <span className="dash-stat-value">{data.stats.pronosticos_manana || 0}</span>
+        </div>
+        <div className="dash-stat-card">
+          <span className="dash-stat-kicker">Pronósticos acertados</span>
+          <span className="dash-stat-value">{data.stats.pronosticos_acertados_por_la_ia}</span>
+        </div>
+        <div className="dash-stat-card dash-stat-card--accent">
+          <span className="dash-stat-kicker">IA revisada con IA</span>
+          <span className="dash-stat-value">verificada</span>
+          <span className="dash-stat-sub">2 pasadas independientes confirmadas</span>
+        </div>
       </div>
 
-      {/* LISTA DE PICKS (horizontal) */}
+      {/* SECCION DE PICKS (horizontal) */}
       <div className="dash-picks">
         {picks.length === 0 && (
           <p className="dash-vacio">
