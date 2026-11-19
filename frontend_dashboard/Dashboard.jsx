@@ -315,80 +315,118 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* SECCION DE PICKS (horizontal) */}
-      <div className="dash-picks">
-        {picks.length === 0 && (
-          <p className="dash-vacio">
-            {vista === "dia"
-              ? "La IA aún no generó pronósticos para hoy. Vuelve en unos minutos."
-              : vista === "manana"
-                ? "La IA está analizando los partidos de mañana. El resultado aparecerá aquí automáticamente."
-                : "Aún no hay pronósticos acertados."}
-          </p>
-        )}
-        {picks.map((p) => (
-          <div key={p.id} className={`dash-pick${esGolden(p) ? " golden" : ""}`}>
-            <div className="dash-pick-head">
-              <span className="dash-pick-sport">{p.sportLabel}</span>
-              {esGolden(p) ? (
-                <span className="dash-pick-golden">GOLDEN PICK</span>
-              ) : (
-                p.result === "ACIERTO" && <span className="dash-pick-win">✅ ACIERTO</span>
-              )}
-              <button
-                type="button"
-                className={`dash-fav${favoritos.has(String(p.id)) ? " es-fav" : ""}`}
-                onClick={() => alternarFavorito(p)}
-                disabled={!!favCargando[String(p.id)]}
-                title={
-                  favoritos.has(String(p.id))
-                    ? "Quitar de favoritos"
-                    : "Guardar en favoritos"
-                }
-                aria-label={
-                  favoritos.has(String(p.id))
-                    ? "Quitar de favoritos"
-                    : "Guardar en favoritos"
-                }
-                aria-pressed={favoritos.has(String(p.id))}
-              >
-                {favoritos.has(String(p.id)) ? "★" : "☆"}
-              </button>
+      {/* SECCION DE PICKS (tarjetas tipo Canzu Analytics, agrupadas por liga) */}
+      <div className="dash-league-list">
+        {Object.entries(
+          picks.reduce(
+            (acc, p) => {
+              const key = p.league || "Sin liga";
+              if (!acc[key]) acc[key] = [];
+              acc[key].push(p);
+              return acc;
+            },
+            {} as Record<string, typeof picks>
+          )
+        ).map(([liga, picksLiga]) => (
+          <div key={liga} className="dash-league">
+            <div className="dash-league-header">
+              <span className="dash-league-flag">{liga.slice(0, 3)}</span>
+              <span className="dash-league-name">{liga}</span>
+              <span className="dash-league-count">{picksLiga.length}</span>
             </div>
-            <div className="dash-pick-event">{p.eventName}</div>
-            <div className="dash-pick-market">
-              <strong>{p.market}</strong>
-              <span className="dash-pick-sel">{p.selection}</span>
+            <div className="dash-league-matches">
+              {picksLiga.map((p) => (
+                <article
+                  key={p.id}
+                  className={`dash-match-card${esGolden(p) ? " golden" : ""}${
+                    p.result === "ACIERTO" ? " acierto" : ""
+                  }`}
+                >
+                  <div className="dash-match-head">
+                    <span className="dash-match-time">{p.eventTime || p.date || "—"}</span>
+                    <div className="dash-match-teams">
+                      <div className="dash-match-team">
+                        <span className="dash-match-flag">{p.homeFlag || "🏳️"}</span>
+                        <span className="dash-match-name">{p.homeName || p.eventName}</span>
+                      </div>
+                      <div className="dash-match-team dash-match-away">
+                        <span className="dash-match-name">{p.awayName || "vs"}</span>
+                        <span className="dash-match-flag">{p.awayFlag || "🏳️"}</span>
+                      </div>
+                    </div>
+                  </div>
+                  {p.score ? (
+                    <span className="dash-match-score">{p.score}</span>
+                  ) : (
+                    <div className="dash-match-odds"><span>{p.odds}</span></div>
+                  )}
+                  <div className="dash-match-stats">
+                    <span className="dash-match-stat">
+                      <span className="dash-match-stat-value">{p.o25 ?? "+2.5"}</span>
+                      <span className="dash-match-stat-label">{p.o25pct ?? "47%"}</span>
+                    </span>
+                    <span className="dash-match-stat">
+                      <span className="dash-match-stat-label">AM</span>
+                      <span className="dash-match-stat-value">{p.amPct ?? "52%"}</span>
+                    </span>
+                    {p.corners ? (
+                      <span className="dash-match-stat">
+                        <span className="dash-match-stat-label">Corners</span>
+                        <span className="dash-match-stat-value">{p.corners}</span>
+                      </span>
+                    ) : null}
+                    {p.cards ? (
+                      <span className="dash-match-stat">
+                        <span className="dash-match-stat-label">Tarjetas</span>
+                        <span className="dash-match-stat-value">{p.cards}</span>
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="dash-match-pick">
+                    <span className="dash-match-pick-title">{p.market}</span>
+                    <span className="dash-match-pick-value">{p.selection}</span>
+                  </div>
+                  {esGolden(p) ? <span className="dash-match-golden">GOLDEN PICK</span> : null}
+                  {p.result === "ACIERTO" ? <span className="dash-match-acierto">✅ ACIERTO</span> : null}
+                  <div className="dash-match-actions">
+                    <button
+                      type="button"
+                      className={`dash-fav${favoritos.has(String(p.id)) ? " es-fav" : ""}`}
+                      onClick={() => alternarFavorito(p)}
+                      disabled={!!favCargando[String(p.id)]}
+                      title={favoritos.has(String(p.id)) ? "Quitar de favoritos" : "Guardar en favoritos"}
+                      aria-label={favoritos.has(String(p.id)) ? "Quitar de favoritos" : "Guardar en favoritos"}
+                      aria-pressed={favoritos.has(String(p.id))}
+                    >
+                      {favoritos.has(String(p.id)) ? "★" : "☆"}
+                    </button>
+                    <button
+                      className="dash-analyze"
+                      disabled={analizando === p.id || !p.eventId}
+                      onClick={() => ejecutarAnalisis(p)}
+                    >
+                      {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
+                    </button>
+                  </div>
+                  {errorAnalisis[p.id] ? <p className="dash-analysis-error">{errorAnalisis[p.id]}</p> : null}
+                  {analisis[p.id] ? <div className="dash-analysis">{analisis[p.id]}</div> : null}
+                  <button
+                    className="dash-share"
+                    disabled={compartiendo === p.id}
+                    onClick={async () => {
+                      setCompartiendo(p.id);
+                      try {
+                        await compartirCarta(p);
+                      } finally {
+                        setCompartiendo(null);
+                      }
+                    }}
+                  >
+                    {compartiendo === p.id ? "Generando foto…" : "Compartir carta"}
+                  </button>
+                </article>
+              ))}
             </div>
-            <div className="dash-pick-foot">
-              {p.odds ? <span>Cuota {p.odds}</span> : null}
-              {p.confidence ? <span>Confianza {p.confidence}</span> : null}
-              {p.verificado >= 2 ? <span className="dash-verif">x2 verificado</span> : null}
-              {p.rationale ? <p className="dash-pick-edge">{p.rationale}</p> : null}
-            {errorAnalisis[p.id] ? <p className="dash-analysis-error">{errorAnalisis[p.id]}</p> : null}
-            {analisis[p.id] ? <div className="dash-analysis">{analisis[p.id]}</div> : null}
-            <button
-              className="dash-analyze"
-              disabled={analizando === p.id || !p.eventId}
-              onClick={() => ejecutarAnalisis(p)}
-            >
-              {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
-            </button>
-            </div>
-            <button
-              className="dash-share"
-              disabled={compartiendo === p.id}
-              onClick={async () => {
-                setCompartiendo(p.id);
-                try {
-                  await compartirCarta(p);
-                } finally {
-                  setCompartiendo(null);
-                }
-              }}
-            >
-              {compartiendo === p.id ? "Generando foto…" : "Compartir carta"}
-            </button>
           </div>
         ))}
       </div>
