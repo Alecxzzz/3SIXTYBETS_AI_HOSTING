@@ -292,31 +292,95 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
-      <h1 className="dash-welcome">{data.welcome} 👋</h1>
+      {/* ===== ESTADISTICAS EN VIVO (estilo Canzu Analytics) ===== */}
+      <div className="stats-en-vivo">
+        {/* Header: titulo y actualizacion */}
+        <div className="stats-header">
+          <h1 className="stats-title">Estadísticas en vivo</h1>
+          <span className="stats-updated">
+            Actualizado {new Date().toLocaleTimeString("es-ES", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })} p. m. · auto cada 60s
+          </span>
+        </div>
 
-      {/* SECCION DE STATS EN GRID (estilo Canzu Analytics) */}
-      <div className="dash-stats-grid">
-        <div className="dash-stat-card">
-          <span className="dash-stat-kicker">Pronósticos generados</span>
-          <span className="dash-stat-value">{data.stats.pronosticos_del_dia}</span>
+        {/* Tabs de deportes */}
+        <div className="stats-sport-tabs">
+          <button className="stats-sport-tab active">⚽️ Futbol</button>
+          <button className="stats-sport-tab">🏀 NBA</button>
+          <button className="stats-sport-tab">⚾️ MLB</button>
+          <button className="stats-sport-tab">🏈 NFL</button>
+          <button className="stats-sport-tab">🎾 Tenis</button>
+          <button className="stats-sport-tab">🥊 MMA/UFC</button>
         </div>
-        <div className="dash-stat-card">
-          <span className="dash-stat-kicker">Partidos analizados (mañana)</span>
-          <span className="dash-stat-value">{data.stats.pronosticos_manana || 0}</span>
+
+        {/* Selector de ligas */}
+        <div className="stats-league-select">
+          <select className="stats-league-dropdown">
+            <option>Todas las ligas</option>
+            <option>Copa del Rey</option>
+            <option>LaLiga</option>
+            <option>Premier League</option>
+            <option>Serie A</option>
+            <option>Bundesliga</option>
+            <option>Ligue 1</option>
+            <option>Brasileirão</option>
+            <option>MLS</option>
+            <option>Liga MX</option>
+          </select>
         </div>
-        <div className="dash-stat-card">
-          <span className="dash-stat-kicker">Pronósticos acertados</span>
-          <span className="dash-stat-value">{data.stats.pronosticos_acertados_por_la_ia}</span>
+
+        {/* Filtros de estado */}
+        <div className="stats-status-filters">
+          <button className="stats-status-filter active">Todos (<span className="stats-status-count">48</span>)</button>
+          <button className="stats-status-filter">En vivo (<span className="stats-status-count">0</span>)</button>
+          <button className="stats-status-filter">Proximos (<span className="stats-status-count">36</span>)</button>
+          <button className="stats-status-filter">Finalizados (<span className="stats-status-count">12</span>)</button>
         </div>
-        <div className="dash-stat-card dash-stat-card--accent">
-          <span className="dash-stat-kicker">IA revisada con IA</span>
-          <span className="dash-stat-value">verificada</span>
-          <span className="dash-stat-sub">2 pasadas independientes confirmadas</span>
+
+        {/* Filtros de fecha */}
+        <div className="stats-date-filters">
+          <button className="stats-date-filter active">Todos los días</button>
+          <button className="stats-date-filter">Ayer</button>
+          <button className="stats-date-filter">Hoy</button>
+          <button className="stats-date-filter">Mañana</button>
+          <button className="stats-date-filter">Pasado mañana</button>
+        </div>
+
+        {/* GRID de tarjetas de partido */}
+        <div className="stats-matches-grid">
+          {picks.length === 0 ? (
+            <div className="stats-vacio">
+              <p>No hay partidos disponibles con los filtros seleccionados.</p>
+            </div>
+          ) : (
+            picks.map((p) => (
+              <article key={p.id} className="stats-match-card">
+                <div className="stats-match-header">
+                  <span className="stats-match-league">{p.league || "Copa del Rey"}</span>
+                  <span className="stats-match-status">{p.status || "FT"}</span>
+                </div>
+                <div className="stats-match-teams">
+                  <div className="stats-match-team stats-match-home">
+                    <span className="stats-match-flag">{p.homeFlag || "🏳️"}</span>
+                    <span className="stats-match-name">{p.homeName || p.eventName}</span>
+                    <span className="stats-match-score-home">{p.homeScore ?? p.scoreHome ?? "-"}</span>
+                  </div>
+                  <div className="stats-match-team stats-match-away">
+                    <span className="stats-match-score-away">{p.awayScore ?? p.scoreAway ?? "-"}</span>
+                    <span className="stats-match-name">{p.awayName || "vs"}</span>
+                    <span className="stats-match-flag">{p.awayFlag || "🏳️"}</span>
+                  </div>
+                </div>
+                <button className="stats-match-detalle">Ver detalle →</button>
+              </article>
+            ))
+          )}
         </div>
       </div>
-
-      {/* SECCION DE PICKS (tarjetas tipo Canzu Analytics, agrupadas por liga) */}
-      <div className="dash-league-list">
+    </div>
+  );
         {Object.entries(
           picks.reduce(
             (acc, p) => {

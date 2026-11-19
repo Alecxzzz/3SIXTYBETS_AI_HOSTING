@@ -120,6 +120,254 @@
   display: none;
 }
 
+/* ===== ESTADISTICAS EN VIVO (estilo Canzu Analytics) ===== */
+.stats-en-vivo {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.stats-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.stats-title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  margin: 0;
+}
+
+.stats-updated {
+  font-size: 0.72rem;
+  opacity: 0.5;
+  font-family: monospace;
+}
+
+/* Tabs de deportes */
+.stats-sport-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.stats-sport-tab {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.stats-sport-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stats-sport-tab.active {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  border-color: transparent;
+  color: #04140a;
+}
+
+/* Selector de ligas */
+.stats-league-select {
+  margin-bottom: 10px;
+}
+
+.stats-league-dropdown {
+  width: 100%;
+  max-width: 260px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+/* Filtros de estado */
+.stats-status-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.stats-status-filter {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.stats-status-filter:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stats-status-filter.active {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.stats-status-count {
+  opacity: 0.55;
+  margin-left: 4px;
+}
+
+/* Filtros de fecha */
+.stats-date-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.stats-date-filter {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.stats-date-filter:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stats-date-filter.active {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+/* GRID de tarjetas de partido */
+.stats-matches-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+/* Tarjeta de partido */
+.stats-match-card {
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0d0f1a;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stats-match-card:hover {
+  border-color: rgba(245, 197, 66, 0.25);
+}
+
+.stats-match-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.stats-match-league {
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+}
+
+.stats-match-status {
+  font-size: 0.72rem;
+  font-weight: 800;
+  opacity: 0.5;
+  color: #4ade80;
+}
+
+/* Equipos */
+.stats-match-teams {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.stats-match-team {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stats-match-team.stats-match-home {
+  flex-direction: row;
+}
+
+.stats-match-team.stats-match-away {
+  flex-direction: row-reverse;
+}
+
+.stats-match-flag {
+  font-size: 0.75rem;
+}
+
+.stats-match-name {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #e2e8f0;
+}
+
+.stats-match-score-home,
+.stats-match-score-away {
+  font-weight: 900;
+  font-size: 1.1rem;
+  color: #22c55e;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Boton ver detalle */
+.stats-match-detalle {
+  margin-top: 4px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #22c55e;
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.stats-match-detalle:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Vacío */
+.stats-vacio {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 40px 0;
+  opacity: 0.5;
+}
+
 /* Liga header tipo Canzu: BRA Brasileirão 3 */
 .dash-league-list {
   display: flex;
