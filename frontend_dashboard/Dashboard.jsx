@@ -279,13 +279,6 @@ export default function Dashboard() {
   if (error) return <div className="dash-error">No se pudo cargar el dashboard: {error}</div>;
   if (!data) return <div className="dash-loading">Cargando dashboard...</div>;
 
-  const picks =
-    vista === "dia"
-      ? data.pronosticos_del_dia || []
-      : vista === "manana"
-        ? data.pronosticos_manana || []
-        : data.pronosticos_acertados || [];
-
   const esGolden = (p) =>
     (p.tier || "") === "GOLDEN PICK" ||
     (p.odds != null && p.odds >= 1.35 && p.odds <= 1.4);
@@ -294,70 +287,12 @@ export default function Dashboard() {
     <div className="dashboard">
       {/* ===== ESTADISTICAS EN VIVO (estilo Canzu Analytics) ===== */}
       <div className="stats-en-vivo">
-        {/* Header: titulo y actualizacion */}
-        <div className="stats-header">
-          <h1 className="stats-title">Estadísticas en vivo</h1>
-          <span className="stats-updated">
-            Actualizado {new Date().toLocaleTimeString("es-ES", {
-              hour: "2-digit",
-              minute: "2-digit",
-            })} p. m. · auto cada 60s
-          </span>
-        </div>
+        {picks.length > 0 ? (
+          <>
+            {/* Seccion Hoy */}
+            <div className="stats-seccion-header">Hoy · {picks.length} partidos</div>
 
-        {/* Tabs de deportes */}
-        <div className="stats-sport-tabs">
-          <button className="stats-sport-tab active">⚽️ Futbol</button>
-          <button className="stats-sport-tab">🏀 NBA</button>
-          <button className="stats-sport-tab">⚾️ MLB</button>
-          <button className="stats-sport-tab">🏈 NFL</button>
-          <button className="stats-sport-tab">🎾 Tenis</button>
-          <button className="stats-sport-tab">🥊 MMA/UFC</button>
-        </div>
-
-        {/* Selector de ligas */}
-        <div className="stats-league-select">
-          <select className="stats-league-dropdown">
-            <option>Todas las ligas</option>
-            <option>Copa del Rey</option>
-            <option>LaLiga</option>
-            <option>Premier League</option>
-            <option>Serie A</option>
-            <option>Bundesliga</option>
-            <option>Ligue 1</option>
-            <option>Brasileirão</option>
-            <option>MLS</option>
-            <option>Liga MX</option>
-          </select>
-        </div>
-
-        {/* Filtros de estado */}
-        <div className="stats-status-filters">
-          <button className="stats-status-filter active">Todos (<span className="stats-status-count">48</span>)</button>
-          <button className="stats-status-filter">En vivo (<span className="stats-status-count">0</span>)</button>
-          <button className="stats-status-filter">Proximos (<span className="stats-status-count">36</span>)</button>
-          <button className="stats-status-filter">Finalizados (<span className="stats-status-count">12</span>)</button>
-        </div>
-
-        {/* Filtros de fecha */}
-        <div className="stats-date-filters">
-          <button className="stats-date-filter active">Todos los días</button>
-          <button className="stats-date-filter">Ayer</button>
-          <button className="stats-date-filter">Hoy</button>
-          <button className="stats-date-filter">Mañana</button>
-          <button className="stats-date-filter">Pasado mañana</button>
-        </div>
-
-        {/* Partidos agrupados por liga - estilo Canzu Analytics */}
-        <div className="stats-leagues">
-          {picks.length === 0 ? (
-            <div className="stats-vacio">
-              <p>No hay partidos disponibles con los filtros seleccionados.</p>
-            </div>
-          ) : (
-            <>
-              {/* Seccion Hoy */}
-              <div className="stats-seccion-header">Hoy · {picks.length} partidos</div>
+            <div className="stats-ligas">
               {Object.entries(
                 picks.reduce(
                   (acc, p) => {
@@ -366,7 +301,7 @@ export default function Dashboard() {
                     acc[key].push(p);
                     return acc;
                   },
-                  {} as Record<string, typeof picks>
+                  {}
                 )
               ).map(([liga, picksLiga]) => (
                 <div key={liga} className="stats-liga-card">
@@ -444,8 +379,8 @@ export default function Dashboard() {
               ))}
               {/* Seccion Manana */}
               <div className="stats-seccion-header">Mañana · {picks.length} partidos</div>
-            </>
-          )}
+            </div>
+          </>)}
         </div>
       </div>
     </div>
