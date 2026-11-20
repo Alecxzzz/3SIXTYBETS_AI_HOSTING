@@ -348,151 +348,105 @@ export default function Dashboard() {
           <button className="stats-date-filter">Pasado mañana</button>
         </div>
 
-        {/* GRID de tarjetas de partido */}
-        <div className="stats-matches-grid">
+        {/* Partidos agrupados por liga - estilo Canzu Analytics */}
+        <div className="stats-leagues">
           {picks.length === 0 ? (
             <div className="stats-vacio">
               <p>No hay partidos disponibles con los filtros seleccionados.</p>
             </div>
           ) : (
-            picks.map((p) => (
-              <article key={p.id} className="stats-match-card">
-                <div className="stats-match-header">
-                  <span className="stats-match-league">{p.league || "Copa del Rey"}</span>
-                  <span className="stats-match-status">{p.status || "FT"}</span>
-                </div>
-                <div className="stats-match-teams">
-                  <div className="stats-match-team stats-match-home">
-                    <span className="stats-match-flag">{p.homeFlag || "🏳️"}</span>
-                    <span className="stats-match-name">{p.homeName || p.eventName}</span>
-                    <span className="stats-match-score-home">{p.homeScore ?? p.scoreHome ?? "-"}</span>
+            <>
+              {/* Seccion Hoy */}
+              <div className="stats-seccion-header">Hoy · {picks.length} partidos</div>
+              {Object.entries(
+                picks.reduce(
+                  (acc, p) => {
+                    const key = p.league || "Sin liga";
+                    if (!acc[key]) acc[key] = [];
+                    acc[key].push(p);
+                    return acc;
+                  },
+                  {} as Record<string, typeof picks>
+                )
+              ).map(([liga, picksLiga]) => (
+                <div key={liga} className="stats-liga-card">
+                  <div className="stats-liga-header">
+                    <button className="stats-liga-toggle" onClick={() => {}}>
+                      <span className="stats-liga-code">{liga.slice(0, 3)}</span>
+                      <span className="stats-liga-name">{liga}</span>
+                      <span className="stats-liga-count">{picksLiga.length}</span>
+                      <span className="stats-liga-arrow">▾</span>
+                    </button>
                   </div>
-                  <div className="stats-match-team stats-match-away">
-                    <span className="stats-match-score-away">{p.awayScore ?? p.scoreAway ?? "-"}</span>
-                    <span className="stats-match-name">{p.awayName || "vs"}</span>
-                    <span className="stats-match-flag">{p.awayFlag || "🏳️"}</span>
+                  <div className="stats-liga-matches">
+                    {picksLiga.map((p) => (
+                      <article key={p.id} className="stats-partido">
+                        <div className="stats-partido-row">
+                          <span className="stats-partido-time">{p.eventTime || p.date || "—"}</span>
+                          <div className="stats-partido-equipos">
+                            <div className="stats-partido-equipo stats-partido-home">
+                              <span className="stats-partido-logo">{p.homeFlag || "🏳️"}</span>
+                              <span className="stats-partido-nombre">{p.homeName || p.eventName}</span>
+                            </div>
+                            <div className="stats-partido-equipo stats-partido-away">
+                              <span className="stats-partido-nombre">{p.awayName || "vs"}</span>
+                              <span className="stats-partido-logo">{p.awayFlag || "🏳️"}</span>
+                            </div>
+                          </div>
+                          <div className="stats-partido-cuotas">
+                            {p.homeOdds ? (
+                              <>
+                                <span className="stats-cuota">{p.homeOdds}</span>
+                                <span className="stats-cuota">X {p.drawOdds}</span>
+                                <span className="stats-cuota">{p.awayOdds}</span>
+                              </>
+                            ) : (
+                              <span className="stats-cuota">{p.odds}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="stats-partido-stats">
+                          <span className="stats-stat-chip">
+                            <span className="stats-stat-val">{p.o25 ?? "+2.5"}</span>
+                            <span className="stats-stat-lbl">{p.o25pct ?? "47%"}</span>
+                          </span>
+                          <span className="stats-stat-chip">
+                            <span className="stats-stat-lbl">AM</span>
+                            <span className="stats-stat-val">{p.amPct ?? "52%"}</span>
+                          </span>
+                          {p.corners ? (
+                            <span className="stats-stat-chip">
+                              <span className="stats-stat-lbl">Corners</span>
+                              <span className="stats-stat-val">{p.corners}</span>
+                            </span>
+                          ) : (
+                            <span className="stats-stat-chip stats-stat-chip-empty">
+                              <span className="stats-stat-lbl">Corners</span>
+                              <span className="stats-stat-val">—</span>
+                            </span>
+                          )}
+                          {p.cards ? (
+                            <span className="stats-stat-chip">
+                              <span className="stats-stat-lbl">Tarjetas</span>
+                              <span className="stats-stat-val">{p.cards}</span>
+                            </span>
+                          ) : (
+                            <span className="stats-stat-chip stats-stat-chip-empty">
+                              <span className="stats-stat-lbl">Tarjetas</span>
+                              <span className="stats-stat-val">—</span>
+                            </span>
+                          )}
+                        </div>
+                      </article>
+                    ))}
                   </div>
                 </div>
-                <button className="stats-match-detalle">Ver detalle →</button>
-              </article>
-            ))
+              ))}
+              {/* Seccion Manana */}
+              <div className="stats-seccion-header">Mañana · {picks.length} partidos</div>
+            </>
           )}
         </div>
-      </div>
-    </div>
-  );
-        {Object.entries(
-          picks.reduce(
-            (acc, p) => {
-              const key = p.league || "Sin liga";
-              if (!acc[key]) acc[key] = [];
-              acc[key].push(p);
-              return acc;
-            },
-            {} as Record<string, typeof picks>
-          )
-        ).map(([liga, picksLiga]) => (
-          <div key={liga} className="dash-league">
-            <div className="dash-league-header">
-              <span className="dash-league-flag">{liga.slice(0, 3)}</span>
-              <span className="dash-league-name">{liga}</span>
-              <span className="dash-league-count">{picksLiga.length}</span>
-            </div>
-            <div className="dash-league-matches">
-              {picksLiga.map((p) => (
-                <article
-                  key={p.id}
-                  className={`dash-match-card${esGolden(p) ? " golden" : ""}${
-                    p.result === "ACIERTO" ? " acierto" : ""
-                  }`}
-                >
-                  <div className="dash-match-head">
-                    <span className="dash-match-time">{p.eventTime || p.date || "—"}</span>
-                    <div className="dash-match-teams">
-                      <div className="dash-match-team">
-                        <span className="dash-match-flag">{p.homeFlag || "🏳️"}</span>
-                        <span className="dash-match-name">{p.homeName || p.eventName}</span>
-                      </div>
-                      <div className="dash-match-team dash-match-away">
-                        <span className="dash-match-name">{p.awayName || "vs"}</span>
-                        <span className="dash-match-flag">{p.awayFlag || "🏳️"}</span>
-                      </div>
-                    </div>
-                  </div>
-                  {p.score ? (
-                    <span className="dash-match-score">{p.score}</span>
-                  ) : (
-                    <div className="dash-match-odds"><span>{p.odds}</span></div>
-                  )}
-                  <div className="dash-match-stats">
-                    <span className="dash-match-stat">
-                      <span className="dash-match-stat-value">{p.o25 ?? "+2.5"}</span>
-                      <span className="dash-match-stat-label">{p.o25pct ?? "47%"}</span>
-                    </span>
-                    <span className="dash-match-stat">
-                      <span className="dash-match-stat-label">AM</span>
-                      <span className="dash-match-stat-value">{p.amPct ?? "52%"}</span>
-                    </span>
-                    {p.corners ? (
-                      <span className="dash-match-stat">
-                        <span className="dash-match-stat-label">Corners</span>
-                        <span className="dash-match-stat-value">{p.corners}</span>
-                      </span>
-                    ) : null}
-                    {p.cards ? (
-                      <span className="dash-match-stat">
-                        <span className="dash-match-stat-label">Tarjetas</span>
-                        <span className="dash-match-stat-value">{p.cards}</span>
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="dash-match-pick">
-                    <span className="dash-match-pick-title">{p.market}</span>
-                    <span className="dash-match-pick-value">{p.selection}</span>
-                  </div>
-                  {esGolden(p) ? <span className="dash-match-golden">GOLDEN PICK</span> : null}
-                  {p.result === "ACIERTO" ? <span className="dash-match-acierto">✅ ACIERTO</span> : null}
-                  <div className="dash-match-actions">
-                    <button
-                      type="button"
-                      className={`dash-fav${favoritos.has(String(p.id)) ? " es-fav" : ""}`}
-                      onClick={() => alternarFavorito(p)}
-                      disabled={!!favCargando[String(p.id)]}
-                      title={favoritos.has(String(p.id)) ? "Quitar de favoritos" : "Guardar en favoritos"}
-                      aria-label={favoritos.has(String(p.id)) ? "Quitar de favoritos" : "Guardar en favoritos"}
-                      aria-pressed={favoritos.has(String(p.id))}
-                    >
-                      {favoritos.has(String(p.id)) ? "★" : "☆"}
-                    </button>
-                    <button
-                      className="dash-analyze"
-                      disabled={analizando === p.id || !p.eventId}
-                      onClick={() => ejecutarAnalisis(p)}
-                    >
-                      {analizando === p.id ? "Analizando con IA…" : analisis[p.id] ? "Volver a analizar" : "Analizar con IA"}
-                    </button>
-                  </div>
-                  {errorAnalisis[p.id] ? <p className="dash-analysis-error">{errorAnalisis[p.id]}</p> : null}
-                  {analisis[p.id] ? <div className="dash-analysis">{analisis[p.id]}</div> : null}
-                  <button
-                    className="dash-share"
-                    disabled={compartiendo === p.id}
-                    onClick={async () => {
-                      setCompartiendo(p.id);
-                      try {
-                        await compartirCarta(p);
-                      } finally {
-                        setCompartiendo(null);
-                      }
-                    }}
-                  >
-                    {compartiendo === p.id ? "Generando foto…" : "Compartir carta"}
-                  </button>
-                </article>
-              ))}
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );
