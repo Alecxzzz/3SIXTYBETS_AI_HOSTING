@@ -3634,10 +3634,14 @@ def pagina_estadisticas(sport: str = "nba", event_id: str = "",
 
 
 @app.get("/stats/game")
-def stats_game(sport: str, event_id: str, user=Depends(get_current_user)):
-    """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores."""
+def stats_game(sport: str, event_id: str, league: str = None, user=Depends(get_current_user)):
+    """Detalle de un partido: marcador, linescores, estadisticas, H2H, jugadores.
+
+    `league` es el codigo ESPN (ej. esp.1): sin el, un partido ya jugado no
+    esta en el scoreboard de hoy y no se podria abrir desde el historial.
+    """
     try:
-        return sports.get_game_detail(sport, event_id)
+        return sports.get_game_detail(sport, event_id, league_code=league)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:

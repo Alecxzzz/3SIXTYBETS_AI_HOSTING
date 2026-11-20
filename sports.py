@@ -690,6 +690,7 @@ def _evento_a_partido(ev: dict) -> dict | None:
     if "home" not in tmap or "away" not in tmap:
         return None
     return {
+        "id": str(ev.get("id") or ""),
         "date": comp.get("date") or ev.get("date"),
         "status": (comp.get("status") or {}).get("type", {}).get("shortDetail", ""),
         "home": tmap["home"],
@@ -1325,6 +1326,7 @@ def _parse_head_to_head(data: dict) -> list:
             }
         status = comp.get("status", {})
         h2h.append({
+            "id": str(item.get("id") or ""),
             "date": comp.get("date"),
             "status": status.get("type", {}).get("shortDetail", ""),
             "home": teams.get("home", {}),
@@ -1345,6 +1347,7 @@ def _parse_head_to_head(data: dict) -> list:
                     "winner": c.get("winner"),
                 }
             h2h.append({
+                "id": str(event.get("id") or ""),
                 "date": event.get("date"),
                 "status": (event.get("statusType") or {}).get("shortDetail", ""),
                 "home": teams.get("home", {}),
