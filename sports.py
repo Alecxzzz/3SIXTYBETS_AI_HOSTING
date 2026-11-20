@@ -603,6 +603,13 @@ def get_team_recent_events(sport: str, league: str | None, team_id, limit: int =
     if cached is not None:
         return cached
 
+    # Primero el calendario del equipo: una peticion y la temporada entera.
+    calendario = get_team_schedule_events(sport, league, team_id)
+    if len(calendario) >= min(limit, 3):
+        out = calendario[-limit:]
+        _cache_set(cache_key, out)
+        return out
+
     today = datetime.now(timezone.utc)
     # ESPN ya no acepta rangos (dates=A-B -> 400): una peticion por dia en
     # paralelo, ultimos 21 dias (suficiente para 6 partidos finalizados).
@@ -655,25 +662,141 @@ def get_team_recent_events(sport: str, league: str | None, team_id, limit: int =
     return events
 
 
+def _marcador_competidor(c: dict):
+    """Puntuacion de un competidor: numero, texto u objeto de ESPN.
+
+    En el calendario de futbol el marcador llega como objeto
+    ({displayValue, value}) y antes se perdia.
+    """
+    score = c.get("score")
+    if isinstance(score, dict):
+        score = score.get("displayValue", score.get("value"))
+    return _parse_number(score)
+
+
+def _evento_a_partido(ev: dict) -> dict | None:
+    """Normaliza un evento crudo de ESPN al formato de 'ultimos partidos'."""
+    comp = (ev.get("competitions") or [{}])[0]
+    tmap = {}
+    for c in comp.get("competitors", []):
+        team = c.get("team") or {}
+        tmap[c.get("homeAway")] = {
+            "name": team.get("displayName", "?"),
+            "abbr": team.get("abbreviation", ""),
+            "logo": team.get("logo"),
+            "score": _marcador_competidor(c),
+            "winner": c.get("winner"),
+        }
+    if "home" not in tmap or "away" not in tmap:
+        return None
+    return {
+        "date": comp.get("date") or ev.get("date"),
+        "status": (comp.get("status") or {}).get("type", {}).get("shortDetail", ""),
+        "home": tmap["home"],
+        "away": tmap["away"],
+    }
+
+
 def _recent_from_events(events: list) -> list:
     """Convierte eventos crudos de ESPN al formato recent_games del detalle."""
     recent = []
-    for ev in events:
-        comp0 = (ev.get("competitions") or [{}])[0]
-        tmap = {}
-        for c in comp0.get("competitors", []):
-            tmap[c.get("homeAway")] = {
-                "name": (c.get("team") or {}).get("displayName", "?"),
-                "score": _parse_number(c.get("score")),
-                "winner": c.get("winner"),
-            }
-        recent.append({
-            "date": ev.get("date"),
-            "status": (comp0.get("status") or {}).get("type", {}).get("shortDetail", ""),
-            "home": tmap.get("home", {}),
-            "away": tmap.get("away", {}),
-        })
+    for ev in events or []:
+        partido = _evento_a_partido(ev)
+        if partido:
+            recent.append(partido)
     return recent
+
+
+def _clave_partido(g: dict) -> tuple:
+    return (
+        (g.get("date") or "")[:16],
+        ((g.get("home") or {}).get("name") or ""),
+        ((g.get("away") or {}).get("name") or ""),
+    )
+
+
+def _unir_partidos(base: list, extra: list, limit: int = 5) -> list:
+    """Une dos listas de partidos sin duplicar y del mas reciente al mas viejo."""
+    out, vistos = [], set()
+    for g in (base or []) + (extra or []):
+        k = _clave_partido(g)
+        if k in vistos:
+            continue
+        vistos.add(k)
+        out.append(g)
+    out.sort(key=lambda g: g.get("date") or "", reverse=True)
+    return out[:limit]
+
+
+def get_team_schedule_events(sport: str, league: str | None, team_id,
+                             limit: int | None = None,
+                             season: int | None = None) -> list:
+    """Calendario del equipo en la temporada, en una sola peticion a ESPN.
+
+    El resumen de ESPN suele traer solo 1-3 partidos previos y el barrido del
+    scoreboard se limita a 21 dias, asi que en futbol el detalle se quedaba
+    con dos resultados. El calendario trae la temporada completa y alimenta
+    tanto los ultimos partidos como el historial H2H.
+    """
+    path, _label = SPORTS[sport]
+    cache_key = f"team_sched:{sport}:{league or ''}:{team_id}:{season or 'now'}"
+    cached = _cache_get(cache_key, ttl=1800)
+    if cached is None:
+        url = (
+            f"{ESPN_BASE}/{path}/{league}/teams/{team_id}/schedule"
+            if (league and path.startswith("soccer"))
+            else f"{ESPN_BASE}/{path}/teams/{team_id}/schedule"
+        )
+        try:
+            data = _espn_get(url, params={"season": season} if season else None).json()
+        except Exception as exc:
+            print(f"[Recent] calendario team={team_id}: {exc!r}", flush=True)
+            data = {}
+        finalizados = []
+        for ev in data.get("events") or []:
+            comp = (ev.get("competitions") or [{}])[0]
+            if (comp.get("status") or {}).get("type", {}).get("state") != "post":
+                continue
+            finalizados.append(ev)
+        finalizados.sort(key=lambda e: e.get("date") or "")
+        cached = finalizados
+        _cache_set(cache_key, cached)
+    return cached[-limit:] if limit else cached
+
+
+def get_team_history_events(sport: str, league: str | None, team_id,
+                            seasons: int = 1) -> list:
+    """Calendario del equipo: temporada actual y las `seasons` anteriores.
+
+    El calendario de una sola temporada deja pocos cruces H2H (en MLS se
+    juegan uno o dos por ano); sumar temporadas anteriores da historial real.
+    """
+    from datetime import datetime as _dt
+    anio = _dt.now().year
+    eventos, vistos = [], set()
+    # La temporada en curso puede ser anio+1 (NBA/NFL cruzan el ano):
+    # en noviembre la 2026-27 ya cuenta como 2027 en ESPN.
+    for s in range(anio + 1, anio - seasons - 1, -1):
+        for ev in get_team_schedule_events(sport, league, team_id, season=s):
+            eid = str(ev.get("id"))
+            if eid in vistos:
+                continue
+            vistos.add(eid)
+            eventos.append(ev)
+    eventos.sort(key=lambda e: e.get("date") or "")
+    return eventos
+
+
+def _h2h_calendario(sport: str, league: str | None, team_ids: list) -> list:
+    """Cruces entre dos equipos segun el calendario de la temporada."""
+    ids = [str(t) for t in team_ids if t]
+    if len(ids) < 2:
+        return []
+    uno = {str(ev.get("id")): ev for ev in get_team_history_events(sport, league, ids[0], seasons=2)}
+    otro = {str(ev.get("id")) for ev in get_team_history_events(sport, league, ids[1], seasons=2)}
+    comunes = [ev for eid, ev in uno.items() if eid in otro]
+    comunes.sort(key=lambda e: e.get("date") or "")
+    return _recent_from_events(comunes[-10:])
 
 
 def _linescores(competitor: dict) -> list:
@@ -1229,6 +1352,7 @@ def _parse_recent_games(data: dict) -> dict:
                     "winner": c.get("winner"),
                 }
             recent.append({
+                "id": str(event.get("id") or ""),
                 "date": comp.get("date"),
                 "status": comp.get("status", {}).get("type", {}).get("shortDetail", ""),
                 "home": teams.get("home", {}),
@@ -2357,16 +2481,40 @@ def get_game_detail(sport: str, event_id: str, league_code: str | None = None) -
                 print(f"[Detail] promedios team={t.get('id')}: {exc!r}", flush=True)
                 t["promedios"] = []
 
-    # Backfill: si el summary no trae ultimos partidos (pasa en futbol),
-    # buscarlos via scoreboard por rango de fechas.
+    # Backfill: el summary de ESPN trae pocos (o ninguno) partidos previos.
+    # Se completa con el calendario del equipo para que siempre haya historial.
+    actual = _evento_a_partido({"competitions": [comp]})
+    clave_actual = _clave_partido(actual) if actual else None
     for t in teams_out:
-        if t.get("recent_games"):
-            continue
         try:
-            evs = get_team_recent_events(sport, league_code, t["id"], limit=5)
-            t["recent_games"] = _recent_from_events(evs)[:5]
+            evs = [
+                e for e in get_team_history_events(sport, league_code, t["id"], seasons=1)[-14:]
+                if str(e.get("id")) != str(event_id)
+            ]
+            previos = [
+                g for g in (t.get("recent_games") or [])
+                if str(g.get("id") or "") != str(event_id) and _clave_partido(g) != clave_actual
+            ]
+            extra = [
+                g for g in _recent_from_events(evs) if _clave_partido(g) != clave_actual
+            ]
+            t["recent_games"] = _unir_partidos(previos, extra, limit=5)
         except Exception as e:
-            print(f"[Detail] recent backfill team={t.get('id')}: {e}")
+            print(f"[Detail] recent backfill team={t.get('id')}: {e!r}", flush=True)
+
+    # H2H: el summary suele traer solo los cruces mas recientes (a veces uno).
+    # Se completan con los partidos que comparten ambos equipos en el calendario.
+    try:
+        extra_h2h = _h2h_calendario(
+            sport, league_code, [t.get("id") for t in teams_out]
+        )
+        h2h = _unir_partidos(
+            [g for g in h2h if _clave_partido(g) != clave_actual],
+            [g for g in extra_h2h if str(g.get("id") or "") != str(event_id)],
+            limit=8,
+        )
+    except Exception as e:
+        print(f"[Detail] h2h backfill: {e!r}", flush=True)
 
     result = {
         "sport": sport,
