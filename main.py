@@ -5302,6 +5302,16 @@ FREE_ESPN_STREAM_URL = "https://tinyurl.com/SaSha-48/30063/index.m3u8"  # ESPN D
 #                                       IP y la fuente responde 403)
 FREE_ESPN_EVENTOS = [
     {
+        # LaLiga: Real Madrid vs Celta Vigo (2026-11-21 20:00Z = 21:00 CET).
+        # OJO: ESPN lo publica como "Real Madrid vs Celta Vigo" (Madrid local).
+        "match": ("real madrid", "celta"),
+        "league": "esp.1",
+        "opciones": [
+            {"label": "STREAM 1", "url": "https://bigboss.bemtv.cn/STREAM/732/playlist.m3u8"},
+            {"label": "OPCION 2", "url": "http://190.61.47.54:8000/play/a005/index.m3u8"},
+        ],
+    },
+    {
         # NBA: Boston Celtics vs Philadelphia 76ers (2026-11-11 01:00Z = 20:00 ET).
         # OJO: ESPN lo publica como "Boston Celtics at Philadelphia 76ers"
         # (76ers local).
@@ -5669,6 +5679,10 @@ def free_espn_match(request: Request):
         "periodo": detail.get("period"),
         "liga": detail.get("league") or game.get("league") or "LaLiga",
         "event_id": str(game.get("id")),
+        # Deporte y codigo de liga ESPN del evento: /espn-gratis los usa para
+        # pedir la alineacion, las estadisticas y el tracker de FotMob.
+        "sport": game.get("_sport") or FREE_ESPN_SPORT,
+        "league_code": game.get("_liga"),
         "teams": teams,
         # Boxscore EN VIVO (una entrada por equipo, con sus jugadores). Vacio
         # antes del salto inicial: la pagina lo oculta hasta que empieza.
@@ -5680,6 +5694,70 @@ def free_espn_match(request: Request):
             "planes": get_pagadito_plans(),
         },
     }
+
+
+def _free_espn_stats_partido():
+    """(event_id, sport, liga) del partido gratis que toca ahora (o None)."""
+    game = _free_espn_buscar_partido()
+    if not game:
+        return None
+    return str(game.get("id")), (game.get("_sport") or FREE_ESPN_SPORT), game.get("_liga")
+
+
+# --- FotMob para /espn-gratis (publico, limitado al partido programado) ---
+# La pagina se ve SIN cuenta, asi que no puede usar /stats/* (requieren login).
+# Estos tres endpoints reutilizan esa misma logica, pero el partido NO lo elige
+# el cliente: sale de FREE_ESPN_EVENTOS, asi que solo exponen el destacado.
+
+def _free_espn_sin_partido():
+    return {
+        "ok": False,
+        "motivo": "sin_partido",
+        "detalle": "No hay partido programado ahora mismo.",
+    }
+
+
+@app.get("/tv-live/alineacion")
+def free_espn_alineacion(request: Request):
+    """Alineacion de FotMob (oficial o once probable) del partido gratis."""
+    _rate_limit(f"tv-alineacion:{_ip_del_cliente(request)}", 240, 3600)
+    partido = _free_espn_stats_partido()
+    if not partido:
+        return _free_espn_sin_partido()
+    event_id, sport, liga = partido
+    if sport != "soccer":
+        return {
+            "ok": False,
+            "motivo": "sin_cobertura",
+            "detalle": "Las alineaciones solo estan disponibles para futbol.",
+        }
+    return stats_alineacion(event_id=event_id, sport=sport, league=liga)
+
+
+@app.get("/tv-live/tracker")
+def free_espn_tracker(request: Request):
+    """Tracker de Opta (FotMob) del partido gratis."""
+    _rate_limit(f"tv-tracker:{_ip_del_cliente(request)}", 240, 3600)
+    partido = _free_espn_stats_partido()
+    if not partido:
+        return _free_espn_sin_partido()
+    event_id, sport, liga = partido
+    if sport != "soccer":
+        return {"ok": False, "motivo": "sin_cobertura", "detalle": "Solo futbol."}
+    return stats_tracker(event_id=event_id, sport=sport, league=liga)
+
+
+@app.get("/tv-live/estadisticas")
+def free_espn_estadisticas(request: Request):
+    """Estadisticas de FotMob (momentum, comparativa, timeline) del partido gratis."""
+    _rate_limit(f"tv-estadisticas:{_ip_del_cliente(request)}", 240, 3600)
+    partido = _free_espn_stats_partido()
+    if not partido:
+        return _free_espn_sin_partido()
+    event_id, sport, liga = partido
+    if sport != "soccer":
+        return {"ok": False, "motivo": "sin_cobertura", "detalle": "Solo futbol."}
+    return stats_estadisticas(event_id=event_id, sport=sport, league=liga)
 
 
 @app.get("/tv-live/stream")
