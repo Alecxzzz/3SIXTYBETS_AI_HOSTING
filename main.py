@@ -209,10 +209,13 @@ TV_ESCAPARATE_PUBLICO = os.getenv(
 # video no siempre llevan cabeceras/cookies como el resto de la API y (2) su
 # protección real la aplica el propio endpoint via TV_EXIGIR_STREAM / _exigir_acceso_tv
 # (y hosts públicos del escaparate). Se dejan pasar aquí y el handler decide.
-RUTAS_PUBLICAS_PREFIJOS = ["/live"]
-if TV_ESCAPARATE_PUBLICO:
-    RUTAS_PUBLICAS_PREFIJOS.append("/tv-live")
-RUTAS_PUBLICAS_PREFIJOS = tuple(RUTAS_PUBLICAS_PREFIJOS)
+# /tv-live/* es el escaparate de /espn-gratis: el partido destacado, sus dos
+# senales y las alineaciones/estadisticas/tracker de FotMob. Va ABIERTO SIEMPRE
+# (sin depender de TV_ESCAPARATE_PUBLICO) porque esa pagina se vende como gancho
+# sin cuenta: si pide sesion, el visitante nuevo no ve nada. Lo que protege es
+# el propio endpoint: rate limit por IP y el partido sale de FREE_ESPN_EVENTOS,
+# nunca de un event_id que elija el cliente.
+RUTAS_PUBLICAS_PREFIJOS = ("/live", "/tv-live")
 
 
 def _ruta_publica(path: str) -> bool:
