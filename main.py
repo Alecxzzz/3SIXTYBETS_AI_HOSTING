@@ -5396,6 +5396,18 @@ FREE_ESPN_EVENTOS = [
             {"label": "SKY SPORTS", "url": "http://190.61.101.11:7050/play/a04g/index.m3u8"},
         ],
     },
+    {
+        # Miss Universo 2026 (WAPA-TV Puerto Rico)
+        "sport": "especiales",
+        "match": ("miss universo", "universo"),
+        "opciones": [
+            {
+                "label": "WAPA-TV 4.1",
+                "url": "/live/index.m3u8?url=https%3A%2F%2Fwapa-updater.onrender.com%2FWAPA-TV-4-1.m3u8",
+                "embed": False,
+            },
+        ],
+    },
 ]
 
 

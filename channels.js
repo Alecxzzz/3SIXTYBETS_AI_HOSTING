@@ -1,32 +1,27 @@
-// Canales extraídos del frontend (dist) — mismos objetos que devuelve /channels del backend.
-// Ordenados alfabéticamente por nombre.
-//
-// CDN LIVE TV (dinámicos): los canales de cdnlivetv.tv NO llevan token fijo en el
-// stream — el backend resuelve el token fresco en cada sintonizada vía
-// /tv/cdnlivetv/{canal}/{codigo} y entrega el stream por el /hls-proxy existente.
-// CDN_API_BASE: déjalo vacío si el frontend se sirve desde el MISMO dominio que el
-// backend (Northflank). Si el frontend vive en otro dominio (ej. Vercel), pon aquí
-// la URL pública del backend, ej: "https://tu-servicio.northflank.app"
+// Canales filtrados — solo los que respondieron HTTP 200 en prueba masiva con curl
+// Canales caídos fueron ELIMINADOS de esta lista.
 const CDN_API_BASE = "";
 
-export const channels = [
   {id: 1, name: "ANALISTAS TV (EN INGLES)", status: "ACTIVO", ads: false, stream: "https://sportsgrid-plex.amagi.tv/playlist720p.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
-  {id: 2, name: "BEIN 1", status: "ACTIVO", ads: false, stream: "https://1nyaler.streamhostingcdn.top/stream/23/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
   {id: 3, name: "BEIN SPORTS EXTRA Ñ (español)", status: "ACTIVO", ads: false, stream: "https://aegis-cloudfront-1.tubi.video/01f6c149-449b-4248-8bda-2278799205ec/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
   {id: 4, name: "BEIN SPORTS XTRA (ingles)", status: "ACTIVO", ads: false, stream: "https://bein-beinxtrasports-firetv.amagi.tv/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 68, name: "BEIN SPORTS USA", status: "ACTIVO", ads: false, stream: "https://bigboss.bemtv.cn/STREAM/1716/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/united-states/bein-sports-us.png", alternatives: []},
-  {id: 56, name: "CANAL 4 (JUEGOS MLB)", status: "ACTIVO", ads: false, stream: "http://45.228.234.9:8000/play/a07r/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
-  {id: 5, name: "CANAL AMERICA", status: "ACTIVO", ads: false, stream: "http://38.252.215.33:8000/play/a006/10833287.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
-  {id: 6, name: "CBS SPORT GOLAZO", status: "ACTIVO", ads: false, stream: "https://tvsen3.aynaott.com/34fJSjZP/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 8, name: "CLARO SPORTS", status: "ACTIVO", ads: false, stream: "https://d1seb4wyirpp71.cloudfront.net/live/75898381-5c0a-4506-8ce0-98959aed7356/live.isml/live-audio_0=96000-video=2000000.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
+  {id: 53, name: "ESPN DEPORTES HD", status: "ACTIVO", ads: false, stream: "https://bigboss.bemtv.cn/STREAM/732/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/united-states/hd/espn-deportes-hd-us.png", alternatives: ["https://tinyurl.com/SaSha-48/30063/index.m3u8"]},
+  {id: 19, name: "GOLAZO NETWORK", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-63a0e33a45264d000850ed7e.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 74, name: "TNT SPORTS", status: "ACTIVO", ads: false, stream: "https://bigboss.bemtv.cn/STREAM/412/playlist.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/argentina/tnt-sports-ar.png", alternatives: []},
+  {id: 25, name: "NFL CHANNEL", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-5ced7d5df64be98e07ed47b6.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 15, name: "FOX SPORTS", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-5a74b8e1e22a61737979c6bf.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 7, name: "CBS UEFA CHAMPIONS LEAGUE", status: "ACTIVO", ads: false, stream: "https://jmp2.uk/plu-65ea8b928145cb0008509426.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
-  {id: 8, name: "CLARO SPORTS", status: "ACTIVO", ads: false, stream: "https://d1seb4wyirpp71.cloudfront.net/live/75898381-5c0a-4506-8ce0-98959aed7356/live.isml/live-audio_0=96000-video=2000000.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: ["http://138.59.177.78:9999/play/a0ey/index.m3u8"]},
-  {id: 40, name: "CLARO SPORTS 2", status: "ACTIVO", ads: false, stream: "http://168.196.127.137:6001/play/a09d/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
-  {id: 69, name: "DAZN1", status: "ACTIVO", ads: false, stream: "http://50.7.120.34:8080/DAZN1/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/international/dazn-int.png", alternatives: []},
-  {id: 70, name: "DAZN_3", status: "ACTIVO", ads: false, stream: "http://23.237.104.106:8080/DAZN_3/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/international/dazn-int.png", alternatives: []},
-  {id: 71, name: "DAZN_4", status: "ACTIVO", ads: false, stream: "http://23.237.104.106:8080/DAZN_4/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/international/dazn-int.png", alternatives: []},
-  {id: 72, name: "DAZN_5", status: "ACTIVO", ads: false, stream: "http://23.237.104.106:8080/DAZN_5/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/international/dazn-int.png", alternatives: []},
-  {id: 62, name: "DIRECTV SPORTS", status: "ACTIVO", ads: false, stream: "http://181.224.255.210:8001/play/a0s8/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/world-latin-america/dsports-lam.png", alternatives: []},
-  {id: 60, name: "DSPORTS 1", status: "ACTIVO", ads: false, stream: "http://38.252.215.33:8000/play/a00q/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: ["http://181.224.255.210:8001/play/a0s8/index.m3u8"]},
+  {id: 52, name: "SKY SPORTS NFL", status: "ACTIVO", ads: false, stream: "http://stream.bottledesk.net/p/AQNASgYGemc/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
+  {id: 28, name: "SKY SPORTS PREMIER LEAGUE", status: "ACTIVO", ads: false, stream: "http://stream.bottledesk.net/p/AAxBRQEBc2c/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
+  {id: 26, name: "NHL NETWORK", status: "ACTIVO", ads: false, stream: "https://nhl-firetv.amagi.tv/playlist.m3u8", type: "m3u8", geoRestriction: "USA", useProxy: true, alternatives: []},
+  {id: 51, name: "NYMSPORTS", status: "ACTIVO", ads: false, stream: "https://thm-it-roku.otteravision.com/thm/it/it.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 64, name: "FOX DEPORTES 2 ESPAÑOL", status: "ACTIVO", ads: false, stream: "http://138.59.177.78:9999/play/a081/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/united-states/fox-sports-deportes-us.png", alternatives: []},
+  {id: 55, name: "SKY SPORTS", status: "ACTIVO", ads: false, stream: "http://45.228.234.9:8000/play/a06b/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
+  {id: 39, name: "EUROSPORT 2", status: "ACTIVO", ads: false, stream: "http://200.115.120.1:8000/play/ca119/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []}
+];
+export default channels;
   {id: 61, name: "DSPORTS 2", status: "ACTIVO", ads: false, stream: "http://38.252.215.33:8000/play/a00r/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
 {id: 9, name: "ESPN 1", status: "ACTIVO", ads: false, stream: "http://45.228.234.9:8000/play/a05c/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: ["http://138.59.177.78:9999/play/a003/index.m3u8", "http://190.61.47.54:8000/play/a004/index.m3u8"]},
   {id: 10, name: "ESPN 2", status: "ACTIVO", ads: false, stream: "http://45.228.234.9:8000/play/a05g/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: ["http://38.252.215.33:8000/play/a00k/index.m3u8", "http://45.228.234.9:8000/play/a05g/index.m3u8", "http://190.61.47.54:8000/play/a005/index.m3u8", "http://45.228.234.9:8000/play/a05c/index.m3u8", "http://181.224.255.210:8001/play/a0pt/index.m3u8", "http://138.59.177.78:9999/play/a004/index.m3u8"]},
@@ -69,6 +64,7 @@ export const channels = [
   {id: 48, name: "UNIVISION", status: "ACTIVO", ads: false, stream: "https://5.ftlly.com/univision/mono.m3u8?token=8f7adfc81324276a4702734417807edd2bf03da9-9d-1788727751-1788709751", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
   {id: 42, name: "USA SPORTS", status: "ACTIVO", ads: false, stream: "https://tvsen3.aynaott.com/dbbcY6NG/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, alternatives: []},
   {id: 35, name: "WIN SPORTS", status: "ACTIVO", ads: false, stream: "http://168.228.44.241:9998/play/a03o/index.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: false, alternatives: []},
+  {id: 90, name: "MISS UNIVERSO 2026", status: "ACTIVO", ads: false, stream: "https://wapa-updater.onrender.com/WAPA-TV-4-1.m3u8", type: "m3u8", geoRestriction: "NONE", useProxy: true, logo: "https://upload.wikimedia.org/wikipedia/commons/thumb/6/65/Miss_Universe_logo.svg/1200px-Miss_Universe_logo.svg.png", alternatives: []},
   ];
 
 export default channels;
