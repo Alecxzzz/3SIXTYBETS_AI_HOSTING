@@ -230,6 +230,34 @@ def buscar_jugador(jugadores: list, nombre: str):
 # ------------------------------------------------- gameLog (ESPN y statsapi)
 
 
+def _derivar_nba(stats: dict) -> None:
+    """Anade a las stats del partido los COMBINADOS de NBA en el sitio.
+
+    Altenar publica props de "Puntos + Rebotes", "Puntos + Asistencias",
+    "Puntos + Rebotes + Asistencias" y dobles/triples-dobles. No se pueden
+    comparar contra un solo campo del boxscore: se calculan aqui una vez por
+    partido y service.py los lee igual que cualquier otra estadistica.
+
+    Solo se anade el combinado si EXISTEN todos sus componentes (si el
+    boxscore no trae asistencias, no se inventa un 0).
+    """
+    p = stats.get("points")
+    r = stats.get("totalRebounds")
+    a = stats.get("assists")
+    if p is not None and r is not None:
+        stats["points_rebounds"] = p + r
+    if p is not None and a is not None:
+        stats["points_assists"] = p + a
+    if r is not None and a is not None:
+        stats["rebounds_assists"] = r + a
+    if p is not None and r is not None and a is not None:
+        stats["points_rebounds_assists"] = p + r + a
+        dobles = sum(1 for v in (p, r, a) if v >= 10)
+        # Valor 0/1 para la linea 0.5 del bookmaker ("hace doble-doble").
+        stats["doubleDouble"] = 1 if dobles >= 2 else 0
+        stats["tripleDouble"] = 1 if dobles >= 3 else 0
+
+
 def _gamelog_espn(sport: str, league: str | None, player_id):
     """Todos los partidos del jugador segun ESPN, mas reciente primero."""
     ruta = _ruta_espn(sport, league)
@@ -260,6 +288,8 @@ def _gamelog_espn(sport: str, league: str | None, player_id):
                         valor = _num(valores[i])
                         if valor is not None:
                             stats[campo] = valor
+                if sport == "nba":
+                    _derivar_nba(stats)
                 info = meta.get(eid) or {}
                 oponente = info.get("opponent") or {}
                 salida.append({

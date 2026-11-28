@@ -115,6 +115,67 @@ class TestNba(unittest.TestCase):
         self.assertEqual(M.props_de_detalle("nba", det), [])
 
 
+class TestCombinadosNba(unittest.TestCase):
+    """Props combinados NBA: la linea se compara contra la SUMA del partido."""
+
+    def _nba(self, mercado, linea="29.5"):
+        return M.props_de_detalle("nba", _detalle((
+            mercado,
+            [(f"Bam Adebayo (MIA) Más De {linea}", 1.95, linea)],
+        )))
+
+    def test_puntos_rebotes(self):
+        filas = self._nba("Puntos + Rebotes Más de/Menos de")
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0]["prop"], "puntos_rebotes")
+
+    def test_puntos_asistencias(self):
+        filas = self._nba("Puntos + Asistencias Más de/Menos de")
+        self.assertEqual(filas[0]["prop"], "puntos_asistencias")
+
+    def test_rebotes_asistencias(self):
+        filas = self._nba("Rebotes + Asistencias Más de/Menos de")
+        self.assertEqual(filas[0]["prop"], "rebotes_asistencias")
+
+    def test_pra(self):
+        filas = self._nba("Puntos + Rebotes + Asistencias Más de/Menos de")
+        self.assertEqual(filas[0]["prop"], "puntos_rebotes_asistencias")
+
+    def test_dobles_dobles(self):
+        filas = self._nba("Dobles-dobles Más de/Menos de", linea="0.5")
+        self.assertEqual(filas[0]["prop"], "dobles_dobles")
+
+
+def _derivar(stats):
+    from backend.props import proveedores
+    proveedores._derivar_nba(stats)
+    return stats
+
+
+class TestCombinadosDerivados(unittest.TestCase):
+    """Los combinados se calculan del boxscore y no inventan datos."""
+
+    def test_suma_de_componentes(self):
+        stats = _derivar({"points": 20, "totalRebounds": 10, "assists": 5})
+        self.assertEqual(stats["points_rebounds"], 30)
+        self.assertEqual(stats["points_assists"], 25)
+        self.assertEqual(stats["rebounds_assists"], 15)
+        self.assertEqual(stats["points_rebounds_assists"], 35)
+        self.assertEqual(stats["doubleDouble"], 1)
+        self.assertEqual(stats["tripleDouble"], 0)
+
+    def test_triple_doble(self):
+        stats = _derivar({"points": 12, "totalRebounds": 11, "assists": 10})
+        self.assertEqual(stats["doubleDouble"], 1)
+        self.assertEqual(stats["tripleDouble"], 1)
+
+    def test_sin_asistencias_no_inventa_combinados(self):
+        stats = _derivar({"points": 20, "totalRebounds": 8})
+        self.assertEqual(stats["points_rebounds"], 28)
+        self.assertNotIn("points_assists", stats)
+        self.assertNotIn("doubleDouble", stats)
+
+
 class TestNfl(unittest.TestCase):
     def test_yardas_de_pase(self):
         det = _detalle((
