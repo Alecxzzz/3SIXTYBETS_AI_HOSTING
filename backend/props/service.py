@@ -105,6 +105,26 @@ def _wilson(cumple: int, total: int, z: float = 1.96):
     return max(0.0, min(1.0, (centro - margen) / denom))
 
 
+def _escudos_evento(evento):
+    """(local, escudo local, visitante, escudo visitante) del evento ESPN."""
+    home = (evento or {}).get("home") or {}
+    away = (evento or {}).get("away") or {}
+    return (home.get("name"), home.get("logo"),
+            away.get("name"), away.get("logo"))
+
+
+def _escudo_de_equipo(evento, abbr):
+    """Escudo del equipo del jugador (el book lo identifica por abreviatura)."""
+    codigo = str(abbr or "").upper().strip()
+    if not codigo:
+        return None
+    for lado in ("home", "away"):
+        team = (evento or {}).get(lado) or {}
+        if str(team.get("abbr") or "").upper() == codigo:
+            return team.get("logo")
+    return None
+
+
 def _fila(sport, prop, evento, historial, campo, n):
     """Fila final: la prop + su racha + cuota justa + edge (crudo y ajustado)."""
     detalle = _detalle(historial, campo, n)
@@ -123,6 +143,7 @@ def _fila(sport, prop, evento, historial, campo, n):
                      if pct_ajustado is not None and implicita is not None else None)
     # Cuota que DEBERIA pagar si el porcentaje real fuera su probabilidad.
     cuota_justa = round(100.0 / pct, 2) if pct else None
+    local, local_escudo, visita, visita_escudo = _escudos_evento(evento)
 
     return {
         "sport": sport,
@@ -153,6 +174,14 @@ def _fila(sport, prop, evento, historial, campo, n):
         "fecha_evento": evento.get("date"),
         "estado": "PENDIENTE",
         "fuente": "statsapi" if sport == "mlb" else "espn",
+        # Escudos: el del equipo del jugador y los de los dos equipos del
+        # partido, para que la vista no tenga que mostrar el nombre en ingles
+        # del evento ("X at Y") ni una liga mal etiquetada.
+        "equipo_logo": _escudo_de_equipo(evento, prop.get("equipo")),
+        "local": local,
+        "local_escudo": local_escudo,
+        "visita": visita,
+        "visita_escudo": visita_escudo,
     }
 
 

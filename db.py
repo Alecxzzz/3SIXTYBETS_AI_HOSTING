@@ -398,6 +398,11 @@ def init_db():
             player_name varchar(120) not null,
             player_team varchar(10) null,
             player_photo varchar(400) null,
+            player_team_logo varchar(400) null,
+            home_name varchar(120) null,
+            home_logo varchar(400) null,
+            away_name varchar(120) null,
+            away_logo varchar(400) null,
             prop varchar(40) not null,
             prop_raw varchar(120) null,
             side varchar(10) not null default 'over',
@@ -527,6 +532,12 @@ def init_db():
         ("valor_real", "decimal(8,2) null"),
         ("player_espn_id", "varchar(20) null"),
         ("league_code", "varchar(40) null"),
+        # Escudos del partido y del equipo del jugador (cabecera de grupo).
+        ("player_team_logo", "varchar(400) null"),
+        ("home_name", "varchar(120) null"),
+        ("home_logo", "varchar(400) null"),
+        ("away_name", "varchar(120) null"),
+        ("away_logo", "varchar(400) null"),
     ):
         existe = run_query(
             """
@@ -2520,9 +2531,10 @@ _COLS_PLAYER_PROPS = (
     "player_name, player_team, player_photo, prop, prop_raw, side, "
     "line_value, odds, implied, values_json, detalle_json, n_games, hits, pct, "
     "edge, estado, valor_real, player_espn_id, league_code, fuente, "
+    "player_team_logo, home_name, home_logo, away_name, away_logo, "
     "created_at, updated_at"
 )
-_N_COLS_PLAYER_PROPS = 29
+_N_COLS_PLAYER_PROPS = 34
 
 
 def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
@@ -2581,6 +2593,11 @@ def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
             (str(f.get("jugador_id"))[:20] if f.get("jugador_id") else None),
             (str(f.get("liga_code"))[:40] if f.get("liga_code") else None),
             (str(f.get("fuente"))[:20] if f.get("fuente") else None),
+            (str(f.get("equipo_logo"))[:400] if f.get("equipo_logo") else None),
+            (str(f.get("local"))[:120] if f.get("local") else None),
+            (str(f.get("local_escudo"))[:400] if f.get("local_escudo") else None),
+            (str(f.get("visita"))[:120] if f.get("visita") else None),
+            (str(f.get("visita_escudo"))[:400] if f.get("visita_escudo") else None),
             ahora,
             ahora,
         ))
@@ -2607,6 +2624,9 @@ def upsert_player_props(filas: list, fecha=None, reemplazar_sport=None) -> int:
               "hits=values(hits), pct=values(pct), edge=values(edge), "
               "player_photo=values(player_photo), player_team=values(player_team), "
               "event_date=values(event_date), prop_raw=values(prop_raw), "
+              "player_team_logo=values(player_team_logo), "
+              "home_name=values(home_name), home_logo=values(home_logo), "
+              "away_name=values(away_name), away_logo=values(away_logo), "
               "updated_at=values(updated_at)"
         )
         if run_query(sql, trozo_params):
@@ -2649,6 +2669,11 @@ def _public_player_prop(row: dict) -> dict:
         "jugador": row.get("player_name"),
         "equipo": row.get("player_team"),
         "foto": row.get("player_photo"),
+        "equipo_logo": row.get("player_team_logo"),
+        "local": row.get("home_name"),
+        "local_escudo": row.get("home_logo"),
+        "visita": row.get("away_name"),
+        "visita_escudo": row.get("away_logo"),
         "prop": row.get("prop"),
         "prop_raw": row.get("prop_raw"),
         "lado": row.get("side"),

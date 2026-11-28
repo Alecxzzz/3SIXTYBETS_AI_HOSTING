@@ -58,6 +58,37 @@ class TestCalculo(unittest.TestCase):
         self.assertEqual(fila["implicita"], 50.0)
         self.assertEqual(fila["edge"], -16.7)
 
+    def test_fila_copia_los_escudos_del_evento(self):
+        """Local/visitante y escudos salen del evento ESPN (no se inventan)."""
+        historial = _historial({"totalShots": 1})
+        prop = {
+            "jugador": "Brendan Aaronson", "equipo": "LEE",
+            "prop": "remates_puerta", "prop_raw": "Remates a Puerta",
+            "lado": "over", "linea": 0.5, "cuota": 1.45,
+        }
+        evento = {
+            "id": "401", "name": "Coventry City at Leeds United",
+            "league": "Premier League (Inglaterra)",
+            "date": "2026-11-28T20:00Z",
+            "home": {"id": "1", "name": "Leeds United", "abbr": "LEE",
+                     "logo": "https://a.espncdn.com/i/teamlogos/soccer/500/306.png"},
+            "away": {"id": "2", "name": "Coventry City", "abbr": "COV",
+                     "logo": "https://a.espncdn.com/i/teamlogos/soccer/500/388.png"},
+        }
+        fila = service._fila("soccer", prop, evento, historial, "totalShots", 5)
+        self.assertEqual(fila["equipo_logo"], evento["home"]["logo"])
+        self.assertEqual(fila["local"], "Leeds United")
+        self.assertEqual(fila["local_escudo"], evento["home"]["logo"])
+        self.assertEqual(fila["visita"], "Coventry City")
+        self.assertEqual(fila["visita_escudo"], evento["away"]["logo"])
+
+    def test_escudo_de_equipo_sin_match_no_inventa(self):
+        evento = {"home": {"abbr": "LEE", "logo": "x"},
+                  "away": {"abbr": "COV", "logo": "y"}}
+        self.assertIsNone(service._escudo_de_equipo(evento, "ZZZ"))
+        self.assertIsNone(service._escudo_de_equipo({}, "LEE"))
+        self.assertEqual(service._escudo_de_equipo(evento, "cov"), "y")
+
     def test_fila_sin_datos_no_inventa(self):
         historial = {"encontrado": True, "partidos": [{"fecha": "2026-10-01", "stats": {}}]}
         prop = {
@@ -212,6 +243,21 @@ class TestPersistencia(unittest.TestCase):
         }
         base.update(extra)
         return base
+
+    def test_publica_expone_escudos(self):
+        """Las columnas nuevas del snapshot llegan al JSON de la pagina."""
+        fila = db._public_player_prop({
+            "id": "1", "sport": "soccer", "player_name": "X",
+            "prop": "remates", "side": "over", "line_value": 0.5,
+            "player_team_logo": "escudo-jugador",
+            "home_name": "Leeds United", "home_logo": "escudo-local",
+            "away_name": "Coventry City", "away_logo": "escudo-visita",
+        })
+        self.assertEqual(fila["equipo_logo"], "escudo-jugador")
+        self.assertEqual(fila["local"], "Leeds United")
+        self.assertEqual(fila["local_escudo"], "escudo-local")
+        self.assertEqual(fila["visita"], "Coventry City")
+        self.assertEqual(fila["visita_escudo"], "escudo-visita")
 
     def test_insert_masivo_bien_formado(self):
         capturado = {}
